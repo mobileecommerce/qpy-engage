@@ -2,12 +2,12 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://mobileecommerce.github.io/wavely-whatsapp-automation/"),
-  title: "Wavely — AI that turns chats into customers",
-  description: "A unified WhatsApp automation workspace for smarter conversations, faster support, and measurable growth.",
-  icons: { icon: "/favicon.svg", shortcut: "/favicon.svg" },
-  openGraph: { title: "Wavely — Your AI teammate for WhatsApp", description: "Connect, train, automate, and grow from one calm workspace.", images: ["/wavely-whatsapp-automation/og.png"] },
-  twitter: { card: "summary_large_image", title: "Wavely — Your AI teammate for WhatsApp", description: "Connect, train, automate, and grow from one calm workspace.", images: ["/wavely-whatsapp-automation/og.png"] },
+  metadataBase: new URL("https://mobileecommerce.github.io/qpy-engage/"),
+  title: "Qpy Engage — AI that turns chats into customers",
+  description: "A unified customer engagement workspace for AI conversations, campaigns, automation, support, and measurable growth.",
+  icons: { icon: "https://mobileecommerce.github.io/qpy-engage/favicon.svg", shortcut: "https://mobileecommerce.github.io/qpy-engage/favicon.svg" },
+  openGraph: { title: "Qpy Engage — AI conversations that drive growth", description: "Connect, train, automate, campaign, and grow from one intelligent engagement workspace.", images: ["/qpy-engage/og.png"] },
+  twitter: { card: "summary_large_image", title: "Qpy Engage — AI conversations that drive growth", description: "Connect, train, automate, campaign, and grow from one intelligent engagement workspace.", images: ["/qpy-engage/og.png"] },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
