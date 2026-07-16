@@ -1,14 +1,15 @@
 import type { NextConfig } from "next";
 
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+const isPagesBuild = Boolean(basePath);
 
 const nextConfig: NextConfig = {
-  output: "export",
+  output: isPagesBuild ? "export" : undefined,
   basePath,
   assetPrefix: basePath || undefined,
-  trailingSlash: true,
+  trailingSlash: isPagesBuild,
   images: { unoptimized: true },
-  typescript: { ignoreBuildErrors: true },
+  typescript: { ignoreBuildErrors: isPagesBuild },
 };
 
 export default nextConfig;

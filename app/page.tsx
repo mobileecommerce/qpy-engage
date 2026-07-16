@@ -1,101 +1,177 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-const conversations = [
-  { initials: "AD", name: "Aisha D.", preview: "Perfect, I’ll take the blue one", time: "2m", unread: 2, tone: "lavender" },
-  { initials: "JM", name: "Jonas Müller", preview: "Is shipping available to Berlin?", time: "8m", unread: 1, tone: "blue" },
-  { initials: "SK", name: "Sofia Khan", preview: "Thanks for the quick help!", time: "24m", unread: 0, tone: "peach" },
-  { initials: "RM", name: "Ravi Mehta", preview: "Can I change my delivery address?", time: "1h", unread: 0, tone: "green" },
+type Section = "Overview" | "Channels" | "Inbox" | "Automations" | "Knowledge" | "Analytics" | "Team" | "Settings";
+type Message = { from: "customer" | "ai" | "agent"; text: string; time: string };
+type Conversation = { id: string; initials: string; name: string; preview: string; time: string; unread: number; tone: string; status: "open" | "resolved"; email: string; phone: string; tags: string[] };
+type Automation = { id: number; title: string; trigger: string; action: string; runs: number; rate: string; active: boolean };
+type Source = { id: number; name: string; type: "Website" | "Document" | "FAQ"; pages: number; status: "Ready" | "Syncing" };
+type Member = { id: number; name: string; email: string; role: "Owner" | "Admin" | "Agent" | "Analyst"; status: "Active" | "Invited" };
+
+const initialConversations: Conversation[] = [
+  { id:"aisha", initials:"AD", name:"Aisha D.", preview:"Perfect, I’ll take the blue one", time:"2m", unread:2, tone:"lavender", status:"open", email:"aisha@example.com", phone:"+971 50 302 1188", tags:["VIP","Sales"] },
+  { id:"jonas", initials:"JM", name:"Jonas Müller", preview:"Is shipping available to Berlin?", time:"8m", unread:1, tone:"blue", status:"open", email:"jonas@example.com", phone:"+49 176 829 3021", tags:["Shipping"] },
+  { id:"sofia", initials:"SK", name:"Sofia Khan", preview:"Thanks for the quick help!", time:"24m", unread:0, tone:"peach", status:"resolved", email:"sofia@example.com", phone:"+971 55 210 8741", tags:["Support"] },
+  { id:"ravi", initials:"RM", name:"Ravi Mehta", preview:"Can I change my delivery address?", time:"1h", unread:0, tone:"green", status:"open", email:"ravi@example.com", phone:"+91 98 2210 4467", tags:["Orders"] },
+  { id:"emma", initials:"EW", name:"Emma Wilson", preview:"Do you have this in ivory?", time:"3h", unread:0, tone:"lavender", status:"open", email:"emma@example.com", phone:"+44 7700 914 552", tags:["Sales"] },
 ];
 
-const nav = [
-  ["⌂", "Overview"], ["◉", "Inbox", "7"], ["✦", "Automations"], ["◇", "Knowledge"], ["▥", "Analytics"],
+const initialMessages: Record<string, Message[]> = {
+  aisha: [
+    { from:"customer", text:"Hi! I saw the Riviera linen shirt on your website. Is the ocean blue color available in medium?", time:"10:34" },
+    { from:"ai", text:"Hi Aisha! Yes — the Riviera Linen Shirt in Ocean Blue is available in Medium. We currently have 6 left. Would you like me to reserve one?", time:"10:34" },
+    { from:"customer", text:"Perfect, I’ll take the blue one 💙", time:"10:36" },
+    { from:"ai", text:"Lovely choice! I’ve added it to your cart and sent a secure checkout link. Your order qualifies for free delivery.", time:"10:36" },
+  ],
+  jonas:[{from:"customer",text:"Is shipping available to Berlin?",time:"10:28"},{from:"ai",text:"Yes, we deliver to Berlin in 3–5 business days. Delivery is free above €80.",time:"10:28"}],
+  sofia:[{from:"customer",text:"Thanks for the quick help!",time:"10:12"},{from:"agent",text:"You’re welcome, Sofia. Have a lovely day!",time:"10:13"}],
+  ravi:[{from:"customer",text:"Can I change my delivery address?",time:"09:44"},{from:"ai",text:"Of course. Please share your order number and the new address.",time:"09:44"}],
+  emma:[{from:"customer",text:"Do you have this in ivory?",time:"08:20"}],
+};
+
+const initialAutomations: Automation[] = [
+  {id:1,title:"Product advisor",trigger:"Product question",action:"Recommend catalog items",runs:418,rate:"81% resolved",active:true},
+  {id:2,title:"Order updates",trigger:"Order status request",action:"Fetch delivery status",runs:292,rate:"94% resolved",active:true},
+  {id:3,title:"Abandoned cart",trigger:"Cart idle for 2 hours",action:"Send recovery message",runs:186,rate:"$4.2k revenue",active:true},
+  {id:4,title:"Human handoff",trigger:"Low AI confidence",action:"Assign to support team",runs:64,rate:"2m response",active:true},
 ];
+
+const initialSources: Source[] = [
+  {id:1,name:"atelierhome.com",type:"Website",pages:12340,status:"Ready"},
+  {id:2,name:"Product catalog 2026.pdf",type:"Document",pages:84,status:"Ready"},
+  {id:3,name:"Shipping & returns.pdf",type:"Document",pages:12,status:"Ready"},
+  {id:4,name:"Customer FAQs",type:"FAQ",pages:46,status:"Ready"},
+];
+
+const initialMembers: Member[] = [
+  {id:1,name:"Praveen Madipoju",email:"praveen@atelier.co",role:"Owner",status:"Active"},
+  {id:2,name:"Maya Chen",email:"maya@atelier.co",role:"Admin",status:"Active"},
+  {id:3,name:"Omar Hassan",email:"omar@atelier.co",role:"Agent",status:"Active"},
+  {id:4,name:"Lea Martin",email:"lea@atelier.co",role:"Analyst",status:"Invited"},
+];
+
+const nav: [string, Section, string?][] = [["⌂","Overview"],["◫","Channels"],["◉","Inbox","7"],["✦","Automations"],["◇","Knowledge"],["▥","Analytics"]];
+
+function useStoredState<T>(key: string, initial: T) {
+  const [value, setValue] = useState<T>(initial);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => { try { const saved = localStorage.getItem(key); if (saved) setValue(JSON.parse(saved)); } catch {} setLoaded(true); }, [key]);
+  useEffect(() => { if (loaded) localStorage.setItem(key, JSON.stringify(value)); }, [key, loaded, value]);
+  return [value, setValue] as const;
+}
 
 export default function Home() {
-  const [section, setSection] = useState("Overview");
-  const [selected, setSelected] = useState(0);
-  const [messages, setMessages] = useState([
-    { from: "customer", text: "Hi! I saw the Riviera linen shirt on your website. Is the ocean blue color available in medium?", time: "10:34" },
-    { from: "ai", text: "Hi Aisha! Yes — the Riviera Linen Shirt in Ocean Blue is available in Medium. We currently have 6 left in stock. Would you like me to reserve one for your cart?", time: "10:34" },
-    { from: "customer", text: "Perfect, I’ll take the blue one 💙", time: "10:36" },
-    { from: "ai", text: "Lovely choice! I’ve added it to your cart and sent a secure checkout link. Your order qualifies for free delivery.", time: "10:36" },
-  ]);
+  const [section, setSection] = useState<Section>("Overview");
+  const [conversations, setConversations] = useStoredState("wavely-conversations", initialConversations);
+  const [messages, setMessages] = useStoredState("wavely-messages", initialMessages);
+  const [automations, setAutomations] = useStoredState("wavely-automations", initialAutomations);
+  const [sources, setSources] = useStoredState("wavely-sources", initialSources);
+  const [members, setMembers] = useStoredState("wavely-members", initialMembers);
+  const [selectedId, setSelectedId] = useState("aisha");
   const [draft, setDraft] = useState("");
   const [aiActive, setAiActive] = useState(true);
   const [toast, setToast] = useState("");
+  const [modal, setModal] = useState<null | "automation" | "source" | "invite" | "search" | "help">(null);
+  const [channelStep, setChannelStep] = useStoredState("wavely-channel-step", 0);
+  const [connected, setConnected] = useStoredState("wavely-whatsapp-connected", false);
+  const [settingsTab, setSettingsTab] = useState("General");
 
-  function notify(text: string) {
-    setToast(text);
-    window.setTimeout(() => setToast(""), 2200);
-  }
+  const selected = conversations.find(c => c.id === selectedId) ?? conversations[0];
+  const notify = (text: string) => { setToast(text); window.setTimeout(() => setToast(""), 2200); };
+  const go = (next: Section) => { setSection(next); window.scrollTo({top:0,behavior:"smooth"}); };
+  const sendMessage = () => { if (!draft.trim()) return; setMessages({...messages,[selected.id]:[...(messages[selected.id]??[]),{from:"agent",text:draft.trim(),time:"Now"}]}); setDraft(""); };
+  const openAutomation = () => setModal("automation");
 
-  function sendMessage() {
-    if (!draft.trim()) return;
-    setMessages([...messages, { from: "agent", text: draft.trim(), time: "Now" }]);
-    setDraft("");
-  }
+  const body = section === "Overview" ? <Overview onNavigate={go} onCreate={openAutomation} connected={connected}/> :
+    section === "Channels" ? <Channels step={channelStep} setStep={setChannelStep} connected={connected} setConnected={setConnected} notify={notify}/> :
+    section === "Inbox" ? <Inbox conversations={conversations} setConversations={setConversations} selected={selected} setSelectedId={setSelectedId} messages={messages[selected.id]??[]} draft={draft} setDraft={setDraft} sendMessage={sendMessage} aiActive={aiActive} setAiActive={setAiActive} notify={notify}/> :
+    section === "Automations" ? <Automations items={automations} setItems={setAutomations} onCreate={openAutomation} notify={notify}/> :
+    section === "Knowledge" ? <Knowledge sources={sources} setSources={setSources} onAdd={()=>setModal("source")} notify={notify}/> :
+    section === "Analytics" ? <Analytics automations={automations} notify={notify}/> :
+    section === "Team" ? <Team members={members} setMembers={setMembers} onInvite={()=>setModal("invite")} notify={notify}/> :
+    <Settings activeTab={settingsTab} setActiveTab={setSettingsTab} connected={connected} onChannels={()=>go("Channels")} notify={notify}/>;
 
-  return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand"><span className="brand-mark">w</span><span>wavely</span></div>
-        <div className="workspace"><span className="shop-avatar">A</span><div><strong>Atelier Home</strong><small>Business workspace</small></div><span className="chev">⌄</span></div>
-        <nav className="side-nav" aria-label="Main navigation">
-          {nav.map(([icon, label, count]) => <button key={label} onClick={() => setSection(label)} className={section === label ? "active" : ""}><span>{icon}</span>{label}{count && <b>{count}</b>}</button>)}
-        </nav>
-        <div className="nav-divider" />
-        <nav className="side-nav secondary"><button onClick={() => notify("Team settings opened")}><span>♙</span>Team</button><button onClick={() => notify("Settings opened")}><span>⚙</span>Settings</button></nav>
-        <div className="sidebar-card"><span className="spark">✦</span><strong>Grow with Wavely</strong><p>Unlock more conversations and advanced AI.</p><button onClick={() => notify("Upgrade options opened")}>Explore plans</button></div>
-        <div className="profile"><span className="profile-avatar">PM</span><div><strong>Praveen M.</strong><small>praveen@atelier.co</small></div><button aria-label="Profile menu">•••</button></div>
-      </aside>
-
-      <section className="main-area">
-        <header className="topbar"><button className="mobile-brand" onClick={() => setSection("Overview")}><span className="brand-mark">w</span>wavely</button><div className="top-title"><strong>{section}</strong><span>•</span><small>All systems running smoothly</small></div><div className="top-actions"><button aria-label="Search">⌕</button><button aria-label="Notifications" className="notification">♧<i /></button><button className="help" onClick={() => notify("Help center opened")}>?</button></div></header>
-
-        <div className="content">
-          <div className="welcome-row"><div><p className="eyebrow">FRIDAY, JULY 17</p><h1>Good morning, Praveen <span>👋</span></h1><p>Here’s what’s happening with Atelier Home today.</p></div><button className="primary" onClick={() => notify("New automation created")}>＋ Create automation</button></div>
-
-          <section className="setup-card">
-            <div className="setup-head"><div><span className="setup-icon">✦</span><div><h2>Set up your AI teammate</h2><p>Three quick steps to start turning conversations into customers.</p></div></div><div className="progress-label"><strong>2 of 3 complete</strong><div><i /></div></div></div>
-            <div className="steps">
-              <button className="step complete" onClick={() => notify("WhatsApp is connected")}><span>✓</span><div><strong>Connect WhatsApp Business</strong><small>+971 50 284 8102 connected</small></div><b>Connected</b></button>
-              <button className="step complete" onClick={() => notify("Knowledge sources opened")}><span>✓</span><div><strong>Train your AI</strong><small>Website + 4 documents added</small></div><b>12.4k pages</b></button>
-              <button className="step current" onClick={() => notify("Opening assistant setup")}><span>3</span><div><strong>Personalize your assistant</strong><small>Set its tone, goals, and guardrails</small></div><b>Continue →</b></button>
-            </div>
-          </section>
-
-          <section className="metrics-grid">
-            <article><div className="metric-label"><span className="metric-icon green">↗</span><p>Conversations</p><button>•••</button></div><div className="metric-value"><strong>1,284</strong><span className="up">↗ 12.5%</span></div><small>vs. last 30 days</small><div className="sparkline green-line"><i/><i/><i/><i/><i/><i/><i/></div></article>
-            <article><div className="metric-label"><span className="metric-icon purple">✦</span><p>AI resolution rate</p><button>•••</button></div><div className="metric-value"><strong>74.2%</strong><span className="up">↗ 8.1%</span></div><small>952 handled by AI</small><div className="donut"><b>74%</b></div></article>
-            <article><div className="metric-label"><span className="metric-icon coral">⌁</span><p>Avg. response time</p><button>•••</button></div><div className="metric-value"><strong>8s</strong><span className="up">↓ 3s</span></div><small>AI + team average</small><div className="bars"><i/><i/><i/><i/><i/><i/><i/><i/></div></article>
-            <article><div className="metric-label"><span className="metric-icon blue">◈</span><p>Revenue assisted</p><button>•••</button></div><div className="metric-value"><strong>$18.6k</strong><span className="up">↗ 21.4%</span></div><small>142 attributed orders</small><div className="sparkline blue-line"><i/><i/><i/><i/><i/><i/><i/></div></article>
-          </section>
-
-          <section className="workspace-grid">
-            <article className="inbox-panel">
-              <div className="panel-head"><div><h2>Live conversations</h2><span>7 waiting</span></div><button onClick={() => setSection("Inbox")}>Open inbox ↗</button></div>
-              <div className="conversation-list">
-                {conversations.map((c, i) => <button key={c.name} onClick={() => setSelected(i)} className={selected === i ? "selected" : ""}><span className={`contact-avatar ${c.tone}`}>{c.initials}<i /></span><div><strong>{c.name}</strong><small>{c.preview}</small></div><span className="conv-meta"><small>{c.time}</small>{c.unread > 0 && <b>{c.unread}</b>}</span></button>)}
-              </div>
-            </article>
-
-            <article className="chat-panel">
-              <div className="chat-head"><div className="chat-person"><span className="contact-avatar lavender">AD<i /></span><div><strong>Aisha D.</strong><small>WhatsApp • Online</small></div></div><div className="ai-state"><span className={aiActive ? "pulse" : "pulse off"}>✦</span><div><strong>{aiActive ? "AI is handling" : "You’re handling"}</strong><small>{aiActive ? "Confident response" : "Manual takeover"}</small></div><button onClick={() => setAiActive(!aiActive)}>{aiActive ? "Take over" : "Hand to AI"}</button></div></div>
-              <div className="chat-body"><div className="today">Today</div>{messages.map((m, i) => <div key={i} className={`message ${m.from}`}><p>{m.text}</p><small>{m.from === "ai" && "✦ AI • "}{m.from === "agent" && "You • "}{m.time} {m.from !== "customer" && "✓✓"}</small></div>)}</div>
-              <div className="composer"><div className="suggestion"><span>✦</span><p><strong>Suggested reply</strong> Ask if they’d like matching linen trousers</p><button onClick={() => setDraft("Would you like me to show you the matching Riviera linen trousers too?")}>Use</button></div><div className="input-row"><button aria-label="Add attachment">＋</button><input value={draft} onChange={e => setDraft(e.target.value)} onKeyDown={e => e.key === "Enter" && sendMessage()} placeholder="Type a message…"/><button aria-label="Emoji">☺</button><button className="send" onClick={sendMessage}>➤</button></div></div>
-            </article>
-          </section>
-
-          <section className="automation-section"><div className="section-head"><div><h2>Your automations</h2><p>Always-on workflows that keep your business moving.</p></div><button onClick={() => setSection("Automations")}>View all automations</button></div><div className="automation-grid">
-            {[{icon:"✦",tone:"violet",title:"Product advisor",desc:"Recommends products from your catalog",stat:"418 runs",rate:"81% resolved"},{icon:"▣",tone:"blue",title:"Order updates",desc:"Tracks and shares delivery status",stat:"292 runs",rate:"94% resolved"},{icon:"♡",tone:"coral",title:"Abandoned cart",desc:"Re-engages customers after 2 hours",stat:"86 recovered",rate:"$4.2k revenue"}].map((a,i)=><article key={a.title}><div className="automation-top"><span className={`automation-icon ${a.tone}`}>{a.icon}</span><label><input type="checkbox" defaultChecked/><i /></label></div><h3>{a.title}</h3><p>{a.desc}</p><div><span>{a.stat}</span><strong>{a.rate}</strong></div></article>)}
-            <button className="new-automation" onClick={() => notify("Automation builder opened")}><span>＋</span><strong>Create automation</strong><small>Build from scratch or use a template</small></button>
-          </div></section>
-        </div>
-      </section>
-      <nav className="mobile-nav" aria-label="Mobile navigation">{nav.slice(0,5).map(([icon,label])=><button key={label} onClick={()=>setSection(label)} className={section===label?"active":""}><span>{icon}</span><small>{label}</small></button>)}</nav>
-      {toast && <div className="toast">✓ {toast}</div>}
-    </main>
-  );
+  return <main className="app-shell">
+    <aside className="sidebar">
+      <button className="brand" onClick={()=>go("Overview")}><span className="brand-mark">w</span><span>wavely</span></button>
+      <div className="workspace"><span className="shop-avatar">A</span><div><strong>Atelier Home</strong><small>Business workspace</small></div><span className="chev">⌄</span></div>
+      <nav className="side-nav" aria-label="Main navigation">{nav.map(([icon,label,count])=><button key={label} onClick={()=>go(label)} className={section===label?"active":""}><span>{icon}</span>{label}{count&&<b>{count}</b>}</button>)}</nav>
+      <div className="nav-divider"/>
+      <nav className="side-nav secondary"><button className={section==="Team"?"active":""} onClick={()=>go("Team")}><span>♙</span>Team</button><button className={section==="Settings"?"active":""} onClick={()=>go("Settings")}><span>⚙</span>Settings</button></nav>
+      <div className="sidebar-card"><span className="spark">✦</span><strong>Grow with Wavely</strong><p>Unlock more conversations and advanced AI.</p><button onClick={()=>{go("Settings");setSettingsTab("Billing")}}>Explore plans</button></div>
+      <div className="profile"><span className="profile-avatar">PM</span><div><strong>Praveen M.</strong><small>praveen@atelier.co</small></div><button aria-label="Profile menu">•••</button></div>
+    </aside>
+    <section className="main-area">
+      <header className="topbar"><button className="mobile-brand" onClick={()=>go("Overview")}><span className="brand-mark">w</span>wavely</button><div className="top-title"><strong>{section}</strong><span>•</span><small>{connected?"WhatsApp connected":"Finish WhatsApp setup"}</small></div><div className="top-actions"><button aria-label="Search" onClick={()=>setModal("search")}>⌕</button><button aria-label="Notifications" className="notification" onClick={()=>notify("You’re all caught up")}>♧<i/></button><button className="help" onClick={()=>setModal("help")}>?</button></div></header>
+      <div className="content">{body}</div>
+    </section>
+    <nav className="mobile-nav" aria-label="Mobile navigation">{nav.slice(0,5).map(([icon,label])=><button key={label} onClick={()=>go(label)} className={section===label?"active":""}><span>{icon}</span><small>{label}</small></button>)}</nav>
+    {modal==="automation"&&<AutomationModal onClose={()=>setModal(null)} onSave={(item)=>{setAutomations([...automations,item]);setModal(null);notify("Automation created")}}/>}
+    {modal==="source"&&<SourceModal onClose={()=>setModal(null)} onSave={(item)=>{setSources([...sources,item]);setModal(null);notify("Knowledge source added")}}/>}
+    {modal==="invite"&&<InviteModal onClose={()=>setModal(null)} onSave={(item)=>{setMembers([...members,item]);setModal(null);notify("Invitation sent")}}/>}
+    {modal==="search"&&<SearchModal onClose={()=>setModal(null)} onNavigate={(s)=>{go(s);setModal(null)}}/>}
+    {modal==="help"&&<SimpleModal title="Wavely help" onClose={()=>setModal(null)}><p>Search the knowledge base, learn how WhatsApp onboarding works, or contact support.</p><div className="modal-actions"><button className="secondary-btn" onClick={()=>setModal(null)}>Close</button><button className="primary" onClick={()=>{setModal(null);go("Channels")}}>Open setup guide</button></div></SimpleModal>}
+    {toast&&<div className="toast">✓ {toast}</div>}
+  </main>;
 }
+
+function PageHeader({eyebrow,title,description,action}:{eyebrow?:string;title:string;description:string;action?:React.ReactNode}){return <div className="page-header"><div>{eyebrow&&<p className="eyebrow">{eyebrow}</p>}<h1>{title}</h1><p>{description}</p></div>{action}</div>}
+
+function Overview({onNavigate,onCreate,connected}:{onNavigate:(s:Section)=>void;onCreate:()=>void;connected:boolean}){return <>
+  <PageHeader eyebrow="FRIDAY, JULY 17" title="Good morning, Praveen 👋" description="Here’s what’s happening with Atelier Home today." action={<button className="primary" onClick={onCreate}>＋ Create automation</button>}/>
+  <section className="setup-card"><div className="setup-head"><div><span className="setup-icon">✦</span><div><h2>{connected?"Your AI teammate is live":"Set up your AI teammate"}</h2><p>{connected?"WhatsApp and your knowledge sources are ready.":"Three quick steps to start turning conversations into customers."}</p></div></div><div className="progress-label"><strong>{connected?"3 of 3 complete":"2 of 3 complete"}</strong><div><i style={{width:connected?"100%":"67%"}}/></div></div></div><div className="steps">
+    <button className={`step ${connected?"complete":"current"}`} onClick={()=>onNavigate("Channels")}><span>{connected?"✓":"1"}</span><div><strong>Connect WhatsApp Business</strong><small>{connected?"+971 50 284 8102 connected":"Connect securely through Meta"}</small></div><b>{connected?"Connected":"Start →"}</b></button>
+    <button className="step complete" onClick={()=>onNavigate("Knowledge")}><span>✓</span><div><strong>Train your AI</strong><small>Website + 4 documents added</small></div><b>12.4k pages</b></button>
+    <button className="step complete" onClick={()=>onNavigate("Settings")}><span>✓</span><div><strong>Personalize your assistant</strong><small>Warm, concise, product-focused</small></div><b>Edit</b></button>
+  </div></section>
+  <MetricCards/>
+  <section className="overview-panels"><div className="card"><div className="card-head"><div><h2>Live conversations</h2><p>7 customers waiting now</p></div><button onClick={()=>onNavigate("Inbox")}>Open inbox →</button></div>{initialConversations.slice(0,4).map(c=><div className="mini-row" key={c.id}><span className={`contact-avatar ${c.tone}`}>{c.initials}<i/></span><div><strong>{c.name}</strong><small>{c.preview}</small></div><time>{c.time}</time></div>)}</div><div className="card"><div className="card-head"><div><h2>Automation health</h2><p>All active workflows</p></div><button onClick={()=>onNavigate("Automations")}>Manage →</button></div>{initialAutomations.map(a=><div className="health-row" key={a.id}><span>✦</span><div><strong>{a.title}</strong><small>{a.runs} runs this month</small></div><b>{a.rate}</b></div>)}</div></section>
+</>}
+
+function MetricCards(){return <section className="metrics-grid">{[["↗","Conversations","1,284","12.5%","green"],["✦","AI resolution rate","74.2%","8.1%","purple"],["⌁","Avg. response time","8s","3s faster","coral"],["◈","Revenue assisted","$18.6k","21.4%","blue"]].map(([icon,label,value,change,tone])=><article key={label}><div className="metric-label"><span className={`metric-icon ${tone}`}>{icon}</span><p>{label}</p><button>•••</button></div><div className="metric-value"><strong>{value}</strong><span className="up">↗ {change}</span></div><small>vs. last 30 days</small><div className="mini-chart">▂▃▂▅▄▇▆</div></article>)}</section>}
+
+function Channels({step,setStep,connected,setConnected,notify}:{step:number;setStep:(n:number)=>void;connected:boolean;setConnected:(v:boolean)=>void;notify:(s:string)=>void}){
+  const labels=["Requirements","Facebook","Credentials","Strategy","Testing","All done"];
+  const [checked,setChecked]=useState([true,true,false,false]);
+  const [form,setForm]=useState({business:"Atelier Home",number:"+971 50 284 8102",phoneId:"114829302184",token:""});
+  const [test,setTest]=useState("+971 50 123 4567");
+  const next=()=>setStep(Math.min(5,step+1));
+  return <><PageHeader title="Channels" description="Connect and manage your customer messaging channels." action={connected?<span className="status-pill ready">● WhatsApp live</span>:undefined}/><div className="channel-layout"><aside className="channel-list"><h3>Messaging channels</h3><button className="selected"><span className="wa-logo">◉</span><div><strong>WhatsApp</strong><small>Official Cloud API channel</small></div></button><button><span className="web-logo">◌</span><div><strong>Web chat</strong><small>Website messaging widget</small></div></button></aside><section className="channel-workspace"><div className="wizard-rail">{labels.map((label,i)=><button key={label} onClick={()=>i<=step&&setStep(i)} className={i<step?"done":i===step?"active":""}><span>{i<step?"✓":i+1}</span><div><strong>{label}</strong><small>{i<step?"Completed":i===step?"Current step":"Not started"}</small></div></button>)}</div><div className="wizard-panel">
+    {step===0&&<><WizardTitle n="01" title="WhatsApp Cloud API requirements" text="Make sure these items are ready before connecting through Meta."/><div className="requirements">{["Facebook login on your regular computer","Your business website URL","A phone number that can receive an OTP","Meta payment method for outbound templates (optional)"].map((x,i)=><label key={x}><input type="checkbox" checked={checked[i]} onChange={()=>setChecked(checked.map((v,j)=>j===i?!v:v))}/><span>{x}</span>{i<3&&<b>Required</b>}</label>)}</div><div className="wizard-actions"><span>Demo mode — credentials stay on this device.</span><button className="primary" disabled={!checked.slice(0,3).every(Boolean)} onClick={next}>Proceed to connect →</button></div></>}
+    {step===1&&<><WizardTitle n="02" title="Connect with Facebook" text="Authorize Wavely to access your Meta Business portfolio and WhatsApp account."/><div className="facebook-connect"><span className="fb-mark">f</span><h3>Continue with Facebook</h3><p>You’ll choose a Meta Business account, WhatsApp Business account, and phone number in the secure authorization window.</p><ul><li>Read business account information</li><li>Manage WhatsApp phone numbers</li><li>Send and receive messages</li></ul><button className="facebook-btn" onClick={()=>{notify("Facebook authorization completed");next()}}>Continue with Facebook</button><small>Wavely never receives your Facebook password.</small></div></>}
+    {step===2&&<><WizardTitle n="03" title="Confirm Meta credentials" text="Review the assets selected during authorization or enter them manually."/><div className="form-grid"><label>Business portfolio<input value={form.business} onChange={e=>setForm({...form,business:e.target.value})}/></label><label>WhatsApp phone number<input value={form.number} onChange={e=>setForm({...form,number:e.target.value})}/></label><label>Phone number ID<input value={form.phoneId} onChange={e=>setForm({...form,phoneId:e.target.value})}/></label><label>Permanent access token<input type="password" placeholder="Paste Meta system-user token" value={form.token} onChange={e=>setForm({...form,token:e.target.value})}/></label></div><div className="info-banner">ⓘ In this hosted prototype, connection details are stored only in your browser. A production integration exchanges and encrypts tokens on a secure server.</div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(1)}>Back</button><button className="primary" onClick={next}>Save credentials →</button></div></>}
+    {step===3&&<><WizardTitle n="04" title="Choose conversation routing" text="Decide how new WhatsApp conversations are assigned."/><div className="strategy-grid">{[["AI first","Wavely answers instantly and hands off when confidence is low."],["Round robin","New conversations rotate evenly across online agents."],["Least busy","Assign to the agent with the fewest active conversations."]].map((x,i)=><label className={i===0?"selected":""} key={x[0]}><input type="radio" name="strategy" defaultChecked={i===0}/><span>✦</span><div><strong>{x[0]}</strong><p>{x[1]}</p></div></label>)}</div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(2)}>Back</button><button className="primary" onClick={next}>Save strategy →</button></div></>}
+    {step===4&&<><WizardTitle n="05" title="Send a test message" text="Confirm that inbound and outbound WhatsApp messaging works."/><div className="test-card"><div className="test-phone"><span>WA</span><div><strong>Atelier Home</strong><small>Connected through WhatsApp Cloud API</small></div></div><label>Test recipient<input value={test} onChange={e=>setTest(e.target.value)}/></label><div className="test-message">Hello from Atelier Home! Your Wavely WhatsApp channel is ready. 🎉</div><button className="primary" onClick={()=>{notify("Test message delivered");next()}}>Send test message</button></div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(3)}>Back</button><span>Message status will appear here after delivery.</span></div></>}
+    {step===5&&<div className="success-state"><span>✓</span><h2>WhatsApp is ready</h2><p>Your phone number is connected, routing is configured, and the test message was delivered.</p><div><strong>+971 50 284 8102</strong><small>WhatsApp Business • Atelier Home</small></div><button className="primary" onClick={()=>{setConnected(true);notify("WhatsApp channel activated")}}>Activate channel</button>{connected&&<button className="danger-link" onClick={()=>{setConnected(false);setStep(0)}}>Disconnect and restart</button>}</div>}
+  </div></section></div></>;
+}
+
+function WizardTitle({n,title,text}:{n:string;title:string;text:string}){return <div className="wizard-title"><span>{n}</span><div><h2>{title}</h2><p>{text}</p></div></div>}
+
+function Inbox({conversations,setConversations,selected,setSelectedId,messages,draft,setDraft,sendMessage,aiActive,setAiActive,notify}:{conversations:Conversation[];setConversations:(v:Conversation[])=>void;selected:Conversation;setSelectedId:(s:string)=>void;messages:Message[];draft:string;setDraft:(s:string)=>void;sendMessage:()=>void;aiActive:boolean;setAiActive:(v:boolean)=>void;notify:(s:string)=>void}){
+  const [query,setQuery]=useState(""); const [filter,setFilter]=useState("All");
+  const visible=conversations.filter(c=>(filter==="All"||c.status===filter.toLowerCase())&&`${c.name} ${c.preview}`.toLowerCase().includes(query.toLowerCase()));
+  const resolve=()=>{setConversations(conversations.map(c=>c.id===selected.id?{...c,status:c.status==="open"?"resolved":"open"}:c));notify(selected.status==="open"?"Conversation resolved":"Conversation reopened")};
+  return <><PageHeader title="Unified inbox" description="Manage every customer conversation from one place." action={<div className="header-buttons"><button className="secondary-btn" onClick={()=>notify("Inbox refreshed")}>↻ Refresh</button><button className="primary" onClick={resolve}>{selected.status==="open"?"✓ Resolve":"Reopen"}</button></div>}/><div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><input placeholder="Search conversations" value={query} onChange={e=>setQuery(e.target.value)}/><div>{["All","Open","Resolved"].map(x=><button className={filter===x?"active":""} onClick={()=>setFilter(x)} key={x}>{x}</button>)}</div></div><div className="conversation-list">{visible.map(c=><button key={c.id} className={selected.id===c.id?"selected":""} onClick={()=>setSelectedId(c.id)}><span className={`contact-avatar ${c.tone}`}>{c.initials}<i/></span><div><strong>{c.name}</strong><small>{c.preview}</small></div><span className="conv-meta"><small>{c.time}</small>{c.unread>0&&<b>{c.unread}</b>}</span></button>)}</div></aside><section className="chat-panel"><div className="chat-head"><div className="chat-person"><span className={`contact-avatar ${selected.tone}`}>{selected.initials}<i/></span><div><strong>{selected.name}</strong><small>WhatsApp • Online</small></div></div><div className="ai-state"><span className={aiActive?"pulse":"pulse off"}>✦</span><div><strong>{aiActive?"AI is handling":"You’re handling"}</strong><small>{aiActive?"Confident response":"Manual takeover"}</small></div><button onClick={()=>setAiActive(!aiActive)}>{aiActive?"Take over":"Hand to AI"}</button></div></div><div className="chat-body tall"><div className="today">Today</div>{messages.map((m,i)=><div key={i} className={`message ${m.from}`}><p>{m.text}</p><small>{m.from==="ai"&&"✦ AI • "}{m.from==="agent"&&"You • "}{m.time} {m.from!=="customer"&&"✓✓"}</small></div>)}</div><div className="composer"><div className="suggestion"><span>✦</span><p><strong>Suggested reply</strong> Ask if they need anything else</p><button onClick={()=>setDraft("Is there anything else I can help you with today?")}>Use</button></div><div className="input-row"><button>＋</button><input value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>e.key==="Enter"&&sendMessage()} placeholder="Type a message…"/><button>☺</button><button className="send" onClick={sendMessage}>➤</button></div></div></section><aside className="customer-panel"><span className={`contact-avatar large ${selected.tone}`}>{selected.initials}</span><h3>{selected.name}</h3><small>Customer since March 2026</small><div className="details-list"><label>Phone<strong>{selected.phone}</strong></label><label>Email<strong>{selected.email}</strong></label><label>Status<strong className="status-text">{selected.status}</strong></label><label>Tags<div>{selected.tags.map(t=><span key={t}>{t}</span>)}</div></label></div><button className="secondary-btn" onClick={()=>notify("Customer note added")}>＋ Add internal note</button></aside></div></>;
+}
+
+function Automations({items,setItems,onCreate,notify}:{items:Automation[];setItems:(v:Automation[])=>void;onCreate:()=>void;notify:(s:string)=>void}){const [query,setQuery]=useState("");return <><PageHeader title="Automations" description="Build always-on workflows for sales and support." action={<button className="primary" onClick={onCreate}>＋ Create automation</button>}/><div className="toolbar"><input placeholder="Search automations" value={query} onChange={e=>setQuery(e.target.value)}/><span>{items.filter(i=>i.active).length} active workflows</span></div><div className="data-card"><table><thead><tr><th>Automation</th><th>Trigger</th><th>Action</th><th>Runs</th><th>Performance</th><th>Status</th><th/></tr></thead><tbody>{items.filter(i=>i.title.toLowerCase().includes(query.toLowerCase())).map(item=><tr key={item.id}><td><div className="table-title"><span>✦</span><strong>{item.title}</strong></div></td><td>{item.trigger}</td><td>{item.action}</td><td>{item.runs}</td><td><b className="positive">{item.rate}</b></td><td><button className={`toggle ${item.active?"on":""}`} onClick={()=>setItems(items.map(a=>a.id===item.id?{...a,active:!a.active}:a))}><i/></button></td><td><button className="dots" onClick={()=>notify("Automation options opened")}>•••</button></td></tr>)}</tbody></table></div><div className="template-strip"><div><h3>Start from a proven template</h3><p>Launch common WhatsApp workflows in minutes.</p></div>{["Welcome new leads","Recover abandoned carts","Collect customer feedback"].map(x=><button key={x} onClick={onCreate}><span>＋</span>{x}</button>)}</div></>}
+
+function Knowledge({sources,setSources,onAdd,notify}:{sources:Source[];setSources:(v:Source[])=>void;onAdd:()=>void;notify:(s:string)=>void}){const total=sources.reduce((n,s)=>n+s.pages,0);return <><PageHeader title="Knowledge" description="Train your AI using your website, documents, and FAQs." action={<button className="primary" onClick={onAdd}>＋ Add source</button>}/><div className="knowledge-stats"><article><span>◇</span><div><strong>{sources.length}</strong><small>Connected sources</small></div></article><article><span>▤</span><div><strong>{total.toLocaleString()}</strong><small>Pages indexed</small></div></article><article><span>✓</span><div><strong>98.7%</strong><small>Answer coverage</small></div></article></div><div className="data-card"><div className="card-head"><div><h2>Training sources</h2><p>Content is automatically chunked, indexed, and kept up to date.</p></div><button onClick={()=>{setSources(sources.map(s=>({...s,status:"Ready"})));notify("All sources synchronized")}}>↻ Sync all</button></div><table><thead><tr><th>Source</th><th>Type</th><th>Content</th><th>Status</th><th>Last synced</th><th/></tr></thead><tbody>{sources.map(source=><tr key={source.id}><td><div className="table-title"><span>{source.type==="Website"?"⌁":"▤"}</span><strong>{source.name}</strong></div></td><td>{source.type}</td><td>{source.pages.toLocaleString()} pages</td><td><span className={`status-pill ${source.status==="Ready"?"ready":"syncing"}`}>{source.status}</span></td><td>Just now</td><td><button className="dots" onClick={()=>setSources(sources.filter(s=>s.id!==source.id))}>Remove</button></td></tr>)}</tbody></table></div><div className="training-lab"><div><span>✦</span><h3>Test your AI knowledge</h3><p>Ask a question exactly as a customer would.</p><div className="test-input"><input placeholder="e.g. How long does delivery to Dubai take?"/><button onClick={()=>notify("AI found an answer across 3 sources")}>Ask Wavely</button></div></div><aside><strong>Coverage tip</strong><p>Add policies, sizing guides, and product manuals to improve answer confidence.</p></aside></div></>}
+
+function Analytics({automations,notify}:{automations:Automation[];notify:(s:string)=>void}){const [range,setRange]=useState("Last 30 days");const exportCsv=()=>{const blob=new Blob(["metric,value\nConversations,1284\nAI resolution,74.2%\nRevenue,$18600"],{type:"text/csv"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="wavely-analytics.csv";a.click();notify("Analytics exported")};return <><PageHeader title="Analytics" description="Measure AI performance, team efficiency, and assisted revenue." action={<div className="header-buttons"><select value={range} onChange={e=>setRange(e.target.value)}><option>Last 7 days</option><option>Last 30 days</option><option>Last 90 days</option></select><button className="primary" onClick={exportCsv}>↓ Export CSV</button></div>}/><MetricCards/><div className="analytics-grid"><div className="data-card chart-card"><div className="card-head"><div><h2>Conversation volume</h2><p>{range} • AI and human responses</p></div><span className="legend"><i/>AI handled <i/>Team handled</span></div><div className="big-chart">{[42,55,49,72,64,83,78,95,88,108,92,118,111,132].map((h,i)=><div key={i}><i style={{height:`${h}px`}}/><b style={{height:`${Math.max(18,h*.32)}px`}}/></div>)}</div><div className="chart-axis"><span>Jun 18</span><span>Jun 24</span><span>Jun 30</span><span>Jul 6</span><span>Jul 17</span></div></div><div className="data-card channel-card"><div className="card-head"><div><h2>Resolution mix</h2><p>How conversations were completed</p></div></div><div className="large-donut"><div><strong>1,284</strong><small>Total</small></div></div><ul><li><i className="indigo"/>AI resolved <b>74%</b></li><li><i className="black"/>Team resolved <b>21%</b></li><li><i className="gray"/>Unresolved <b>5%</b></li></ul></div></div><div className="data-card"><div className="card-head"><div><h2>Automation performance</h2><p>Results attributed to active workflows.</p></div></div><table><thead><tr><th>Automation</th><th>Runs</th><th>Completion</th><th>Avg. response</th><th>Impact</th></tr></thead><tbody>{automations.map((a,i)=><tr key={a.id}><td><strong>{a.title}</strong></td><td>{a.runs}</td><td>{[81,94,63,88][i]??76}%</td><td>{["7s","4s","12s","38s"][i]??"9s"}</td><td><b className="positive">{a.rate}</b></td></tr>)}</tbody></table></div></>}
+
+function Team({members,setMembers,onInvite,notify}:{members:Member[];setMembers:(v:Member[])=>void;onInvite:()=>void;notify:(s:string)=>void}){return <><PageHeader title="Team" description="Invite teammates and control access to customer conversations." action={<button className="primary" onClick={onInvite}>＋ Invite teammate</button>}/><div className="team-summary"><article><strong>{members.length}</strong><span>Team members</span></article><article><strong>{members.filter(m=>m.status==="Active").length}</strong><span>Active now</span></article><article><strong>12m</strong><span>Avg. first response</span></article><article><strong>4.8/5</strong><span>Customer rating</span></article></div><div className="data-card"><table><thead><tr><th>Member</th><th>Role</th><th>Status</th><th>Conversations</th><th>Last active</th><th/></tr></thead><tbody>{members.map((m,i)=><tr key={m.id}><td><div className="member-cell"><span>{m.name.split(" ").map(x=>x[0]).join("").slice(0,2)}</span><div><strong>{m.name}</strong><small>{m.email}</small></div></div></td><td><select value={m.role} disabled={m.role==="Owner"} onChange={e=>setMembers(members.map(x=>x.id===m.id?{...x,role:e.target.value as Member["role"]}:x))}><option>Owner</option><option>Admin</option><option>Agent</option><option>Analyst</option></select></td><td><span className={`status-pill ${m.status==="Active"?"ready":"syncing"}`}>{m.status}</span></td><td>{[284,198,143,0][i]??0}</td><td>{m.status==="Active"?"Online now":"Invite pending"}</td><td><button className="dots" onClick={()=>m.role==="Owner"?notify("The workspace owner cannot be removed"):setMembers(members.filter(x=>x.id!==m.id))}>•••</button></td></tr>)}</tbody></table></div></>}
+
+function Settings({activeTab,setActiveTab,connected,onChannels,notify}:{activeTab:string;setActiveTab:(s:string)=>void;connected:boolean;onChannels:()=>void;notify:(s:string)=>void}){const tabs=["General","AI assistant","Notifications","Billing"];const [tone,setTone]=useState("Warm & helpful");return <><PageHeader title="Settings" description="Manage your workspace, assistant behavior, and subscription."/><div className="settings-layout"><aside>{tabs.map(t=><button className={activeTab===t?"active":""} onClick={()=>setActiveTab(t)} key={t}>{t}</button>)}</aside><section className="settings-card">{activeTab==="General"&&<><h2>Workspace details</h2><p>Information used across your Wavely account.</p><div className="form-grid"><label>Workspace name<input defaultValue="Atelier Home"/></label><label>Business website<input defaultValue="https://atelierhome.com"/></label><label>Time zone<select defaultValue="Asia/Dubai"><option>Asia/Dubai</option><option>Europe/London</option><option>America/New_York</option></select></label><label>Default language<select><option>English</option><option>Arabic</option><option>French</option></select></label></div><div className="connection-card"><span className="wa-logo">◉</span><div><strong>WhatsApp Business</strong><small>{connected?"+971 50 284 8102 is connected":"No phone number connected"}</small></div><b className={`status-pill ${connected?"ready":"syncing"}`}>{connected?"Connected":"Setup required"}</b><button className="secondary-btn" onClick={onChannels}>{connected?"Manage":"Connect"}</button></div><div className="settings-actions"><button className="primary" onClick={()=>notify("Workspace settings saved")}>Save changes</button></div></>}
+    {activeTab==="AI assistant"&&<><h2>AI assistant behavior</h2><p>Define how Wavely speaks and when it should hand off.</p><label className="full-label">Assistant name<input defaultValue="Mila"/></label><label className="full-label">Brand voice<textarea defaultValue="Friendly, polished and concise. Make practical recommendations without being pushy."/></label><div className="choice-grid">{["Warm & helpful","Concise & direct","Premium concierge","Playful & casual"].map(x=><button className={tone===x?"selected":""} onClick={()=>setTone(x)} key={x}><span>✦</span><strong>{x}</strong></button>)}</div><div className="range-setting"><div><strong>Human handoff confidence</strong><small>Hand off when AI confidence is below this level.</small></div><input type="range" defaultValue="72"/><b>72%</b></div><label className="check-setting"><input type="checkbox" defaultChecked/><span><strong>Ask before sharing checkout links</strong><small>Prevents accidental product or pricing mismatches.</small></span></label><label className="check-setting"><input type="checkbox" defaultChecked/><span><strong>Never answer legal or payment disputes</strong><small>Immediately assign sensitive conversations to a human.</small></span></label><div className="settings-actions"><button className="primary" onClick={()=>notify("AI behavior saved")}>Save assistant</button></div></>}
+    {activeTab==="Notifications"&&<><h2>Notification preferences</h2><p>Choose when Wavely should alert you and your team.</p>{["New conversation assigned","AI requests human help","Negative customer sentiment","Daily performance summary","Weekly revenue report"].map((x,i)=><label className="notification-row" key={x}><span><strong>{x}</strong><small>{i<3?"Instant push and email alert":"Delivered to workspace admins"}</small></span><button className={`toggle ${i!==4?"on":""}`}><i/></button></label>)}<div className="settings-actions"><button className="primary" onClick={()=>notify("Notification preferences saved")}>Save preferences</button></div></>}
+    {activeTab==="Billing"&&<><h2>Plan & billing</h2><p>Manage usage, invoices, and subscription details.</p><div className="plan-card"><div><span>PRO PLAN</span><h3>Scale</h3><p>5,000 AI conversations per month</p></div><strong>$149<small>/month</small></strong></div><div className="usage"><div><span>AI conversations</span><b>1,284 / 5,000</b></div><progress value="1284" max="5000"/><div><span>Knowledge pages</span><b>12,482 / 25,000</b></div><progress value="12482" max="25000"/></div><div className="billing-actions"><button className="primary" onClick={()=>notify("Plan options opened")}>Change plan</button><button className="secondary-btn" onClick={()=>notify("Latest invoice downloaded")}>Download invoice</button></div></>}
+  </section></div></>}
+
+function SimpleModal({title,onClose,children}:{title:string;onClose:()=>void;children:React.ReactNode}){return <div className="modal-backdrop" onMouseDown={onClose}><div className="modal" onMouseDown={e=>e.stopPropagation()}><div className="modal-head"><h2>{title}</h2><button onClick={onClose}>×</button></div>{children}</div></div>}
+function AutomationModal({onClose,onSave}:{onClose:()=>void;onSave:(a:Automation)=>void}){const [name,setName]=useState("");const [trigger,setTrigger]=useState("New WhatsApp conversation");const [action,setAction]=useState("Send AI welcome message");return <SimpleModal title="Create automation" onClose={onClose}><p>Choose a trigger and what Wavely should do next.</p><div className="modal-form"><label>Automation name<input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Welcome new leads"/></label><label>When this happens<select value={trigger} onChange={e=>setTrigger(e.target.value)}><option>New WhatsApp conversation</option><option>Customer asks about an order</option><option>Cart idle for 2 hours</option><option>AI confidence is low</option></select></label><label>Do this<select value={action} onChange={e=>setAction(e.target.value)}><option>Send AI welcome message</option><option>Fetch order status</option><option>Send recovery template</option><option>Assign to support team</option></select></label></div><div className="flow-preview"><span>Trigger</span><i>→</i><span>AI action</span><i>→</i><span>Track result</span></div><div className="modal-actions"><button className="secondary-btn" onClick={onClose}>Cancel</button><button className="primary" disabled={!name.trim()} onClick={()=>onSave({id:Date.now(),title:name,trigger,action,runs:0,rate:"New",active:true})}>Create automation</button></div></SimpleModal>}
+function SourceModal({onClose,onSave}:{onClose:()=>void;onSave:(s:Source)=>void}){const [type,setType]=useState<Source["type"]>("Website");const [name,setName]=useState("");return <SimpleModal title="Add knowledge source" onClose={onClose}><div className="source-types">{(["Website","Document","FAQ"] as const).map(t=><button className={type===t?"active":""} onClick={()=>setType(t)} key={t}><span>{t==="Website"?"⌁":"▤"}</span>{t}</button>)}</div><div className="modal-form"><label>{type==="Website"?"Website URL":type==="Document"?"Document name":"FAQ collection name"}<input value={name} onChange={e=>setName(e.target.value)} placeholder={type==="Website"?"https://example.com":"Enter a name"}/></label></div><div className="modal-actions"><button className="secondary-btn" onClick={onClose}>Cancel</button><button className="primary" disabled={!name.trim()} onClick={()=>onSave({id:Date.now(),name,type,pages:type==="Website"?120:18,status:"Syncing"})}>Add & train</button></div></SimpleModal>}
+function InviteModal({onClose,onSave}:{onClose:()=>void;onSave:(m:Member)=>void}){const [email,setEmail]=useState("");const [role,setRole]=useState<Member["role"]>("Agent");return <SimpleModal title="Invite teammate" onClose={onClose}><div className="modal-form"><label>Email address<input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="teammate@company.com"/></label><label>Role<select value={role} onChange={e=>setRole(e.target.value as Member["role"])}><option>Admin</option><option>Agent</option><option>Analyst</option></select></label></div><div className="role-note">Agents can manage conversations. Analysts can view reports. Admins can manage the workspace.</div><div className="modal-actions"><button className="secondary-btn" onClick={onClose}>Cancel</button><button className="primary" disabled={!email.includes("@")} onClick={()=>onSave({id:Date.now(),name:email.split("@")[0],email,role,status:"Invited"})}>Send invitation</button></div></SimpleModal>}
+function SearchModal({onClose,onNavigate}:{onClose:()=>void;onNavigate:(s:Section)=>void}){const [q,setQ]=useState("");const pages:Section[]=["Overview","Channels","Inbox","Automations","Knowledge","Analytics","Team","Settings"];return <SimpleModal title="Search Wavely" onClose={onClose}><input autoFocus className="global-search" placeholder="Search pages and features…" value={q} onChange={e=>setQ(e.target.value)}/><div className="search-results">{pages.filter(p=>p.toLowerCase().includes(q.toLowerCase())).map(p=><button key={p} onClick={()=>onNavigate(p)}><span>⌕</span><div><strong>{p}</strong><small>Open {p.toLowerCase()}</small></div><b>→</b></button>)}</div></SimpleModal>}
