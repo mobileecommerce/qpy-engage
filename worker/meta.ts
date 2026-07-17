@@ -178,8 +178,10 @@ function publicConnection(row: ConnectionRow | null) {
 
 async function metaError(response: Response): Promise<string> {
   try {
-    const payload = await response.json() as { error?: { message?: string; error_user_msg?: string } };
-    return payload.error?.error_user_msg || payload.error?.message || `Meta returned HTTP ${response.status}`;
+    const payload = await response.json() as { error?: { message?: string; error_user_msg?: string; code?: number; error_subcode?: number } };
+    const message = payload.error?.error_user_msg || payload.error?.message || `Meta returned HTTP ${response.status}`;
+    const code = payload.error?.code ? ` (Meta code ${payload.error.code}${payload.error.error_subcode ? `/${payload.error.error_subcode}` : ""})` : "";
+    return `${message}${code}`;
   } catch {
     return `Meta returned HTTP ${response.status}`;
   }
