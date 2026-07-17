@@ -283,6 +283,60 @@ async function sendTestMessage(request: Request, env: MetaEnv): Promise<Response
   return json(request, { sent: true, messageId: payload.messages?.[0]?.id || null });
 }
 
+async function getInbox(request: Request, env: MetaEnv): Promise<Response> {
+  const denied = await requireSetupKey(request, env); if (denied) return denied;
+  const connection = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(WORKSPACE_ID).first<ConnectionRow>();
+  if (!connection) return json(request, { error: "Connect a WhatsApp account first." }, 409);
+  const result = await env.DB.prepare(`SELECT id, direction, wa_id, message_type, message_text, status, message_timestamp, created_at
+    FROM whatsapp_messages WHERE phone_number_id = ? OR phone_number_id IS NULL
+    ORDER BY COALESCE(CAST(message_timestamp AS INTEGER), 0) ASC, created_at ASC LIMIT 500`).bind(connection.phone_number_id).all<{
+      id: string; direction: string; wa_id: string | null; message_type: string | null; message_text: string | null;
+      status: string | null; message_timestamp: string | null; created_at: string;
+    }>();
+  return json(request, {
+    phoneNumberId: connection.phone_number_id,
+    displayPhoneNumber: connection.display_phone_number,
+    messages: (result.results || []).map((message) => ({
+      id: message.id,
+      direction: message.direction,
+      waId: message.wa_id,
+      type: message.message_type,
+      text: message.message_text,
+      status: message.status,
+      timestamp: message.message_timestamp,
+      createdAt: message.created_at,
+    })),
+  });
+}
+
+async function sendInboxMessage(request: Request, env: MetaEnv): Promise<Response> {
+  const denied = await requireSetupKey(request, env); if (denied) return denied;
+  if (!env.META_TOKEN_ENCRYPTION_KEY || !env.META_APP_SECRET) return json(request, { error: "Meta server credentials are incomplete." }, 503);
+  const body = await request.json() as { to?: string; text?: string };
+  const to = (body.to || "").replace(/[^\d]/g, "");
+  const text = (body.text || "").trim();
+  if (to.length < 8 || to.length > 15) return json(request, { error: "Select a valid WhatsApp customer." }, 400);
+  if (!text || text.length > 4096) return json(request, { error: "Message text must be between 1 and 4096 characters." }, 400);
+  const connection = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(WORKSPACE_ID).first<ConnectionRow>();
+  if (!connection) return json(request, { error: "Connect a WhatsApp account first." }, 409);
+  const token = await decryptToken(connection.token_ciphertext, connection.token_iv, env.META_TOKEN_ENCRYPTION_KEY);
+  const proof = await hmacHex(env.META_APP_SECRET, token);
+  const response = await fetch(`https://graph.facebook.com/${graphVersion(env)}/${connection.phone_number_id}/messages?appsecret_proof=${proof}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ messaging_product: "whatsapp", recipient_type: "individual", to, type: "text", text: { preview_url: false, body: text } }),
+  });
+  if (!response.ok) return json(request, { error: await metaError(response) }, 400);
+  const payload = await response.json() as { messages?: Array<{ id: string }> };
+  const id = payload.messages?.[0]?.id || crypto.randomUUID();
+  await env.DB.prepare(`INSERT INTO whatsapp_messages
+    (id, direction, wa_id, phone_number_id, message_type, message_text, status, message_timestamp, payload)
+    VALUES (?, 'outbound', ?, ?, 'text', ?, 'accepted', ?, ?)
+    ON CONFLICT(id) DO UPDATE SET message_text=excluded.message_text, status=excluded.status, payload=excluded.payload`)
+    .bind(id, to, connection.phone_number_id, text, String(Math.floor(Date.now() / 1000)), JSON.stringify(payload)).run();
+  return json(request, { sent: true, message: { id, direction: "outbound", waId: to, type: "text", text, status: "accepted", timestamp: String(Math.floor(Date.now() / 1000)), createdAt: new Date().toISOString() } });
+}
+
 async function verifyWebhook(request: Request, env: MetaEnv): Promise<Response> {
   const url = new URL(request.url);
   const mode = url.searchParams.get("hub.mode");
@@ -342,6 +396,8 @@ export async function handleMetaRequest(request: Request, env: MetaEnv): Promise
   if (url.pathname === "/api/meta/oauth/exchange" && request.method === "POST") return exchangeEmbeddedSignup(request, env);
   if (url.pathname === "/api/meta/manual/connect" && request.method === "POST") return connectManualAccount(request, env);
   if (url.pathname === "/api/meta/test-message" && request.method === "POST") return sendTestMessage(request, env);
+  if (url.pathname === "/api/meta/inbox" && request.method === "GET") return getInbox(request, env);
+  if (url.pathname === "/api/meta/inbox/messages" && request.method === "POST") return sendInboxMessage(request, env);
   if (url.pathname === "/api/meta/connection" && request.method === "DELETE") {
     const denied = await requireSetupKey(request, env); if (denied) return denied;
     await env.DB.prepare("DELETE FROM whatsapp_connections WHERE workspace_id = ?").bind(WORKSPACE_ID).run();

@@ -1,0 +1,33 @@
+.live-inbox-gate,
+.live-inbox-empty {
+  max-width: 620px;
+  margin: 70px auto;
+  padding: 38px;
+  text-align: center;
+}
+
+.live-inbox-gate > span,
+.live-inbox-empty > span {
+  display: grid;
+  width: 54px;
+  height: 54px;
+  margin: 0 auto 16px;
+  place-items: center;
+  border-radius: 16px;
+  background: #eef0ff;
+  color: #4c50ee;
+  font-size: 24px;
+}
+
+.live-inbox-gate h2,
+.live-inbox-empty h2 { margin: 0 0 8px; font-size: 20px; }
+.live-inbox-gate p,
+.live-inbox-empty p { color: #737b8c; font-size: 12px; line-height: 1.6; }
+.live-inbox-gate label { display: flex; flex-direction: column; gap: 7px; margin: 24px auto 12px; text-align: left; font-size: 10px; font-weight: 700; }
+.live-inbox-gate input { height: 42px; border: 1px solid #dfe2e8; border-radius: 7px; padding: 0 12px; }
+.live-inbox-gate button { width: 100%; }
+.live-inbox-empty button { margin-top: 10px; }
+.full-inbox.live .inbox-tools { display: flex; flex-direction: column; gap: 4px; }
+.full-inbox.live .inbox-tools strong { font-size: 11px; }
+.full-inbox.live .inbox-tools small { color: #8d95a4; font-size: 8px; }
+.live-chat-placeholder { display: grid; min-height: 600px; place-items: center; color: #8d95a4; font-size: 11px; }

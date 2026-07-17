@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import "./live-inbox.css";
 
 type Section = "Overview" | "Assistants" | "Channels" | "Inbox" | "Campaigns" | "Automations" | "Knowledge" | "Analytics" | "Team" | "Settings";
 type Message = { from: "customer" | "ai" | "agent"; text: string; time: string };
@@ -13,6 +14,7 @@ type ActionParameter = { id:number; name:string; type:"text"|"number"|"email"|"p
 type AssistantAction = { id:number; name:string; description:string; type:"submit"|"request"; parameters:ActionParameter[]; endpoint:string; method:"POST"|"GET"; defaultResponse:string; confirmation:boolean; continueConversation:boolean; enabled:boolean; runs:number; success:string; lastTest:string };
 type MetaConfig = { appId:string|null; configId:string|null; graphVersion:string; ready:boolean; webhookUrl:string; missing:string[] };
 type MetaConnection = { businessId:string|null; wabaId:string; phoneNumberId:string; displayPhoneNumber:string|null; verifiedName:string|null; qualityRating:string|null; status:string|null; webhookSubscribed:boolean };
+type LiveWhatsAppMessage = { id:string; direction:"inbound"|"outbound"; waId:string|null; type:string|null; text:string|null; status:string|null; timestamp:string|null; createdAt:string };
 
 declare global {
   interface Window {
@@ -139,7 +141,7 @@ export default function Home() {
   const body = section === "Overview" ? <Overview onNavigate={go} onCreate={openAutomation} connected={connected}/> :
     section === "Assistants" ? <Assistants sources={sources} onKnowledge={()=>go("Knowledge")} onChannels={()=>go("Channels")} onAnalytics={()=>go("Analytics")} notify={notify}/> :
     section === "Channels" ? <Channels step={channelStep} setStep={setChannelStep} connected={connected} setConnected={setConnected} notify={notify}/> :
-    section === "Inbox" ? <Inbox conversations={conversations} setConversations={setConversations} selected={selected} setSelectedId={setSelectedId} messages={messages[selected.id]??[]} draft={draft} setDraft={setDraft} sendMessage={sendMessage} aiActive={aiActive} setAiActive={setAiActive} notify={notify}/> :
+    section === "Inbox" ? connected?<LiveInbox notify={notify}/>:<Inbox conversations={conversations} setConversations={setConversations} selected={selected} setSelectedId={setSelectedId} messages={messages[selected.id]??[]} draft={draft} setDraft={setDraft} sendMessage={sendMessage} aiActive={aiActive} setAiActive={setAiActive} notify={notify}/> :
     section === "Campaigns" ? <Campaigns notify={notify}/> :
     section === "Automations" ? <Automations items={automations} setItems={setAutomations} onCreate={openAutomation} notify={notify}/> :
     section === "Knowledge" ? <Knowledge sources={sources} setSources={setSources} onAdd={()=>setModal("source")} notify={notify}/> :
@@ -287,7 +289,7 @@ function Channels({step,setStep,connected,setConnected,notify}:{step:number;setS
       const [code,assets]=await Promise.all([codePromise,sessionPromise]);
       const response=await fetch(metaApi("/api/meta/oauth/exchange"),{method:"POST",headers:{"content-type":"application/json","x-qpy-setup-key":setupKey},body:JSON.stringify({code,wabaId:assets.wabaId,phoneNumberId:assets.phoneNumberId,businessId:assets.businessId})});
       const result=await response.json() as {connected?:boolean;connection?:MetaConnection;error?:string};if(!response.ok||!result.connection)throw new Error(result.error||"Meta connection could not be completed.");
-      setMetaConnection(result.connection);setConnected(true);setForm(current=>({...current,business:result.connection?.verifiedName||current.business,number:result.connection?.displayPhoneNumber||current.number,phoneId:result.connection?.phoneNumberId||current.phoneId,wabaId:result.connection?.wabaId||current.wabaId}));setStep(2);notify("WhatsApp Business connected securely through Meta");
+      sessionStorage.setItem("qpy-engage-session-key",setupKey);setMetaConnection(result.connection);setConnected(true);setForm(current=>({...current,business:result.connection?.verifiedName||current.business,number:result.connection?.displayPhoneNumber||current.number,phoneId:result.connection?.phoneNumberId||current.phoneId,wabaId:result.connection?.wabaId||current.wabaId}));setStep(2);notify("WhatsApp Business connected securely through Meta");
     }catch(error){setMetaError(error instanceof Error?error.message:"Meta connection failed.")}finally{setMetaLoading(false)}
   };
   const connectManualMeta=async()=>{
@@ -298,7 +300,7 @@ function Channels({step,setStep,connected,setConnected,notify}:{step:number;setS
       const response=await fetch(metaApi("/api/meta/manual/connect"),{method:"POST",headers:{"content-type":"application/json","x-qpy-setup-key":setupKey},body:JSON.stringify({wabaId:form.wabaId,phoneNumberId:form.phoneId,businessId:form.businessId,accessToken:form.token})});
       const result=await response.json() as {connected?:boolean;connection?:MetaConnection;error?:string};
       if(!response.ok||!result.connection)throw new Error(result.error||"Meta credentials could not be verified.");
-      setMetaConnection(result.connection);setConnected(true);setForm(current=>({...current,token:"",business:result.connection?.verifiedName||current.business,number:result.connection?.displayPhoneNumber||current.number,phoneId:result.connection?.phoneNumberId||current.phoneId,wabaId:result.connection?.wabaId||current.wabaId}));setStep(3);notify("WhatsApp Cloud API connected securely");
+      sessionStorage.setItem("qpy-engage-session-key",setupKey);setMetaConnection(result.connection);setConnected(true);setForm(current=>({...current,token:"",business:result.connection?.verifiedName||current.business,number:result.connection?.displayPhoneNumber||current.number,phoneId:result.connection?.phoneNumberId||current.phoneId,wabaId:result.connection?.wabaId||current.wabaId}));setStep(3);notify("WhatsApp Cloud API connected securely");
     }catch(error){setMetaError(error instanceof Error?error.message:"Manual Meta connection failed.")}finally{setMetaLoading(false)}
   };
   const sendMetaTest=async()=>{if(!setupKey){setMetaError("Enter your workspace connection key on the Meta connection step.");setStep(1);return}setMetaLoading(true);setMetaError("");try{const response=await fetch(metaApi("/api/meta/test-message"),{method:"POST",headers:{"content-type":"application/json","x-qpy-setup-key":setupKey},body:JSON.stringify({to:test})});const result=await response.json() as {sent?:boolean;error?:string};if(!response.ok)throw new Error(result.error||"Test message failed.");notify("Meta accepted the WhatsApp test message");next()}catch(error){setMetaError(error instanceof Error?error.message:"Test message failed.")}finally{setMetaLoading(false)}};
@@ -330,6 +332,47 @@ function Channels({step,setStep,connected,setConnected,notify}:{step:number;setS
 }
 
 function WizardTitle({n,title,text}:{n:string;title:string;text:string}){return <div className="wizard-title"><span>{n}</span><div><h2>{title}</h2><p>{text}</p></div></div>}
+
+function LiveInbox({notify}:{notify:(s:string)=>void}){
+  const [workspaceKey,setWorkspaceKey]=useState("");
+  const [keyDraft,setKeyDraft]=useState("");
+  const [messages,setMessages]=useState<LiveWhatsAppMessage[]>([]);
+  const [selectedWaId,setSelectedWaId]=useState("");
+  const [draft,setDraft]=useState("");
+  const [loading,setLoading]=useState(false);
+  const [sending,setSending]=useState(false);
+  const [error,setError]=useState("");
+  const [loaded,setLoaded]=useState(false);
+
+  const refresh=async(key=workspaceKey,silent=false)=>{
+    if(!key)return;
+    if(!silent)setLoading(true);setError("");
+    try{
+      const response=await fetch(metaApi("/api/meta/inbox"),{headers:{"x-qpy-setup-key":key}});
+      const result=await response.json() as {messages?:LiveWhatsAppMessage[];error?:string};
+      if(!response.ok)throw new Error(result.error||"Inbox could not be loaded.");
+      const next=result.messages||[];setMessages(next);setLoaded(true);
+      const ids=next.map(message=>message.waId).filter((id):id is string=>Boolean(id));
+      if(ids.length&&!ids.includes(selectedWaId))setSelectedWaId(ids[0]);
+    }catch(problem){setError(problem instanceof Error?problem.message:"Inbox could not be loaded.")}finally{if(!silent)setLoading(false)}
+  };
+
+  useEffect(()=>{const saved=sessionStorage.getItem("qpy-engage-session-key")||"";if(saved){setWorkspaceKey(saved);setKeyDraft(saved)}},[]);
+  useEffect(()=>{if(!workspaceKey)return;refresh(workspaceKey);const timer=window.setInterval(()=>refresh(workspaceKey,true),8000);return()=>window.clearInterval(timer)},[workspaceKey]);
+
+  const connectInbox=()=>{const key=keyDraft.trim();if(!key)return;sessionStorage.setItem("qpy-engage-session-key",key);setWorkspaceKey(key)};
+  const contacts=[...new Set(messages.map(message=>message.waId).filter((id):id is string=>Boolean(id)))].map((waId,index)=>{
+    const thread=messages.filter(message=>message.waId===waId&&message.text);const last=thread.at(-1);
+    return {waId,thread,last,index};
+  }).sort((a,b)=>Number(b.last?.timestamp||0)-Number(a.last?.timestamp||0));
+  const selected=contacts.find(contact=>contact.waId===selectedWaId)||contacts[0];
+  const formatTime=(message:LiveWhatsAppMessage)=>{const numeric=Number(message.timestamp||0);const date=numeric?new Date(numeric*1000):new Date(message.createdAt);return Number.isNaN(date.getTime())?"Now":date.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})};
+  const send=async()=>{if(!selected||!draft.trim()||sending)return;setSending(true);setError("");try{const response=await fetch(metaApi("/api/meta/inbox/messages"),{method:"POST",headers:{"content-type":"application/json","x-qpy-setup-key":workspaceKey},body:JSON.stringify({to:selected.waId,text:draft.trim()})});const result=await response.json() as {message?:LiveWhatsAppMessage;error?:string};if(!response.ok||!result.message)throw new Error(result.error||"Message could not be sent.");setMessages(current=>[...current,result.message!]);setDraft("");notify("WhatsApp message sent through Meta")}catch(problem){setError(problem instanceof Error?problem.message:"Message could not be sent.")}finally{setSending(false)}};
+
+  if(!workspaceKey)return <><PageHeader title="Live WhatsApp inbox" description="Enter the workspace key to securely load customer messages from Cloudflare."/><div className="data-card live-inbox-gate"><span>⌾</span><h2>Unlock the live inbox</h2><p>This protects WhatsApp customer conversations on the public GitHub Pages application.</p><label>Workspace connection key<input type="password" autoComplete="off" value={keyDraft} onChange={event=>setKeyDraft(event.target.value)} onKeyDown={event=>event.key==="Enter"&&connectInbox()} placeholder="Enter the private setup key"/></label><button className="primary" disabled={!keyDraft.trim()} onClick={connectInbox}>Open live inbox</button></div></>;
+
+  return <><PageHeader title="Live WhatsApp inbox" description="Messages received by the verified Meta webhook appear here automatically." action={<button className="secondary-btn" disabled={loading} onClick={()=>refresh()}>{loading?"Refreshing…":"↻ Refresh"}</button>}/>{error&&<div className="meta-error">⚠ {error}</div>}{loaded&&!contacts.length?<div className="data-card live-inbox-empty"><span>◉</span><h2>No WhatsApp webhook messages yet</h2><p>The connection is ready, but Meta has not delivered an inbound message to Qpy Engage. Send a dashboard test webhook from Meta Configuration, or publish the Meta app before testing real customer replies.</p><button className="primary" onClick={()=>refresh()}>Check again</button></div>:<div className="full-inbox live"><aside className="inbox-list"><div className="inbox-tools"><strong>{contacts.length} live conversation{contacts.length===1?"":"s"}</strong><small>Cloud API • refreshes every 8 seconds</small></div><div className="conversation-list">{contacts.map(contact=><button key={contact.waId} className={selected?.waId===contact.waId?"selected":""} onClick={()=>setSelectedWaId(contact.waId)}><span className={`contact-avatar ${["green","blue","lavender","peach"][contact.index%4]}`}>WA<i/></span><div><strong>+{contact.waId}</strong><small>{contact.last?.text||"WhatsApp event"}</small></div><span className="conv-meta"><small>{contact.last?formatTime(contact.last):"Now"}</small></span></button>)}</div></aside><section className="chat-panel">{selected?<><div className="chat-head"><div className="chat-person"><span className="contact-avatar green">WA<i/></span><div><strong>+{selected.waId}</strong><small>WhatsApp Cloud API • Live</small></div></div><span className="status-pill ready">● Webhook connected</span></div><div className="chat-body tall"><div className="today">Live messages</div>{selected.thread.map(message=><div key={message.id} className={`message ${message.direction==="inbound"?"customer":"agent"}`}><p>{message.text}</p><small>{message.direction==="outbound"?"You • ":""}{formatTime(message)} {message.direction==="outbound"&&`• ${message.status||"sent"}`}</small></div>)}</div><div className="composer"><div className="input-row"><input value={draft} onChange={event=>setDraft(event.target.value)} onKeyDown={event=>event.key==="Enter"&&send()} placeholder="Reply through WhatsApp…"/><button className="send" disabled={sending||!draft.trim()} onClick={send}>{sending?"…":"➤"}</button></div></div></>:<div className="live-chat-placeholder">Select a live conversation</div>}</section><aside className="customer-panel">{selected&&<><span className="contact-avatar large green">WA</span><h3>+{selected.waId}</h3><small>WhatsApp customer</small><div className="details-list"><label>Channel<strong>WhatsApp Cloud API</strong></label><label>Messages<strong>{selected.thread.length}</strong></label><label>Status<strong className="status-text">open</strong></label></div></>}</aside></div>}</>;
+}
 
 function Inbox({conversations,setConversations,selected,setSelectedId,messages,draft,setDraft,sendMessage,aiActive,setAiActive,notify}:{conversations:Conversation[];setConversations:(v:Conversation[])=>void;selected:Conversation;setSelectedId:(s:string)=>void;messages:Message[];draft:string;setDraft:(s:string)=>void;sendMessage:()=>void;aiActive:boolean;setAiActive:(v:boolean)=>void;notify:(s:string)=>void}){
   const [query,setQuery]=useState(""); const [filter,setFilter]=useState("All");
