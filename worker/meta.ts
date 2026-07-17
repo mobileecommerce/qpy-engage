@@ -224,6 +224,44 @@ async function exchangeEmbeddedSignup(request: Request, env: MetaEnv): Promise<R
   return json(request, { connected: true, connection: publicConnection(row) });
 }
 
+async function connectManualAccount(request: Request, env: MetaEnv): Promise<Response> {
+  const denied = await requireSetupKey(request, env); if (denied) return denied;
+  if (!env.META_APP_ID || !env.META_APP_SECRET || !env.META_TOKEN_ENCRYPTION_KEY) return json(request, { error: "Meta server credentials are incomplete." }, 503);
+  const body = await request.json() as { accessToken?: string; wabaId?: string; phoneNumberId?: string; businessId?: string };
+  const accessToken = (body.accessToken || "").trim();
+  const wabaId = (body.wabaId || "").trim();
+  const phoneNumberId = (body.phoneNumberId || "").trim();
+  const businessId = (body.businessId || "").trim();
+  if (!/^\d+$/.test(wabaId) || !/^\d+$/.test(phoneNumberId) || (businessId && !/^\d+$/.test(businessId))) return json(request, { error: "Enter valid numeric WABA and Phone Number IDs." }, 400);
+  if (accessToken.length < 20) return json(request, { error: "Enter the access token shown in Meta API Setup." }, 400);
+
+  const proof = await hmacHex(env.META_APP_SECRET, accessToken);
+  const authorization = { authorization: `Bearer ${accessToken}` };
+  const [phoneResponse, wabaResponse] = await Promise.all([
+    fetch(`https://graph.facebook.com/${graphVersion(env)}/${phoneNumberId}?fields=display_phone_number,verified_name,quality_rating,status&appsecret_proof=${proof}`, { headers: authorization }),
+    fetch(`https://graph.facebook.com/${graphVersion(env)}/${wabaId}?fields=id,name&appsecret_proof=${proof}`, { headers: authorization }),
+  ]);
+  if (!phoneResponse.ok) return json(request, { error: `Phone Number ID could not be verified: ${await metaError(phoneResponse)}` }, 400);
+  if (!wabaResponse.ok) return json(request, { error: `WhatsApp Business Account ID could not be verified: ${await metaError(wabaResponse)}` }, 400);
+  const phone = await phoneResponse.json() as { display_phone_number?: string; verified_name?: string; quality_rating?: string; status?: string };
+
+  const subscribeResponse = await fetch(`https://graph.facebook.com/${graphVersion(env)}/${wabaId}/subscribed_apps?appsecret_proof=${proof}`, { method: "POST", headers: authorization });
+  if (!subscribeResponse.ok) return json(request, { error: `The credentials are valid, but webhook subscription failed: ${await metaError(subscribeResponse)}` }, 400);
+
+  const encrypted = await encryptToken(accessToken, env.META_TOKEN_ENCRYPTION_KEY);
+  await env.DB.prepare(`INSERT INTO whatsapp_connections
+    (workspace_id, app_id, business_id, waba_id, phone_number_id, display_phone_number, verified_name, quality_rating, status, token_ciphertext, token_iv, token_expires_at, webhook_subscribed, connected_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ON CONFLICT(workspace_id) DO UPDATE SET app_id=excluded.app_id, business_id=excluded.business_id, waba_id=excluded.waba_id,
+    phone_number_id=excluded.phone_number_id, display_phone_number=excluded.display_phone_number, verified_name=excluded.verified_name,
+    quality_rating=excluded.quality_rating, status=excluded.status, token_ciphertext=excluded.token_ciphertext, token_iv=excluded.token_iv,
+    token_expires_at=NULL, webhook_subscribed=1, updated_at=CURRENT_TIMESTAMP`)
+    .bind(WORKSPACE_ID, env.META_APP_ID, businessId || null, wabaId, phoneNumberId, phone.display_phone_number || null, phone.verified_name || null, phone.quality_rating || null, phone.status || null, encrypted.ciphertext, encrypted.iv).run();
+
+  const row = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(WORKSPACE_ID).first<ConnectionRow>();
+  return json(request, { connected: true, connection: publicConnection(row) });
+}
+
 async function sendTestMessage(request: Request, env: MetaEnv): Promise<Response> {
   const denied = await requireSetupKey(request, env); if (denied) return denied;
   if (!env.META_TOKEN_ENCRYPTION_KEY || !env.META_APP_SECRET) return json(request, { error: "Meta server credentials are incomplete." }, 503);
@@ -302,6 +340,7 @@ export async function handleMetaRequest(request: Request, env: MetaEnv): Promise
     return json(request, { connected: Boolean(row), connection: publicConnection(row) });
   }
   if (url.pathname === "/api/meta/oauth/exchange" && request.method === "POST") return exchangeEmbeddedSignup(request, env);
+  if (url.pathname === "/api/meta/manual/connect" && request.method === "POST") return connectManualAccount(request, env);
   if (url.pathname === "/api/meta/test-message" && request.method === "POST") return sendTestMessage(request, env);
   if (url.pathname === "/api/meta/connection" && request.method === "DELETE") {
     const denied = await requireSetupKey(request, env); if (denied) return denied;
