@@ -21,7 +21,7 @@ declare global {
   }
 }
 
-const META_BACKEND_ORIGIN="https://wavely-whatsapp-automation.praveenmadipoju.chatgpt.site";
+const META_BACKEND_ORIGIN="https://qpy-engage-api.qpy-engage.workers.dev";
 const metaApi=(path:string)=>`${typeof location!=="undefined"&&location.hostname.endsWith("github.io")?META_BACKEND_ORIGIN:""}${path}`;
 
 function loadMetaSdk(config:MetaConfig):Promise<void>{

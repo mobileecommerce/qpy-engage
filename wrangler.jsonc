@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "qpy-engage-api",
+  "main": "dist/server/index.js",
+  "compatibility_date": "2026-05-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "no_bundle": true,
+  "assets": {
+    "directory": "dist/client"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "qpy-engage-db",
+      "database_id": "5a3dbb62-879a-4455-a318-f96968667f3a",
+      "migrations_dir": "drizzle"
+    }
+  ],
+  "vars": {
+    "META_APP_ID": "966180749793118",
+    "META_EMBEDDED_SIGNUP_CONFIG_ID": "1063135716407121",
+    "META_GRAPH_VERSION": "v25.0"
+  },
+  "rules": [
+    {
+      "type": "ESModule",
+      "globs": ["**/*.js", "**/*.mjs"]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
