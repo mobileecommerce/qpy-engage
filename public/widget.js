@@ -1,0 +1,30 @@
+(function () {
+  if (document.getElementById("qpy-engage-widget")) return;
+  var root = document.createElement("div");
+  root.id = "qpy-engage-widget";
+  root.innerHTML = '<button aria-label="Open customer chat" class="qpy-launch">Q</button><section class="qpy-panel" hidden><header><strong>Atelier Concierge</strong><small>AI assistant</small><button aria-label="Close chat">×</button></header><main><p class="qpy-ai">Hi! How can I help today?</p></main><form><input aria-label="Message" placeholder="Type a message…"><button aria-label="Send message">➤</button></form></section>';
+  var style = document.createElement("style");
+  style.textContent = "#qpy-engage-widget{position:fixed;right:22px;bottom:22px;z-index:2147483647;font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#20232b}.qpy-launch{width:54px;height:54px;border:0;border-radius:50%;background:#4c50ee;color:#fff;font-size:20px;font-weight:800;box-shadow:0 10px 30px #0003}.qpy-panel{position:absolute;right:0;bottom:66px;width:min(340px,calc(100vw - 28px));height:440px;background:#fff;border:1px solid #e1e3e8;border-radius:16px;box-shadow:0 18px 60px #0003;overflow:hidden}.qpy-panel header{height:60px;padding:0 15px;background:#171923;color:#fff;display:grid;grid-template-columns:1fr auto;align-content:center}.qpy-panel header small{grid-column:1;color:#b9bec8;font-size:11px}.qpy-panel header button{grid-column:2;grid-row:1/3;border:0;background:transparent;color:#fff;font-size:24px}.qpy-panel main{height:315px;padding:14px;background:#f5f6f8;overflow:auto}.qpy-panel main p{max-width:78%;padding:9px 11px;border-radius:10px;line-height:1.45;margin:7px 0}.qpy-ai{background:#fff}.qpy-user{background:#4c50ee;color:#fff;margin-left:auto!important}.qpy-panel form{height:64px;display:flex;gap:7px;padding:10px;border-top:1px solid #e1e3e8}.qpy-panel input{flex:1;min-width:0;border:1px solid #d9dce3;border-radius:8px;padding:0 10px}.qpy-panel form button{width:42px;border:0;border-radius:8px;background:#4c50ee;color:#fff}";
+  document.head.appendChild(style);
+  document.body.appendChild(root);
+  var launch = root.querySelector(".qpy-launch");
+  var panel = root.querySelector(".qpy-panel");
+  var close = root.querySelector("header button");
+  var form = root.querySelector("form");
+  var input = root.querySelector("input");
+  var messages = root.querySelector("main");
+  launch.onclick = function () { panel.hidden = false; launch.hidden = true; input.focus(); };
+  close.onclick = function () { panel.hidden = true; launch.hidden = false; };
+  form.onsubmit = function (event) {
+    event.preventDefault();
+    var text = input.value.trim();
+    if (!text) return;
+    messages.insertAdjacentHTML("beforeend", '<p class="qpy-user"></p>');
+    messages.lastElementChild.textContent = text;
+    input.value = "";
+    var lower = text.toLowerCase();
+    var answer = lower.includes("deliver") || lower.includes("shipping") ? "UAE delivery normally takes 1–3 business days. I can help you check a specific destination." : lower.includes("return") ? "Returns are accepted within 14 days when items are unused and in their original packaging." : lower.includes("human") || lower.includes("agent") ? "Of course. I’ve marked this conversation for a human teammate." : "Thanks for your message. I can help with products, delivery, returns, and order questions.";
+    window.setTimeout(function () { messages.insertAdjacentHTML("beforeend", '<p class="qpy-ai"></p>'); messages.lastElementChild.textContent = answer; messages.scrollTop = messages.scrollHeight; }, 350);
+    messages.scrollTop = messages.scrollHeight;
+  };
+})();
