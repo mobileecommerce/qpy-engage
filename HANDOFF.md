@@ -157,20 +157,22 @@ vinext may generate `.wrangler/deploy/config.json` with a duplicate local `DB` b
 
 ## Recommended next work
 
-Done: real authentication, per-workspace data isolation, role-based access for team/WhatsApp management, and real AI assistant replies (text + in-browser voice) via Anthropic Claude — see "Authentication and multi-tenancy" and "AI assistant" above.
+Done: real authentication, per-workspace data isolation, role-based access for team/WhatsApp management, real AI assistant replies (text + in-browser voice, with real voice selection, transcript toggle, max-duration auto-end, and interrupt/barge-in) via Anthropic Claude, real website knowledge ingestion, a real public web chat widget, and real "AI Actions" execution (Claude tool-use actually calls the configured webhook, both in Test Studio and the public widget) — see "Authentication and multi-tenancy" and "AI assistant" above.
 
 1. Add `ANTHROPIC_API_KEY` as a Cloudflare secret if it isn't set yet — without it the assistant endpoint returns a clear "not configured" error.
-2. Build real knowledge retrieval: actually extract and index content from connected sources (website/document/FAQ) and pass relevant chunks into the assistant's system prompt. Right now the model only ever sees source *names*, not content.
-3. Wire "AI actions" (the webhook builder) to actually call the configured endpoint during a real conversation and during `testAction()`, instead of always reporting a canned "Passed."
-4. Rotate the exposed Meta App Secret, then update the Cloudflare secret; delete the now-unused `META_SETUP_KEY` secret.
-5. Add explicit token metadata/health monitoring and an admin-only credential rotation screen.
-6. Add password reset, email verification, and a workspace-switching UI (a user invited to a second workspace is only attached to it in the database today; login always resolves to their Owner workspace). Also add a way to rename a workspace / change an account's email — needed right now since the live "default" workspace is owned by a smoke-test account.
-7. Convert Inbox polling to realtime delivery now that the authentication model is in place.
-8. Add database-backed contacts, conversation assignment, resolution, notes, and message attachments (currently only WhatsApp message history is D1-backed; contact metadata is still per-browser).
-9. If real inbound phone calls are wanted: set up a telephony provider account (e.g. Twilio), then build per-workspace phone number provisioning and webhook-driven call handling into the same Anthropic-backed assistant endpoint.
-10. Implement real Instagram OAuth/webhooks, campaign template management, audience consent records, and scheduled delivery workers (bulk campaign "sends" are still simulated — Meta also requires approved message templates for outbound marketing sends outside the 24-hour customer-service window).
-11. Complete Meta Business Verification, App Review, Advanced Access, and Embedded Signup production onboarding.
-12. Wire up real billing (e.g. Stripe) if/when this needs to charge real customers; today's billing UI is fully simulated by design.
+2. **New-account experience still shows demo content as if real.** Two distinct issues found 2026-07-19:
+   - Fixed: `useStoredState`'s localStorage cache was global to the browser, not scoped per workspace — signing into a new account on a browser that had used another account would leak that account's cached settings into the new one, and then write them back to its real server state. Now scoped by `${key}::ws:${workspaceId}` (commit "Scope localStorage cache to workspace id...").
+   - **Not yet fixed:** every new workspace still starts from hardcoded "Atelier Home" demo persona defaults (assistant config, 2 sample actions pointing at a fake `api.atelierhome.com` domain, sample knowledge sources/conversations/automations), and the Overview dashboard's metric cards (conversations/resolution rate/response time/revenue) and setup checklist ("Train your AI: Website + 4 documents added, 12.4k pages", "Personalize your assistant: ...") are hardcoded fake content shown as already-complete for every account, not driven by real per-workspace state. User was asked to prioritize and chose real AI Actions first (done); this is the next item.
+   - Any account created between the original auth build and the 2026-07-19 localStorage-scoping fix may have real server-side state already polluted with another workspace's cached settings — worth checking with the user which account(s) this affected.
+3. Rotate the exposed Meta App Secret, then update the Cloudflare secret; delete the now-unused `META_SETUP_KEY` secret.
+4. Add explicit token metadata/health monitoring and an admin-only credential rotation screen.
+5. Add password reset, email verification, and a workspace-switching UI (a user invited to a second workspace is only attached to it in the database today; login always resolves to their Owner workspace). Also add a way to rename a workspace / change an account's email — needed right now since the live "default" workspace is owned by a smoke-test account.
+6. Convert Inbox polling to realtime delivery now that the authentication model is in place.
+7. Add database-backed contacts, conversation assignment, resolution, notes, and message attachments (currently only WhatsApp message history is D1-backed; contact metadata is still per-browser).
+8. If real inbound phone calls are wanted: set up a telephony provider account (e.g. Twilio), then build per-workspace phone number provisioning and webhook-driven call handling into the same Anthropic-backed assistant endpoint.
+9. Implement real Instagram OAuth/webhooks, campaign template management, audience consent records, and scheduled delivery workers (bulk campaign "sends" are still simulated — Meta also requires approved message templates for outbound marketing sends outside the 24-hour customer-service window).
+10. Complete Meta Business Verification, App Review, Advanced Access, and Embedded Signup production onboarding.
+11. Wire up real billing (e.g. Stripe) if/when this needs to charge real customers; today's billing UI is fully simulated by design.
 
 ## Definition of production readiness
 
