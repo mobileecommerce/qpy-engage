@@ -1,6 +1,6 @@
 # Qpy Engage engineering handoff
 
-Updated: July 18, 2026 (real authentication added — read "Authentication" below before assuming the shared workspace-key model still applies)
+Updated: July 18, 2026 (real authentication, per-workspace isolation, and a real AI assistant provider are all live in production now — read "Authentication" and "AI assistant" below before assuming this is still a demo-only app)
 
 ## Source and deployments
 
@@ -19,6 +19,7 @@ Do not continue from `main`; it is behind the active branch.
 
 ### Working with a real backend
 
+- Real user accounts, sessions, and per-workspace data isolation (see "Authentication and multi-tenancy")
 - WhatsApp Cloud API manual connection using WABA ID, Phone Number ID, and a Meta access token
 - Server-side validation of Meta assets
 - AES-GCM encrypted access-token storage in Cloudflare D1
@@ -30,17 +31,30 @@ Do not continue from `main`; it is behind the active branch.
 - Meta `hello_world` test message
 - Connection diagnostics and token-refresh recovery
 - Public privacy, terms, and data-deletion pages
+- Real AI assistant replies (text and voice) through Anthropic Claude — see "AI assistant" below
 
 ### Implemented primarily as browser-product functionality
 
-- AI assistant builder, instructions, knowledge setup, actions, voice configuration, testing, governance, and publishing
+- AI assistant builder UI: instructions, actions, voice configuration, governance, and publishing steps are all real inputs, but there's no real knowledge retrieval (see "AI assistant" below) and AI actions (webhooks) aren't actually called yet
 - Campaign builder, audience import, image attachment, scheduling, and campaign records
 - Automation builder and templates
-- Team and subscription management UI
+- Team and subscription management UI (team membership is real — see auth section; subscription/billing is not)
 - Analytics and exports
 - Web-chat widget setup
 
-These product areas persist per-workspace through `/api/state` now that real accounts exist (see below), so they sync across devices/browsers for the same signed-in account, but they are still interactive simulations, not calls to production services. Instagram is currently a sandbox/demo connection. AI responses (assistant test chat, knowledge Q&A) are canned strings, not calls to a production model. Campaign "sends" and billing are simulated; no bulk WhatsApp/Instagram broadcast API or payment processor is wired up.
+These product areas persist per-workspace through `/api/state` now that real accounts exist (see below), so they sync across devices/browsers for the same signed-in account, but most are still interactive simulations, not calls to production services. Instagram is currently a sandbox/demo connection. Campaign "sends" and billing are simulated; no bulk WhatsApp/Instagram broadcast API or payment processor is wired up.
+
+## AI assistant
+
+Real text and voice replies were added on top of the existing Assistant builder UI, via `worker/assistant.ts`:
+
+- `POST /api/assistant/respond` (session-authenticated) sends a system prompt + conversation history to Anthropic's Messages API (`claude-sonnet-5`) and returns the reply.
+- The frontend composes the system prompt from the assistant's actual configured role/instructions, tone, fallback/handoff policy, restricted topics, and the *names* of connected knowledge sources — not their content. **There is no real retrieval/RAG**: no document content is ever extracted or indexed anywhere in this codebase; "Knowledge sources" are just metadata (name/type/page count). The prompt explicitly tells the model not to invent specific facts attributed to sources it wasn't actually given, but it also can't answer from real business content until real ingestion is built.
+- Test Studio → Chat simulation calls this for real replies.
+- Test Studio → Voice call now does a genuine listen → think → speak loop entirely in the browser: the Web Speech API's `SpeechRecognition` (Chrome/Edge only — not supported in Safari/Firefox) transcribes what the tester says, sends it through the same assistant endpoint, and speaks the reply with `SpeechSynthesis`, with a live transcript shown during the call.
+- **Requires `ANTHROPIC_API_KEY` as a Cloudflare Worker secret** (`npx wrangler secret put ANTHROPIC_API_KEY`) to actually generate replies; without it the endpoint returns a clear 503 "not configured" error rather than failing silently or faking a response.
+- AI actions (the webhook-calling "AI actions" builder) are still not actually invoked by real conversations — `testAction()` still just marks a canned "Passed" without calling the configured endpoint.
+- **Real inbound phone calls are a separate, much bigger project**: they need a telephony provider account (e.g. Twilio) that you create yourself, a real phone number per workspace (provisioned via that provider's API), and webhook-driven call handling — none of that exists yet. The realistic path for customers to use their *existing* business number is call forwarding (conditional or always) to a number provisioned through that provider, not porting.
 
 ## Authentication and multi-tenancy
 
@@ -54,7 +68,9 @@ Real accounts replaced the single shared `default` workspace and the `x-qpy-setu
 - The frontend now gates the whole app behind login/signup (`app/page.tsx`'s `AuthGate`/`Home`/`Workspace` split). The bearer token lives in `localStorage` (`qpy-engage-auth-token`) and is attached via an `AuthTokenContext` used by `useStoredState`, `Channels`, `LiveInbox`, and the new `useWorkspaceMembers` hook (Team page — invite/role/remove now hit real `/api/workspace/members` endpoints instead of local mock state).
 - Role gating so far is minimal: Team invite/role-change/remove and WhatsApp connect/disconnect require Owner/Admin (enforced server-side); other pages don't yet differentiate by role.
 
-**Not yet done**: this was built and reviewed carefully but has not been run through `npm run build`/typecheck or exercised against a live Worker (the agent session that built it had no local Node.js). Run `npm run build` and click through signup → connect WhatsApp → invite a teammate on a preview deploy before trusting this in production. There is also no "forgot password," email verification, or workspace-switching UI yet (a user invited to a second workspace only gets attached to it in the database, with login always resolving to their `Owner` workspace first).
+**Verified**: Node.js was set up in the building session (there wasn't any initially), `npm run build` / `npm run build:pages` / `npx tsc --noEmit` all pass, and this has been deployed to production and click-tested end to end (signup, WhatsApp connection carrying over, live Inbox). One migration-ordering bug was found and fixed in production (see commit history) — a first-signup's legacy-workspace-claim could run before the `whatsapp_messages.workspace_id` column existed; `auth.ts` now adds that column itself before using it, so it's no longer order-dependent.
+
+**Not yet done**: there is no "forgot password," email verification, or workspace-switching UI (a user invited to a second workspace only gets attached to it in the database, with login always resolving to their `Owner` workspace first). The account that currently owns the live "default" workspace is a smoke-test account created during deploy verification (`smoketest+deploycheck@example.com`) — the real user chose to keep using it rather than have it cleaned up, so there's no admin UI yet to rename a workspace or change an account's email/password.
 
 ## Current WhatsApp/Meta status
 
@@ -104,6 +120,7 @@ Expected Cloudflare values:
 - `GET|POST /api/webhooks/whatsapp`: Meta challenge and signed webhook delivery (unauthenticated by design — Meta calls this directly; resolves the workspace from the incoming `phone_number_id`)
 - `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/session`: account auth
 - `GET /api/workspace/members`, `POST /api/workspace/members` (invite), `PATCH /api/workspace/members/:email` (role), `DELETE /api/workspace/members/:email`: team management, Owner/Admin only for writes
+- `POST /api/assistant/respond`: real AI assistant reply via Anthropic Claude; requires a session and `ANTHROPIC_API_KEY`
 
 The GitHub frontend calls the Worker through `META_BACKEND_ORIGIN` in `app/page.tsx`. CORS currently allows `https://mobileecommerce.github.io`, local development, and ChatGPT Sites preview hosts.
 
@@ -140,18 +157,20 @@ vinext may generate `.wrangler/deploy/config.json` with a duplicate local `DB` b
 
 ## Recommended next work
 
-Done: real authentication, per-workspace data isolation, and role-based access for team/WhatsApp management (see "Authentication and multi-tenancy" above) — verify with `npm run build` and a live click-through before trusting it further.
+Done: real authentication, per-workspace data isolation, role-based access for team/WhatsApp management, and real AI assistant replies (text + in-browser voice) via Anthropic Claude — see "Authentication and multi-tenancy" and "AI assistant" above.
 
-1. Verify the auth changes actually build/deploy cleanly (`npm run build`, then a preview `wrangler deploy`) — they were written without a local Node.js runtime available and have not been executed.
-2. Rotate the exposed Meta App Secret, then update the Cloudflare secret; delete the now-unused `META_SETUP_KEY` secret.
-3. Add explicit token metadata/health monitoring and an admin-only credential rotation screen.
-4. Add password reset, email verification, and a workspace-switching UI (a user invited to a second workspace is only attached to it in the database today; login always resolves to their Owner workspace).
-5. Convert Inbox polling to realtime delivery now that the authentication model is in place.
-6. Add database-backed contacts, conversation assignment, resolution, notes, and message attachments (currently only WhatsApp message history is D1-backed; contact metadata is still per-browser).
-7. Connect AI assistant execution to an approved model provider with retrieval, action security, audit logs, and human handoff.
-8. Implement real Instagram OAuth/webhooks, campaign template management, audience consent records, and scheduled delivery workers (bulk campaign "sends" are still simulated — Meta also requires approved message templates for outbound marketing sends outside the 24-hour customer-service window).
-9. Complete Meta Business Verification, App Review, Advanced Access, and Embedded Signup production onboarding.
-10. Wire up real billing (e.g. Stripe) if/when this needs to charge real customers; today's billing UI is fully simulated by design.
+1. Add `ANTHROPIC_API_KEY` as a Cloudflare secret if it isn't set yet — without it the assistant endpoint returns a clear "not configured" error.
+2. Build real knowledge retrieval: actually extract and index content from connected sources (website/document/FAQ) and pass relevant chunks into the assistant's system prompt. Right now the model only ever sees source *names*, not content.
+3. Wire "AI actions" (the webhook builder) to actually call the configured endpoint during a real conversation and during `testAction()`, instead of always reporting a canned "Passed."
+4. Rotate the exposed Meta App Secret, then update the Cloudflare secret; delete the now-unused `META_SETUP_KEY` secret.
+5. Add explicit token metadata/health monitoring and an admin-only credential rotation screen.
+6. Add password reset, email verification, and a workspace-switching UI (a user invited to a second workspace is only attached to it in the database today; login always resolves to their Owner workspace). Also add a way to rename a workspace / change an account's email — needed right now since the live "default" workspace is owned by a smoke-test account.
+7. Convert Inbox polling to realtime delivery now that the authentication model is in place.
+8. Add database-backed contacts, conversation assignment, resolution, notes, and message attachments (currently only WhatsApp message history is D1-backed; contact metadata is still per-browser).
+9. If real inbound phone calls are wanted: set up a telephony provider account (e.g. Twilio), then build per-workspace phone number provisioning and webhook-driven call handling into the same Anthropic-backed assistant endpoint.
+10. Implement real Instagram OAuth/webhooks, campaign template management, audience consent records, and scheduled delivery workers (bulk campaign "sends" are still simulated — Meta also requires approved message templates for outbound marketing sends outside the 24-hour customer-service window).
+11. Complete Meta Business Verification, App Review, Advanced Access, and Embedded Signup production onboarding.
+12. Wire up real billing (e.g. Stripe) if/when this needs to charge real customers; today's billing UI is fully simulated by design.
 
 ## Definition of production readiness
 
