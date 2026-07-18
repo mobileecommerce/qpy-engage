@@ -1,7 +1,7 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
-import { handleMetaRequest, type MetaEnv } from "./meta";
+import { handleMetaRequest, requireSetupKey, type MetaEnv } from "./meta";
 
 interface Env extends MetaEnv {
   ASSETS: Fetcher;
@@ -36,6 +36,8 @@ const worker = {
     if (url.pathname === "/api/state") {
       const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
       if (!env.DB) return json({ error: "Workspace database is unavailable" }, 503);
+      const denied = await requireSetupKey(request, env);
+      if (denied) return denied;
       if (request.method === "GET") {
         const key = url.searchParams.get("key");
         if (!key || !/^[a-z0-9-]{1,80}$/i.test(key)) return json({ error: "A valid key is required" }, 400);

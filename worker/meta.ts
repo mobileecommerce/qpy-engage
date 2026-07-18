@@ -122,7 +122,7 @@ async function safeEqual(left: string, right: string): Promise<boolean> {
   return difference === 0;
 }
 
-async function requireSetupKey(request: Request, env: MetaEnv): Promise<Response | null> {
+export async function requireSetupKey(request: Request, env: MetaEnv): Promise<Response | null> {
   if (!env.META_SETUP_KEY) return json(request, { error: "The secure workspace connection key has not been configured on the server." }, 503);
   const supplied = request.headers.get("x-qpy-setup-key") || "";
   if (!supplied || !(await safeEqual(supplied, env.META_SETUP_KEY))) return json(request, { error: "The workspace connection key is incorrect." }, 401);
