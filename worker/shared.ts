@@ -112,7 +112,9 @@ export type ActionParameter = { name: string; type: "text" | "number" | "email" 
 export type AssistantActionDef = {
   name: string; description: string; parameters: ActionParameter[];
   endpoint: string; method: "POST" | "GET"; defaultResponse: string; enabled: boolean;
+  type: "submit" | "request";
 };
+export type RecordSubmission = (actionName: string, data: Record<string, unknown>) => Promise<void>;
 
 const MAX_ACTIONS = 10;
 const MAX_ACTION_PARAMETERS = 12;
@@ -145,6 +147,7 @@ export function sanitizeActions(raw: unknown): AssistantActionDef[] {
       description: typeof a.description === "string" ? a.description.slice(0, 400) : "",
       defaultResponse: typeof a.defaultResponse === "string" ? a.defaultResponse.slice(0, 400) : "I couldn't complete that action — I'll connect you with the team.",
       enabled: true,
+      type: a.type === "request" ? "request" : "submit",
     });
     if (actions.length >= MAX_ACTIONS) break;
   }
@@ -220,6 +223,7 @@ type AnthropicMessage = { role: "user" | "assistant"; content: string | Anthropi
 
 export async function callClaudeWithActions(
   apiKey: string, systemPrompt: string, messages: ChatMessage[], actions: AssistantActionDef[],
+  recordSubmission?: RecordSubmission,
 ): Promise<{ reply?: string; error?: string; status?: number }> {
   if (!actions.length) return callClaude(apiKey, systemPrompt, messages);
 
@@ -263,6 +267,9 @@ export async function callClaudeWithActions(
     for (const toolUse of toolUses) {
       const action = nameToAction.get(toolUse.name);
       if (!action) { results.push({ type: "tool_result", tool_use_id: toolUse.id, content: "That action is not available.", is_error: true }); continue; }
+      if (action.type === "submit" && recordSubmission) {
+        try { await recordSubmission(action.name, toolUse.input || {}); } catch { /* don't let a storage failure break the reply */ }
+      }
       const { ok, resultText } = await testAction(action, toolUse.input || {});
       results.push({ type: "tool_result", tool_use_id: toolUse.id, content: resultText, is_error: !ok });
     }

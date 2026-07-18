@@ -1,5 +1,6 @@
 import { callClaudeWithActions, sanitizeChatMessages, sanitizeActions } from "./shared";
 import { getStoredKnowledgeContent } from "./knowledge";
+import { saveSubmission } from "./leads";
 
 export interface WidgetEnv {
   DB: D1Database;
@@ -92,7 +93,8 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   const systemPrompt = await buildSystemPrompt(env.DB, workspaceId);
   const storedActions = await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions");
   const actions = sanitizeActions(storedActions || []);
-  const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, messages, actions);
+  const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, actionName, "widget", data);
+  const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, messages, actions, recordSubmission);
   if (result.error) return widgetJson({ error: result.error }, result.status || 502);
   return widgetJson({ reply: result.reply });
 }

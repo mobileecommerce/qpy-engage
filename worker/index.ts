@@ -6,9 +6,10 @@ import { handleAuthRequest, requireSession, type AuthEnv } from "./auth";
 import { handleAssistantRequest, type AssistantEnv } from "./assistant";
 import { handleKnowledgeRequest, type KnowledgeEnv } from "./knowledge";
 import { handleWidgetRequest, type WidgetEnv } from "./widget";
+import { handleLeadsRequest, type LeadsEnv } from "./leads";
 import { json, corsPreflight, allowedOrigin } from "./shared";
 
-interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv {
+interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv, LeadsEnv {
   ASSETS: Fetcher;
   DB: D1Database;
   ANTHROPIC_API_KEY?: string;
@@ -47,6 +48,9 @@ const worker = {
 
     const widgetResponse = await handleWidgetRequest(request, env);
     if (widgetResponse) return widgetResponse;
+
+    const leadsResponse = await handleLeadsRequest(request, env);
+    if (leadsResponse) return leadsResponse;
 
     const metaResponse = await handleMetaRequest(request, env);
     if (metaResponse) return metaResponse;

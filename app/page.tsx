@@ -3,7 +3,7 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import "./live-inbox.css";
 
-type Section = "Overview" | "Assistants" | "Channels" | "Inbox" | "Campaigns" | "Automations" | "Knowledge" | "Analytics" | "Team" | "Settings";
+type Section = "Overview" | "Assistants" | "Channels" | "Inbox" | "Campaigns" | "Automations" | "Knowledge" | "Leads" | "Analytics" | "Team" | "Settings";
 type Message = { from: "customer" | "ai" | "agent"; text: string; time: string };
 type Conversation = { id: string; initials: string; name: string; preview: string; time: string; unread: number; tone: string; status: "open" | "resolved"; email: string; phone: string; tags: string[]; notes?: string[] };
 type Automation = { id: number; title: string; trigger: string; action: string; runs: number; rate: string; active: boolean };
@@ -68,7 +68,7 @@ const initialCampaigns: Campaign[] = [
   {id:3,name:"Win-back offer",channel:"WhatsApp",audience:"Inactive 90 days",recipients:436,status:"Draft",schedule:"Not scheduled",delivered:"—",clicks:"—"},
 ];
 
-const nav: [string, Section][] = [["⌂","Overview"],["✦","Assistants"],["◫","Channels"],["◉","Inbox"],["◈","Campaigns"],["⌁","Automations"],["◇","Knowledge"],["▥","Analytics"]];
+const nav: [string, Section][] = [["⌂","Overview"],["✦","Assistants"],["◫","Channels"],["◉","Inbox"],["◈","Campaigns"],["⌁","Automations"],["◇","Knowledge"],["⚑","Leads"],["▥","Analytics"]];
 
 const AUTH_TOKEN_KEY = "qpy-engage-auth-token";
 const AuthTokenContext = createContext<string | null>(null);
@@ -139,12 +139,12 @@ function useWorkspaceMembers(token: string | null) {
   return { members, invite, updateRole, remove };
 }
 
-async function callAssistant(token: string | null, systemPrompt: string, messages: {role:"user"|"assistant";content:string}[], actions?: AssistantAction[]): Promise<string> {
+async function callAssistant(token: string | null, systemPrompt: string, messages: {role:"user"|"assistant";content:string}[], actions?: AssistantAction[], channel?: string): Promise<string> {
   if (!token) throw new Error("Sign in required.");
   const response = await fetch(metaApi("/api/assistant/respond"), {
     method: "POST",
     headers: { "content-type": "application/json", ...authHeaders(token) },
-    body: JSON.stringify({ systemPrompt, messages, actions: (actions || []).filter((a) => a.enabled) }),
+    body: JSON.stringify({ systemPrompt, messages, actions: (actions || []).filter((a) => a.enabled), channel }),
   });
   const result = await response.json() as { reply?: string; error?: string };
   if (!response.ok || !result.reply) throw new Error(result.error || "The assistant could not respond.");
@@ -267,6 +267,7 @@ function Workspace({session,onLogout}:{session:AuthSession;onLogout:()=>void}) {
     section === "Campaigns" ? <Campaigns notify={notify}/> :
     section === "Automations" ? <Automations items={automations} setItems={setAutomations} onCreate={openAutomation} notify={notify}/> :
     section === "Knowledge" ? <Knowledge sources={sources} setSources={setSources} onAdd={()=>setModal("source")} notify={notify}/> :
+    section === "Leads" ? <Leads notify={notify}/> :
     section === "Analytics" ? <Analytics automations={automations} conversationCount={conversations.length} notify={notify}/> :
     section === "Team" ? <Team members={members} role={session.role} onInvite={()=>setModal("invite")} onUpdateRole={updateRole} onRemove={removeMember} notify={notify}/> :
     <Settings activeTab={settingsTab} setActiveTab={setSettingsTab} connected={connected} onChannels={()=>go("Channels")} workspaceName={session.workspace.name} notify={notify}/>;
@@ -424,7 +425,7 @@ function Assistants({sources,workspaceName,onKnowledge,onChannels,onAnalytics,no
     const history=[...testMessages,{from:"customer" as const,text:question,time:"Now"}];
     setTestMessages(history);setTestDraft("");setTestSending(true);
     try{
-      const reply=await callAssistant(token,buildSystemPrompt(),toApiMessages(history),actions);
+      const reply=await callAssistant(token,buildSystemPrompt(),toApiMessages(history),actions,"test_studio_chat");
       setTestMessages(current=>[...current,{from:"ai",text:reply,time:"Now"}]);
     }catch(error){notify(error instanceof Error?error.message:"The assistant could not respond.")}
     finally{setTestSending(false)}
@@ -504,7 +505,7 @@ function Assistants({sources,workspaceName,onKnowledge,onChannels,onAnalytics,no
     setVoiceTranscript(history);
     setVoiceStatus("thinking");
     try{
-      const reply=await callAssistant(token,buildSystemPrompt(),toApiMessages(history),actions);
+      const reply=await callAssistant(token,buildSystemPrompt(),toApiMessages(history),actions,"test_studio_voice");
       setVoiceTranscript(current=>[...current,{from:"ai",text:reply,time:"Now"}]);
       speak(reply,()=>{if(callActiveRef.current)listenOnce()});
     }catch(error){
@@ -705,6 +706,49 @@ function Campaigns({notify}:{notify:(s:string)=>void}){
 
 const automationTemplates:{name:string;trigger:string;action:string}[]=[{name:"Welcome new leads",trigger:"New WhatsApp conversation",action:"Send AI welcome message"},{name:"Recover abandoned carts",trigger:"Cart idle for 2 hours",action:"Send recovery template"},{name:"Collect customer feedback",trigger:"Conversation marked resolved",action:"Request feedback survey"}];
 function Automations({items,setItems,onCreate,notify}:{items:Automation[];setItems:(v:Automation[])=>void;onCreate:(template?:{name:string;trigger:string;action:string})=>void;notify:(s:string)=>void}){const [query,setQuery]=useState("");const duplicate=(item:Automation)=>{setItems([...items,{...item,id:Date.now(),title:`${item.title} copy`,runs:0,rate:"New",active:false}]);notify("Automation duplicated")};const remove=(id:number)=>{if(window.confirm("Delete this automation?")){setItems(items.filter(i=>i.id!==id));notify("Automation deleted")}};return <><PageHeader title="Automations" description="Build always-on workflows for sales and support." action={<button className="primary" onClick={()=>onCreate()}>＋ Create automation</button>}/><div className="toolbar"><input placeholder="Search automations" value={query} onChange={e=>setQuery(e.target.value)}/><span>{items.filter(i=>i.active).length} active workflows</span></div><div className="data-card"><table><thead><tr><th>Automation</th><th>Trigger</th><th>Action</th><th>Runs</th><th>Performance</th><th>Status</th><th/></tr></thead><tbody>{items.filter(i=>i.title.toLowerCase().includes(query.toLowerCase())).map(item=><tr key={item.id}><td><div className="table-title"><span>✦</span><strong>{item.title}</strong></div></td><td>{item.trigger}</td><td>{item.action}</td><td>{item.runs}</td><td><b className="positive">{item.rate}</b></td><td><button className={`toggle ${item.active?"on":""}`} onClick={()=>setItems(items.map(a=>a.id===item.id?{...a,active:!a.active}:a))}><i/></button></td><td><div className="row-actions"><button title="Duplicate" onClick={()=>duplicate(item)}>⧉</button><button title="Delete" onClick={()=>remove(item.id)}>×</button></div></td></tr>)}</tbody></table></div><div className="template-strip"><div><h3>Start from a proven template</h3><p>Launch common WhatsApp workflows in minutes.</p></div>{automationTemplates.map(t=><button key={t.name} onClick={()=>onCreate(t)}><span>＋</span>{t.name}</button>)}</div></>}
+
+type Submission={id:number;actionName:string;channel:string;data:Record<string,unknown>;createdAt:string};
+const channelLabel=(channel:string)=>({test_studio_chat:"Test Studio (chat)",test_studio_voice:"Test Studio (voice)",widget:"Web chat widget"} as Record<string,string>)[channel]||channel;
+
+function Leads({notify}:{notify:(s:string)=>void}){
+  const token=useAuthToken();
+  const [submissions,setSubmissions]=useState<Submission[]>([]);
+  const [loading,setLoading]=useState(true);
+  const load=async()=>{
+    if(!token){setLoading(false);return}
+    setLoading(true);
+    try{
+      const response=await fetch(metaApi("/api/leads"),{headers:authHeaders(token)});
+      const result=await response.json() as {submissions?:Submission[];error?:string};
+      if(!response.ok)throw new Error(result.error||"Could not load captured leads.");
+      setSubmissions(result.submissions||[]);
+    }catch(error){notify(error instanceof Error?error.message:"Could not load captured leads.")}
+    finally{setLoading(false)}
+  };
+  useEffect(()=>{load()},[token]);
+  const remove=async(id:number)=>{
+    if(!window.confirm("Delete this captured entry?"))return;
+    try{
+      const response=await fetch(metaApi(`/api/leads/${id}`),{method:"DELETE",headers:authHeaders(token)});
+      if(!response.ok)throw new Error("Could not delete that entry.");
+      setSubmissions(current=>current.filter(s=>s.id!==id));
+      notify("Entry deleted");
+    }catch(error){notify(error instanceof Error?error.message:"Could not delete that entry.")}
+  };
+  const exportCsv=()=>{
+    const fieldNames=[...new Set(submissions.flatMap(s=>Object.keys(s.data)))];
+    const header=["Captured at","Action","Channel",...fieldNames];
+    const rows=submissions.map(s=>[s.createdAt,s.actionName,channelLabel(s.channel),...fieldNames.map(f=>String(s.data[f]??""))]);
+    const csv=[header,...rows].map(row=>row.map(cell=>`"${String(cell).replace(/"/g,'""')}"`).join(",")).join("\n");
+    const blob=new Blob([csv],{type:"text/csv"});
+    const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="qpy-engage-leads.csv";a.click();
+    notify("Leads exported");
+  };
+  return <><PageHeader title="Captured leads" description="Data your AI actions have collected from real conversations, saved automatically." action={<div className="header-buttons"><button className="secondary-btn" onClick={load}>↻ Refresh</button><button className="primary" disabled={!submissions.length} onClick={exportCsv}>↓ Export CSV</button></div>}/>
+  {loading?<p className="empty-hint">Loading…</p>:!submissions.length?<div className="empty-state"><span>⚑</span><h3>No captured leads yet</h3><p>When a customer gives details to an AI action (like a callback request), it's saved here automatically — from Test Studio and your public web chat widget. This is a local copy kept even if the action's own webhook fails.</p></div>:
+  <div className="data-card"><table><thead><tr><th>Captured</th><th>Action</th><th>Channel</th><th>Details</th><th/></tr></thead><tbody>{submissions.map(s=><tr key={s.id}><td>{new Date(s.createdAt).toLocaleString()}</td><td><strong>{s.actionName}</strong></td><td>{channelLabel(s.channel)}</td><td>{Object.entries(s.data).map(([k,v])=><div key={k}><small>{k}:</small> {String(v)}</div>)}</td><td><button className="dots" onClick={()=>remove(s.id)}>Delete</button></td></tr>)}</tbody></table></div>}
+  </>;
+}
 
 function Knowledge({sources,setSources,onAdd,notify}:{sources:Source[];setSources:(v:Source[])=>void;onAdd:()=>void;notify:(s:string)=>void}){const total=sources.reduce((n,s)=>n+s.pages,0);const [question,setQuestion]=useState("");const [answer,setAnswer]=useState("");const sync=()=>{setSources(sources.map(s=>({...s,status:"Syncing"})));notify("Synchronizing sources");window.setTimeout(()=>{setSources(sources.map(s=>({...s,status:"Ready"})));notify("All sources synchronized")},900)};const ask=()=>{if(!question.trim())return;setAnswer(`Based on ${sources.length} connected sources: UAE delivery normally takes 1–3 business days, with free standard delivery on qualifying orders. I would hand off if the customer asks about an exception not covered in your policies.`);notify("Knowledge answer generated")};return <><PageHeader title="Knowledge" description="Train your AI using your website, documents, and FAQs." action={<button className="primary" onClick={onAdd}>＋ Add source</button>}/><div className="knowledge-stats"><article><span>◇</span><div><strong>{sources.length}</strong><small>Connected sources</small></div></article><article><span>▤</span><div><strong>{total.toLocaleString()}</strong><small>Pages indexed</small></div></article><article><span>✓</span><div><strong>{sources.length?"98.7%":"0%"}</strong><small>Answer coverage</small></div></article></div><div className="data-card"><div className="card-head"><div><h2>Training sources</h2><p>Content is automatically chunked, indexed, and kept up to date.</p></div><button onClick={sync}>↻ Sync all</button></div><table><thead><tr><th>Source</th><th>Type</th><th>Content</th><th>Status</th><th>Last synced</th><th/></tr></thead><tbody>{sources.map(source=><tr key={source.id}><td><div className="table-title"><span>{source.type==="Website"?"⌁":"▤"}</span><strong>{source.name}</strong></div></td><td>{source.type}</td><td>{source.pages.toLocaleString()} pages</td><td><span className={`status-pill ${source.status==="Ready"?"ready":"syncing"}`}>{source.status}</span></td><td>Just now</td><td><button className="dots" onClick={()=>{if(window.confirm(`Remove ${source.name}?`)){setSources(sources.filter(s=>s.id!==source.id));notify("Source removed")}}}>Remove</button></td></tr>)}</tbody></table>{!sources.length&&<div className="empty-row">No training sources yet. Add a website, document, or FAQ.</div>}</div><div className="training-lab"><div><span>✦</span><h3>Test your AI knowledge</h3><p>Ask a question exactly as a customer would.</p><div className="test-input"><input value={question} onChange={e=>setQuestion(e.target.value)} onKeyDown={e=>e.key==="Enter"&&ask()} placeholder="e.g. How long does delivery to Dubai take?"/><button onClick={ask}>Ask Qpy Engage</button></div>{answer&&<div className="knowledge-answer"><strong>✦ Qpy Engage answer</strong><p>{answer}</p><small>Sources: {sources.slice(0,3).map(s=>s.name).join(", ")||"No sources selected"}</small></div>}</div><aside><strong>Coverage tip</strong><p>Add policies, sizing guides, and product manuals to improve answer confidence.</p></aside></div></>}
 
