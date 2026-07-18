@@ -3,10 +3,12 @@ import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } fr
 import handler from "vinext/server/app-router-entry";
 import { handleMetaRequest, type MetaEnv } from "./meta";
 import { handleAuthRequest, requireSession, type AuthEnv } from "./auth";
+import { handleAssistantRequest, type AssistantEnv } from "./assistant";
 
-interface Env extends MetaEnv, AuthEnv {
+interface Env extends MetaEnv, AuthEnv, AssistantEnv {
   ASSETS: Fetcher;
   DB: D1Database;
+  ANTHROPIC_API_KEY?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -33,6 +35,9 @@ const worker = {
 
     const authResponse = await handleAuthRequest(request, env);
     if (authResponse) return authResponse;
+
+    const assistantResponse = await handleAssistantRequest(request, env);
+    if (assistantResponse) return assistantResponse;
 
     const metaResponse = await handleMetaRequest(request, env);
     if (metaResponse) return metaResponse;
