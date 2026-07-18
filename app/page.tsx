@@ -109,7 +109,7 @@ function useStoredState<T>(key: string, initial: T) {
     const legacyKey=key.replace(/^qpy-engage-/,"wavely-");
     const load=async()=>{
       try { const saved=localStorage.getItem(key)??localStorage.getItem(legacyKey); if(saved&&!cancelled)setValue(JSON.parse(saved)); } catch {}
-      if(token)try { const headers=authHeaders(token); let response=await fetch(`/api/state?key=${encodeURIComponent(key)}`,{headers});let data=response.ok?await response.json():{value:null};if(data.value===null&&legacyKey!==key){response=await fetch(`/api/state?key=${encodeURIComponent(legacyKey)}`,{headers});data=response.ok?await response.json():data}if(data.value!==null&&!cancelled)setValue(data.value); } catch {}
+      if(token)try { const headers=authHeaders(token); let response=await fetch(metaApi(`/api/state?key=${encodeURIComponent(key)}`),{headers});let data=response.ok?await response.json():{value:null};if(data.value===null&&legacyKey!==key){response=await fetch(metaApi(`/api/state?key=${encodeURIComponent(legacyKey)}`),{headers});data=response.ok?await response.json():data}if(data.value!==null&&!cancelled)setValue(data.value); } catch {}
       if(!cancelled)setLoaded(true);
     };
     load();
@@ -118,7 +118,7 @@ function useStoredState<T>(key: string, initial: T) {
   useEffect(() => {
     if(!loaded)return;
     localStorage.setItem(key,JSON.stringify(value));
-    const timer=window.setTimeout(()=>{if(token)fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({key,value})}).catch(()=>{});},350);
+    const timer=window.setTimeout(()=>{if(token)fetch(metaApi("/api/state"),{method:"PUT",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({key,value})}).catch(()=>{});},350);
     return()=>window.clearTimeout(timer);
   }, [key, loaded, value, token]);
   return [value, setValue] as const;
