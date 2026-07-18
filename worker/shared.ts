@@ -107,3 +107,167 @@ export async function callClaude(apiKey: string, systemPrompt: string, messages:
   if (!reply) return { error: "The assistant didn't return a response.", status: 502 };
   return { reply };
 }
+
+export type ActionParameter = { name: string; type: "text" | "number" | "email" | "phone" | "boolean"; required: boolean; description: string };
+export type AssistantActionDef = {
+  name: string; description: string; parameters: ActionParameter[];
+  endpoint: string; method: "POST" | "GET"; defaultResponse: string; enabled: boolean;
+};
+
+const MAX_ACTIONS = 10;
+const MAX_ACTION_PARAMETERS = 12;
+const ACTION_TIMEOUT_MS = 8000;
+const MAX_TOOL_RESULT_LENGTH = 2000;
+const MAX_TOOL_ITERATIONS = 3;
+
+export function sanitizeActions(raw: unknown): AssistantActionDef[] {
+  if (!Array.isArray(raw)) return [];
+  const actions: AssistantActionDef[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const a = item as Record<string, unknown>;
+    if (!a.enabled) continue;
+    const name = typeof a.name === "string" ? a.name.trim().slice(0, 80) : "";
+    const endpoint = typeof a.endpoint === "string" ? a.endpoint.trim() : "";
+    if (!name || !/^https?:\/\//i.test(endpoint)) continue;
+    const method = a.method === "GET" ? "GET" : "POST";
+    const parameters: ActionParameter[] = Array.isArray(a.parameters)
+      ? a.parameters.slice(0, MAX_ACTION_PARAMETERS).filter((p): p is Record<string, unknown> => Boolean(p) && typeof p === "object")
+        .map((p) => ({
+          name: String(p.name ?? "").trim().slice(0, 60),
+          type: (["text", "number", "email", "phone", "boolean"].includes(p.type as string) ? p.type : "text") as ActionParameter["type"],
+          required: Boolean(p.required),
+          description: String(p.description ?? "").slice(0, 200),
+        })).filter((p) => p.name)
+      : [];
+    actions.push({
+      name, endpoint, method, parameters,
+      description: typeof a.description === "string" ? a.description.slice(0, 400) : "",
+      defaultResponse: typeof a.defaultResponse === "string" ? a.defaultResponse.slice(0, 400) : "I couldn't complete that action — I'll connect you with the team.",
+      enabled: true,
+    });
+    if (actions.length >= MAX_ACTIONS) break;
+  }
+  return actions;
+}
+
+function isBlockedHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host === "::1" || host.endsWith(".local");
+}
+
+type ToolDef = { name: string; description: string; input_schema: { type: "object"; properties: Record<string, { type: string; description?: string }>; required: string[] } };
+
+function toolNameFor(name: string, index: number, used: Set<string>): string {
+  const base = name.toLowerCase().trim().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 50) || `action_${index}`;
+  let candidate = base;
+  let suffix = 1;
+  while (used.has(candidate)) candidate = `${base}_${suffix++}`;
+  used.add(candidate);
+  return candidate;
+}
+
+function jsonSchemaType(type: ActionParameter["type"]): string {
+  if (type === "number") return "number";
+  if (type === "boolean") return "boolean";
+  return "string";
+}
+
+function buildTools(actions: AssistantActionDef[]): { tools: ToolDef[]; nameToAction: Map<string, AssistantActionDef> } {
+  const used = new Set<string>();
+  const nameToAction = new Map<string, AssistantActionDef>();
+  const tools = actions.map((action, index) => {
+    const toolName = toolNameFor(action.name, index, used);
+    nameToAction.set(toolName, action);
+    const properties: Record<string, { type: string; description?: string }> = {};
+    for (const p of action.parameters) properties[p.name] = { type: jsonSchemaType(p.type), description: p.description || undefined };
+    return {
+      name: toolName,
+      description: action.description || action.name,
+      input_schema: { type: "object" as const, properties, required: action.parameters.filter((p) => p.required).map((p) => p.name) },
+    };
+  });
+  return { tools, nameToAction };
+}
+
+export async function testAction(action: AssistantActionDef, input: Record<string, unknown>): Promise<{ ok: boolean; resultText: string }> {
+  try {
+    const url = new URL(action.endpoint);
+    if (isBlockedHost(url.hostname)) return { ok: false, resultText: action.defaultResponse };
+    let requestUrl = url.toString();
+    const init: RequestInit = { method: action.method, signal: AbortSignal.timeout(ACTION_TIMEOUT_MS) };
+    if (action.method === "GET") {
+      for (const [key, value] of Object.entries(input)) url.searchParams.set(key, String(value));
+      requestUrl = url.toString();
+    } else {
+      init.headers = { "content-type": "application/json" };
+      init.body = JSON.stringify(input);
+    }
+    const response = await fetch(requestUrl, init);
+    const text = (await response.text()).slice(0, MAX_TOOL_RESULT_LENGTH);
+    if (!response.ok) return { ok: false, resultText: `The business system returned an error (HTTP ${response.status}). ${action.defaultResponse}` };
+    return { ok: true, resultText: text || "The action completed successfully with no response body." };
+  } catch {
+    return { ok: false, resultText: `Could not reach the business system for this action. ${action.defaultResponse}` };
+  }
+}
+
+type AnthropicContentBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+  | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
+type AnthropicMessage = { role: "user" | "assistant"; content: string | AnthropicContentBlock[] };
+
+export async function callClaudeWithActions(
+  apiKey: string, systemPrompt: string, messages: ChatMessage[], actions: AssistantActionDef[],
+): Promise<{ reply?: string; error?: string; status?: number }> {
+  if (!actions.length) return callClaude(apiKey, systemPrompt, messages);
+
+  const { tools, nameToAction } = buildTools(actions);
+  const conversation: AnthropicMessage[] = messages.map((m) => ({ role: m.role, content: m.content }));
+
+  for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 500,
+        system: systemPrompt.slice(0, MAX_SYSTEM_PROMPT_LENGTH) || undefined,
+        messages: conversation,
+        tools,
+      }),
+    });
+
+    if (!response.ok) {
+      let message = `AI provider returned HTTP ${response.status}.`;
+      try {
+        const errorPayload = await response.json() as { error?: { message?: string } };
+        if (errorPayload.error?.message) message = errorPayload.error.message;
+      } catch { /* keep default message */ }
+      return { error: message, status: 502 };
+    }
+
+    const payload = await response.json() as { content?: AnthropicContentBlock[] };
+    const blocks = payload.content || [];
+    const toolUses = blocks.filter((b): b is Extract<AnthropicContentBlock, { type: "tool_use" }> => b.type === "tool_use");
+
+    if (!toolUses.length) {
+      const reply = blocks.filter((b): b is Extract<AnthropicContentBlock, { type: "text" }> => b.type === "text").map((b) => b.text).join("").trim();
+      if (!reply) return { error: "The assistant didn't return a response.", status: 502 };
+      return { reply };
+    }
+
+    conversation.push({ role: "assistant", content: blocks });
+    const results: AnthropicContentBlock[] = [];
+    for (const toolUse of toolUses) {
+      const action = nameToAction.get(toolUse.name);
+      if (!action) { results.push({ type: "tool_result", tool_use_id: toolUse.id, content: "That action is not available.", is_error: true }); continue; }
+      const { ok, resultText } = await testAction(action, toolUse.input || {});
+      results.push({ type: "tool_result", tool_use_id: toolUse.id, content: resultText, is_error: !ok });
+    }
+    conversation.push({ role: "user", content: results });
+  }
+
+  return { error: "The assistant took too many steps to complete this request.", status: 502 };
+}
