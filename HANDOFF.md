@@ -157,7 +157,7 @@ vinext may generate `.wrangler/deploy/config.json` with a duplicate local `DB` b
 
 ## Recommended next work
 
-Done: real authentication, per-workspace data isolation, role-based access for team/WhatsApp management, real AI assistant replies (text + in-browser voice, with real voice selection, transcript toggle, max-duration auto-end, and interrupt/barge-in) via Anthropic Claude, real website knowledge ingestion, a real public web chat widget, real "AI Actions" execution (Claude tool-use actually calls the configured webhook, both in Test Studio and the public widget), and an honest new-account experience — see "Authentication and multi-tenancy" and "AI assistant" above.
+Done: real authentication, per-workspace data isolation, role-based access for team/WhatsApp management, real AI assistant replies (text + in-browser voice, with real voice selection, transcript toggle, max-duration auto-end, and interrupt/barge-in) via Anthropic Claude, real website knowledge ingestion, a real public web chat widget with customizable icon/placement/effect/accent color (Channels > Web chat), real "AI Actions" execution (Claude tool-use actually calls the configured webhook, both in Test Studio and the public widget) with captured-lead storage (new "Leads" page), and an honest new-account experience — see "Authentication and multi-tenancy" and "AI assistant" above.
 
 1. Add `ANTHROPIC_API_KEY` as a Cloudflare secret if it isn't set yet — without it the assistant endpoint returns a clear "not configured" error.
 2. **New-account demo-content issue — fixed 2026-07-19:**
