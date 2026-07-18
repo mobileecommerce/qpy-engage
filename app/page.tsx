@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import "./live-inbox.css";
 
 type Section = "Overview" | "Assistants" | "Channels" | "Inbox" | "Campaigns" | "Automations" | "Knowledge" | "Analytics" | "Team" | "Settings";
@@ -8,7 +8,10 @@ type Message = { from: "customer" | "ai" | "agent"; text: string; time: string }
 type Conversation = { id: string; initials: string; name: string; preview: string; time: string; unread: number; tone: string; status: "open" | "resolved"; email: string; phone: string; tags: string[]; notes?: string[] };
 type Automation = { id: number; title: string; trigger: string; action: string; runs: number; rate: string; active: boolean };
 type Source = { id: number; name: string; type: "Website" | "Document" | "FAQ"; pages: number; status: "Ready" | "Syncing" };
-type Member = { id: number; name: string; email: string; role: "Owner" | "Admin" | "Agent" | "Analyst"; status: "Active" | "Invited" };
+type Member = { id: string; userId: string | null; name: string; email: string; role: "Owner" | "Admin" | "Agent" | "Analyst"; status: "Active" | "Invited" };
+type AuthUser = { id: string; email: string; name: string | null };
+type AuthWorkspace = { id: string; name: string };
+type AuthSession = { token: string; user: AuthUser; workspace: AuthWorkspace; role: Member["role"] };
 type Campaign = { id:number; name:string; channel:"WhatsApp"|"Instagram"; audience:string; recipients:number; status:"Draft"|"Scheduled"|"Sent"; schedule:string; delivered:string; clicks:string };
 type ActionParameter = { id:number; name:string; type:"text"|"number"|"email"|"phone"|"boolean"; required:boolean; description:string };
 type AssistantAction = { id:number; name:string; description:string; type:"submit"|"request"; parameters:ActionParameter[]; endpoint:string; method:"POST"|"GET"; defaultResponse:string; confirmation:boolean; continueConversation:boolean; enabled:boolean; runs:number; success:string; lastTest:string };
@@ -71,12 +74,6 @@ const initialSources: Source[] = [
   {id:4,name:"Customer FAQs",type:"FAQ",pages:46,status:"Ready"},
 ];
 
-const initialMembers: Member[] = [
-  {id:1,name:"Praveen Madipoju",email:"praveen@atelier.co",role:"Owner",status:"Active"},
-  {id:2,name:"Maya Chen",email:"maya@atelier.co",role:"Admin",status:"Active"},
-  {id:3,name:"Omar Hassan",email:"omar@atelier.co",role:"Agent",status:"Active"},
-  {id:4,name:"Lea Martin",email:"lea@atelier.co",role:"Analyst",status:"Invited"},
-];
 
 const initialCampaigns: Campaign[] = [
   {id:1,name:"Summer collection launch",channel:"WhatsApp",audience:"VIP customers",recipients:1248,status:"Sent",schedule:"Jul 12, 10:00",delivered:"97.8%",clicks:"18.4%"},
@@ -86,9 +83,13 @@ const initialCampaigns: Campaign[] = [
 
 const nav: [string, Section][] = [["⌂","Overview"],["✦","Assistants"],["◫","Channels"],["◉","Inbox"],["◈","Campaigns"],["⌁","Automations"],["◇","Knowledge"],["▥","Analytics"]];
 
-function stateAuthHeaders(): Record<string,string> { try { const key=sessionStorage.getItem("qpy-engage-session-key"); return key?{"x-qpy-setup-key":key}:{} } catch { return {} } }
+const AUTH_TOKEN_KEY = "qpy-engage-auth-token";
+const AuthTokenContext = createContext<string | null>(null);
+function authHeaders(token: string | null): Record<string,string> { return token ? { authorization: `Bearer ${token}` } : {}; }
+function useAuthToken(): string | null { return useContext(AuthTokenContext); }
 
 function useStoredState<T>(key: string, initial: T) {
+  const token = useAuthToken();
   const [value, setValue] = useState<T>(initial);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
@@ -96,30 +97,135 @@ function useStoredState<T>(key: string, initial: T) {
     const legacyKey=key.replace(/^qpy-engage-/,"wavely-");
     const load=async()=>{
       try { const saved=localStorage.getItem(key)??localStorage.getItem(legacyKey); if(saved&&!cancelled)setValue(JSON.parse(saved)); } catch {}
-      const staticHost=location.hostname.endsWith("github.io")||location.protocol==="file:";
-      if(!staticHost)try { const headers=stateAuthHeaders(); let response=await fetch(`/api/state?key=${encodeURIComponent(key)}`,{headers});let data=response.ok?await response.json():{value:null};if(data.value===null&&legacyKey!==key){response=await fetch(`/api/state?key=${encodeURIComponent(legacyKey)}`,{headers});data=response.ok?await response.json():data}if(data.value!==null&&!cancelled)setValue(data.value); } catch {}
+      if(token)try { const headers=authHeaders(token); let response=await fetch(`/api/state?key=${encodeURIComponent(key)}`,{headers});let data=response.ok?await response.json():{value:null};if(data.value===null&&legacyKey!==key){response=await fetch(`/api/state?key=${encodeURIComponent(legacyKey)}`,{headers});data=response.ok?await response.json():data}if(data.value!==null&&!cancelled)setValue(data.value); } catch {}
       if(!cancelled)setLoaded(true);
     };
     load();
     return()=>{cancelled=true};
-  }, [key]);
+  }, [key, token]);
   useEffect(() => {
     if(!loaded)return;
     localStorage.setItem(key,JSON.stringify(value));
-    const staticHost=location.hostname.endsWith("github.io")||location.protocol==="file:";
-    const timer=window.setTimeout(()=>{if(!staticHost)fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json",...stateAuthHeaders()},body:JSON.stringify({key,value})}).catch(()=>{});},350);
+    const timer=window.setTimeout(()=>{if(token)fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({key,value})}).catch(()=>{});},350);
     return()=>window.clearTimeout(timer);
-  }, [key, loaded, value]);
+  }, [key, loaded, value, token]);
   return [value, setValue] as const;
 }
 
+function useWorkspaceMembers(token: string | null) {
+  const [members, setMembers] = useState<Member[]>([]);
+  const refresh = async () => {
+    if (!token) return;
+    try {
+      const response = await fetch(metaApi("/api/workspace/members"), { headers: authHeaders(token) });
+      if (response.ok) { const data = await response.json() as { members: Member[] }; setMembers(data.members || []); }
+    } catch {}
+  };
+  useEffect(() => { refresh(); }, [token]);
+  const invite = async (email: string, role: Member["role"]): Promise<string | null> => {
+    if (!token) return "Sign in required.";
+    try {
+      const response = await fetch(metaApi("/api/workspace/members"), { method: "POST", headers: { "content-type": "application/json", ...authHeaders(token) }, body: JSON.stringify({ email, role }) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) return result.error || "Invitation failed.";
+      await refresh();
+      return null;
+    } catch { return "Invitation failed."; }
+  };
+  const updateRole = async (email: string, role: Member["role"]) => {
+    if (!token) return;
+    await fetch(metaApi(`/api/workspace/members/${encodeURIComponent(email)}`), { method: "PATCH", headers: { "content-type": "application/json", ...authHeaders(token) }, body: JSON.stringify({ role }) });
+    await refresh();
+  };
+  const remove = async (email: string) => {
+    if (!token) return;
+    await fetch(metaApi(`/api/workspace/members/${encodeURIComponent(email)}`), { method: "DELETE", headers: authHeaders(token) });
+    await refresh();
+  };
+  return { members, invite, updateRole, remove };
+}
+
 export default function Home() {
+  const [session, setSession] = useState<AuthSession | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const token = (() => { try { return localStorage.getItem(AUTH_TOKEN_KEY) } catch { return null } })();
+    if (!token) { setAuthLoading(false); return }
+    (async () => {
+      try {
+        const response = await fetch(metaApi("/api/auth/session"), { headers: authHeaders(token) });
+        if (response.ok) {
+          const data = await response.json() as { user: AuthUser; workspace: AuthWorkspace; role: Member["role"] };
+          if (!cancelled) setSession({ token, user: data.user, workspace: data.workspace, role: data.role });
+        } else {
+          localStorage.removeItem(AUTH_TOKEN_KEY);
+        }
+      } catch { /* keep the stored token; the network may just be offline */ }
+      if (!cancelled) setAuthLoading(false);
+    })();
+    return () => { cancelled = true };
+  }, []);
+
+  const handleAuthed = (next: AuthSession) => { try { localStorage.setItem(AUTH_TOKEN_KEY, next.token) } catch {} setSession(next) };
+  const handleLogout = async () => {
+    if (session) { try { await fetch(metaApi("/api/auth/logout"), { method: "POST", headers: authHeaders(session.token) }) } catch {} }
+    try { localStorage.removeItem(AUTH_TOKEN_KEY) } catch {}
+    setSession(null);
+  };
+
+  if (authLoading) return <div className="auth-loading">Loading Qpy Engage…</div>;
+  if (!session) return <AuthGate onAuthed={handleAuthed}/>;
+  return <AuthTokenContext.Provider value={session.token}><Workspace session={session} onLogout={handleLogout}/></AuthTokenContext.Provider>;
+}
+
+function AuthGate({onAuthed}:{onAuthed:(session:AuthSession)=>void}){
+  const [mode,setMode]=useState<"login"|"signup">("login");
+  const [email,setEmail]=useState("");
+  const [password,setPassword]=useState("");
+  const [name,setName]=useState("");
+  const [workspaceName,setWorkspaceName]=useState("");
+  const [error,setError]=useState("");
+  const [loading,setLoading]=useState(false);
+
+  const submit=async()=>{
+    if(!email.trim()||!password){setError("Enter your email and password.");return}
+    setLoading(true);setError("");
+    try{
+      const path=mode==="login"?"/api/auth/login":"/api/auth/signup";
+      const body=mode==="login"?{email:email.trim(),password}:{email:email.trim(),password,name:name.trim(),workspaceName:workspaceName.trim()};
+      const response=await fetch(metaApi(path),{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+      const result=await response.json() as {token?:string;user?:AuthUser;workspace?:AuthWorkspace;role?:Member["role"];error?:string};
+      if(!response.ok||!result.token||!result.user||!result.workspace||!result.role)throw new Error(result.error||"Something went wrong.");
+      onAuthed({token:result.token,user:result.user,workspace:result.workspace,role:result.role});
+    }catch(err){setError(err instanceof Error?err.message:"Something went wrong.")}
+    finally{setLoading(false)}
+  };
+
+  return <main className="auth-shell"><div className="auth-card">
+    <div className="auth-brand"><span className="brand-mark">Q</span><span>Qpy Engage</span></div>
+    <h1>{mode==="login"?"Welcome back":"Create your workspace"}</h1>
+    <p>{mode==="login"?"Sign in to manage your customer conversations.":"Set up a new Qpy Engage workspace in seconds."}</p>
+    {error&&<div className="meta-error">⚠ {error}</div>}
+    <div className="modal-form">
+      {mode==="signup"&&<label>Your name<input value={name} onChange={e=>setName(e.target.value)} placeholder="Jane Doe"/></label>}
+      {mode==="signup"&&<label>Workspace name<input value={workspaceName} onChange={e=>setWorkspaceName(e.target.value)} placeholder="e.g. Atelier Home"/></label>}
+      <label>Email<input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com"/></label>
+      <label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} placeholder={mode==="signup"?"At least 8 characters":"Your password"}/></label>
+    </div>
+    <button className="primary" disabled={loading} onClick={submit}>{loading?"Please wait…":mode==="login"?"Sign in":"Create workspace"}</button>
+    <button className="auth-switch" onClick={()=>{setMode(mode==="login"?"signup":"login");setError("")}}>{mode==="login"?"Need a workspace? Create one":"Already have an account? Sign in"}</button>
+  </div></main>;
+}
+
+function Workspace({session,onLogout}:{session:AuthSession;onLogout:()=>void}) {
   const [section, setSection] = useState<Section>("Overview");
   const [conversations, setConversations] = useStoredState("qpy-engage-conversations", initialConversations);
   const [messages, setMessages] = useStoredState("qpy-engage-messages", initialMessages);
   const [automations, setAutomations] = useStoredState("qpy-engage-automations", initialAutomations);
   const [sources, setSources] = useStoredState("qpy-engage-sources", initialSources);
-  const [members, setMembers] = useStoredState("qpy-engage-members", initialMembers);
+  const {members, invite, updateRole, remove: removeMember} = useWorkspaceMembers(session.token);
   const [selectedId, setSelectedId] = useState("aisha");
   const [draft, setDraft] = useState("");
   const [aiActive, setAiActive] = useState(true);
@@ -129,10 +235,10 @@ export default function Home() {
   const [channelStep, setChannelStep] = useStoredState("qpy-engage-channel-step", 0);
   const [connected, setConnected] = useStoredState("qpy-engage-whatsapp-connected", false);
   const [settingsTab, setSettingsTab] = useState("General");
-  const [browserWorkspace,setBrowserWorkspace]=useState(false);
-  useEffect(()=>{const timer=window.setTimeout(()=>setBrowserWorkspace(location.hostname.endsWith("github.io")||location.protocol==="file:"),0);return()=>window.clearTimeout(timer)},[]);
 
   const selected = conversations.find(c => c.id === selectedId) ?? conversations[0];
+  const displayName = session.user.name || session.user.email.split("@")[0];
+  const initials = displayName.split(/\s+/).map(w=>w[0]).join("").slice(0,2).toUpperCase() || "U";
   const notify = (text: string) => { setToast(text); window.setTimeout(() => setToast(""), 2200); };
   const go = (next: Section) => { setSection(next); window.scrollTo({top:0,behavior:"smooth"}); };
   const sendMessage = () => { if (!draft.trim()) return; setMessages({...messages,[selected.id]:[...(messages[selected.id]??[]),{from:"agent",text:draft.trim(),time:"Now"}]}); setDraft(""); };
@@ -149,30 +255,30 @@ export default function Home() {
     section === "Automations" ? <Automations items={automations} setItems={setAutomations} onCreate={openAutomation} notify={notify}/> :
     section === "Knowledge" ? <Knowledge sources={sources} setSources={setSources} onAdd={()=>setModal("source")} notify={notify}/> :
     section === "Analytics" ? <Analytics automations={automations} notify={notify}/> :
-    section === "Team" ? <Team members={members} setMembers={setMembers} onInvite={()=>setModal("invite")} notify={notify}/> :
+    section === "Team" ? <Team members={members} role={session.role} onInvite={()=>setModal("invite")} onUpdateRole={updateRole} onRemove={removeMember} notify={notify}/> :
     <Settings activeTab={settingsTab} setActiveTab={setSettingsTab} connected={connected} onChannels={()=>go("Channels")} notify={notify}/>;
 
   return <main className="app-shell">
     <aside className="sidebar">
       <button className="brand" onClick={()=>go("Overview")}><span className="brand-mark">Q</span><span>Qpy Engage</span></button>
-      <div className="workspace"><span className="shop-avatar">A</span><div><strong>Atelier Home</strong><small>Business workspace</small></div><span className="chev">⌄</span></div>
+      <div className="workspace"><span className="shop-avatar">{session.workspace.name.slice(0,1).toUpperCase()}</span><div><strong>{session.workspace.name}</strong><small>Business workspace</small></div><span className="chev">⌄</span></div>
       <nav className="side-nav" aria-label="Main navigation">{nav.map(([icon,label])=>{const count=label==="Inbox"?conversations.filter(c=>c.status==="open").length:0;return <button key={label} onClick={()=>go(label)} className={section===label?"active":""}><span>{icon}</span>{label}{count>0&&<b>{count}</b>}</button>})}</nav>
       <div className="nav-divider"/>
       <nav className="side-nav secondary"><button className={section==="Team"?"active":""} onClick={()=>go("Team")}><span>♙</span>Team</button><button className={section==="Settings"?"active":""} onClick={()=>go("Settings")}><span>⚙</span>Settings</button></nav>
       <div className="sidebar-card"><span className="spark">✦</span><strong>Grow with Qpy Engage</strong><p>Unlock more conversations and advanced AI.</p><button onClick={()=>{go("Settings");setSettingsTab("Billing")}}>Explore plans</button></div>
-      <div className="profile"><span className="profile-avatar">PM</span><div><strong>Praveen M.</strong><small>praveen@atelier.co</small></div><button aria-label="Profile menu" onClick={()=>setModal("profile")}>•••</button></div>
+      <div className="profile"><span className="profile-avatar">{initials}</span><div><strong>{displayName}</strong><small>{session.user.email}</small></div><button aria-label="Profile menu" onClick={()=>setModal("profile")}>•••</button></div>
     </aside>
     <section className="main-area">
-      <header className="topbar"><button className="mobile-brand" onClick={()=>go("Overview")}><span className="brand-mark">Q</span>Qpy Engage</button><div className="top-title"><strong>{section}</strong><span>•</span><small>{browserWorkspace?"Browser workspace • saved on this device":connected?"WhatsApp connected":"Finish WhatsApp setup"}</small></div><div className="top-actions"><button aria-label="Search" onClick={()=>setModal("search")}>⌕</button><button aria-label="Notifications" className="notification" onClick={()=>setModal("notifications")}>♧<i/></button><button className="help" onClick={()=>setModal("help")}>?</button></div></header>
+      <header className="topbar"><button className="mobile-brand" onClick={()=>go("Overview")}><span className="brand-mark">Q</span>Qpy Engage</button><div className="top-title"><strong>{section}</strong><span>•</span><small>{connected?"WhatsApp connected":"Finish WhatsApp setup"}</small></div><div className="top-actions"><button aria-label="Search" onClick={()=>setModal("search")}>⌕</button><button aria-label="Notifications" className="notification" onClick={()=>setModal("notifications")}>♧<i/></button><button className="help" onClick={()=>setModal("help")}>?</button></div></header>
       <div className="content">{body}</div>
     </section>
     <nav className="mobile-nav" aria-label="Mobile navigation">{nav.slice(0,5).map(([icon,label])=><button key={label} onClick={()=>go(label)} className={section===label?"active":""}><span>{icon}</span><small>{label}</small></button>)}</nav>
     {modal==="automation"&&<AutomationModal template={automationTemplate} onClose={()=>setModal(null)} onSave={(item)=>{setAutomations([...automations,item]);setModal(null);notify("Automation created")}}/>}
     {modal==="source"&&<SourceModal onClose={()=>setModal(null)} onSave={(item)=>{setSources([...sources,item]);setModal(null);notify("Knowledge source added")}}/>}
-    {modal==="invite"&&<InviteModal onClose={()=>setModal(null)} onSave={(item)=>{setMembers([...members,item]);setModal(null);notify("Invitation sent")}}/>}
+    {modal==="invite"&&<InviteModal onClose={()=>setModal(null)} onSave={async(email,role)=>{const error=await invite(email,role);if(error){notify(error)}else{setModal(null);notify("Invitation sent")}}}/>}
     {modal==="search"&&<SearchModal onClose={()=>setModal(null)} onNavigate={(s)=>{go(s);setModal(null)}}/>}
     {modal==="notifications"&&<SimpleModal title="Notifications" onClose={()=>setModal(null)}><div className="notification-center">{[["AI requested human help","Aisha’s order question needs review","Inbox"],["Campaign scheduled","Weekend showroom event • Jul 19 at 09:30","Campaigns"],["Knowledge synchronized","4 sources are ready","Knowledge"]].map(([title,copy,target])=><button key={title} onClick={()=>{setModal(null);go(target as Section)}}><span>✓</span><div><strong>{title}</strong><small>{copy}</small></div><b>Open →</b></button>)}</div><div className="modal-actions"><button className="secondary-btn" onClick={()=>setModal(null)}>Mark all read</button></div></SimpleModal>}
-    {modal==="profile"&&<SimpleModal title="Workspace tools" onClose={()=>setModal(null)}><div className="workspace-tools"><div className="workspace-owner"><span className="profile-avatar">PM</span><div><strong>Praveen Madipoju</strong><small>Owner • Atelier Home</small></div></div><button onClick={exportWorkspace}><span>↓</span><div><strong>Download workspace backup</strong><small>Export all assistants, campaigns, conversations, settings, and connections.</small></div></button><label><span>↑</span><div><strong>Restore workspace backup</strong><small>Import a previously downloaded Qpy Engage JSON backup.</small></div><input type="file" accept="application/json,.json" onChange={e=>importWorkspace(e.target.files?.[0])}/></label><button onClick={resetWorkspace}><span>↻</span><div><strong>Restore demo data</strong><small>Reset this browser workspace to the original sample content.</small></div></button></div><div className="browser-storage-note">{browserWorkspace?"GitHub Pages mode: data is private to this browser. Download a backup before changing devices or clearing browser data.":"Cloud workspace mode: data is also synchronized to the hosted application database."}</div></SimpleModal>}
+    {modal==="profile"&&<SimpleModal title="Workspace tools" onClose={()=>setModal(null)}><div className="workspace-tools"><div className="workspace-owner"><span className="profile-avatar">{initials}</span><div><strong>{displayName}</strong><small>{session.role} • {session.workspace.name}</small></div></div><button onClick={exportWorkspace}><span>↓</span><div><strong>Download workspace backup</strong><small>Export all assistants, campaigns, conversations, settings, and connections.</small></div></button><label><span>↑</span><div><strong>Restore workspace backup</strong><small>Import a previously downloaded Qpy Engage JSON backup.</small></div><input type="file" accept="application/json,.json" onChange={e=>importWorkspace(e.target.files?.[0])}/></label><button onClick={resetWorkspace}><span>↻</span><div><strong>Restore demo data</strong><small>Reset this browser workspace to the original sample content.</small></div></button><button onClick={onLogout}><span>⏻</span><div><strong>Log out</strong><small>Sign out of {session.workspace.name} on this device.</small></div></button></div><div className="browser-storage-note">Signed in as {session.user.email}. Your data is synced to your Qpy Engage account.</div></SimpleModal>}
     {modal==="help"&&<SimpleModal title="Qpy Engage help" onClose={()=>setModal(null)}><p>Search the knowledge base, learn how WhatsApp onboarding works, or contact support.</p><div className="modal-actions"><button className="secondary-btn" onClick={()=>setModal(null)}>Close</button><button className="primary" onClick={()=>{setModal(null);go("Channels")}}>Open setup guide</button></div></SimpleModal>}
     {toast&&<div className="toast">✓ {toast}</div>}
   </main>;
@@ -252,13 +358,12 @@ function Channels({step,setStep,connected,setConnected,notify}:{step:number;setS
   const [metaConnection,setMetaConnection]=useState<MetaConnection|null>(null);
   const [metaLoading,setMetaLoading]=useState(false);
   const [metaError,setMetaError]=useState("");
-  const [setupKey,setSetupKey]=useState("");
+  const token=useAuthToken();
   const copyWidget=async()=>{const code='<script src="https://mobileecommerce.github.io/qpy-engage/widget.js" data-workspace="atelier-home"></script>';try{await navigator.clipboard.writeText(code);notify("Web chat installation code copied")}catch{const blob=new Blob([code],{type:"text/plain"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="qpy-engage-widget.txt";a.click();URL.revokeObjectURL(a.href);notify("Web chat installation file downloaded")}};
-  const refreshMeta=async()=>{try{const [configResponse,statusResponse]=await Promise.all([fetch(metaApi("/api/meta/config")),fetch(metaApi("/api/meta/status"))]);const config=await configResponse.json() as MetaConfig;const status=await statusResponse.json() as {connected:boolean;connection:MetaConnection|null};setMetaConfig(config);setMetaConnection(status.connection);if(status.connection){setConnected(true);setForm(current=>({...current,business:status.connection?.verifiedName||current.business,number:status.connection?.displayPhoneNumber||current.number,phoneId:status.connection?.phoneNumberId||current.phoneId,wabaId:status.connection?.wabaId||current.wabaId}))}}catch{setMetaError("The secure Qpy Engage backend is not reachable.")}};
-  useEffect(()=>{refreshMeta()},[]);
+  const refreshMeta=async()=>{try{const [configResponse,statusResponse]=await Promise.all([fetch(metaApi("/api/meta/config")),fetch(metaApi("/api/meta/status"),{headers:authHeaders(token)})]);const config=await configResponse.json() as MetaConfig;const status=await statusResponse.json() as {connected:boolean;connection:MetaConnection|null};setMetaConfig(config);setMetaConnection(status.connection);if(status.connection){setConnected(true);setForm(current=>({...current,business:status.connection?.verifiedName||current.business,number:status.connection?.displayPhoneNumber||current.number,phoneId:status.connection?.phoneNumberId||current.phoneId,wabaId:status.connection?.wabaId||current.wabaId}))}}catch{setMetaError("The secure Qpy Engage backend is not reachable.")}};
+  useEffect(()=>{refreshMeta()},[token]);
   const connectMeta=async()=>{
     if(!metaConfig?.ready){setMetaError(`Meta app setup is incomplete${metaConfig?.missing?.length?`: ${metaConfig.missing.join(", ")}`:"."}`);return}
-    if(!setupKey){setMetaError("Enter your Qpy Engage workspace connection key.");return}
     setMetaLoading(true);setMetaError("");
     try{
       await loadMetaSdk(metaConfig);
@@ -269,24 +374,23 @@ function Channels({step,setStep,connected,setConnected,notify}:{step:number;setS
       });
       const codePromise=new Promise<string>((resolve,reject)=>window.FB?.login(response=>response.authResponse?.code?resolve(response.authResponse.code):reject(new Error("Meta authorization was not completed.")),{config_id:metaConfig.configId,response_type:"code",override_default_response_type:true,extras:{setup:{},sessionInfoVersion:"3"}}));
       const [code,assets]=await Promise.all([codePromise,sessionPromise]);
-      const response=await fetch(metaApi("/api/meta/oauth/exchange"),{method:"POST",headers:{"content-type":"application/json","x-qpy-setup-key":setupKey},body:JSON.stringify({code,wabaId:assets.wabaId,phoneNumberId:assets.phoneNumberId,businessId:assets.businessId})});
+      const response=await fetch(metaApi("/api/meta/oauth/exchange"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({code,wabaId:assets.wabaId,phoneNumberId:assets.phoneNumberId,businessId:assets.businessId})});
       const result=await response.json() as {connected?:boolean;connection?:MetaConnection;error?:string};if(!response.ok||!result.connection)throw new Error(result.error||"Meta connection could not be completed.");
-      sessionStorage.setItem("qpy-engage-session-key",setupKey);setMetaConnection(result.connection);setConnected(true);setForm(current=>({...current,business:result.connection?.verifiedName||current.business,number:result.connection?.displayPhoneNumber||current.number,phoneId:result.connection?.phoneNumberId||current.phoneId,wabaId:result.connection?.wabaId||current.wabaId}));setStep(2);notify("WhatsApp Business connected securely through Meta");
+      setMetaConnection(result.connection);setConnected(true);setForm(current=>({...current,business:result.connection?.verifiedName||current.business,number:result.connection?.displayPhoneNumber||current.number,phoneId:result.connection?.phoneNumberId||current.phoneId,wabaId:result.connection?.wabaId||current.wabaId}));setStep(2);notify("WhatsApp Business connected securely through Meta");
     }catch(error){setMetaError(error instanceof Error?error.message:"Meta connection failed.")}finally{setMetaLoading(false)}
   };
   const connectManualMeta=async()=>{
-    if(!setupKey){setMetaError("Enter your Qpy Engage workspace connection key.");return}
     if(!form.wabaId.trim()||!form.phoneId.trim()||!form.token.trim()){setMetaError("Enter the WABA ID, Phone Number ID, and Meta access token from API Setup.");return}
     setMetaLoading(true);setMetaError("");
     try{
-      const response=await fetch(metaApi("/api/meta/manual/connect"),{method:"POST",headers:{"content-type":"application/json","x-qpy-setup-key":setupKey},body:JSON.stringify({wabaId:form.wabaId,phoneNumberId:form.phoneId,businessId:form.businessId,accessToken:form.token})});
+      const response=await fetch(metaApi("/api/meta/manual/connect"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({wabaId:form.wabaId,phoneNumberId:form.phoneId,businessId:form.businessId,accessToken:form.token})});
       const result=await response.json() as {connected?:boolean;connection?:MetaConnection;error?:string};
       if(!response.ok||!result.connection)throw new Error(result.error||"Meta credentials could not be verified.");
-      sessionStorage.setItem("qpy-engage-session-key",setupKey);setMetaConnection(result.connection);setConnected(true);setForm(current=>({...current,token:"",business:result.connection?.verifiedName||current.business,number:result.connection?.displayPhoneNumber||current.number,phoneId:result.connection?.phoneNumberId||current.phoneId,wabaId:result.connection?.wabaId||current.wabaId}));setStep(3);notify("WhatsApp Cloud API connected securely");
+      setMetaConnection(result.connection);setConnected(true);setForm(current=>({...current,token:"",business:result.connection?.verifiedName||current.business,number:result.connection?.displayPhoneNumber||current.number,phoneId:result.connection?.phoneNumberId||current.phoneId,wabaId:result.connection?.wabaId||current.wabaId}));setStep(3);notify("WhatsApp Cloud API connected securely");
     }catch(error){setMetaError(error instanceof Error?error.message:"Manual Meta connection failed.")}finally{setMetaLoading(false)}
   };
-  const sendMetaTest=async()=>{if(!setupKey){setMetaError("Enter your workspace connection key on the Meta connection step.");setStep(1);return}setMetaLoading(true);setMetaError("");try{const response=await fetch(metaApi("/api/meta/test-message"),{method:"POST",headers:{"content-type":"application/json","x-qpy-setup-key":setupKey},body:JSON.stringify({to:test})});const result=await response.json() as {sent?:boolean;error?:string};if(!response.ok)throw new Error(result.error||"Test message failed.");notify("Meta accepted the WhatsApp test message");next()}catch(error){setMetaError(error instanceof Error?error.message:"Test message failed.")}finally{setMetaLoading(false)}};
-  const disconnectMeta=async()=>{if(!setupKey){setMetaError("Enter the workspace connection key before disconnecting.");setStep(1);return}if(!window.confirm("Disconnect this WhatsApp Business account from Qpy Engage?"))return;const response=await fetch(metaApi("/api/meta/connection"),{method:"DELETE",headers:{"x-qpy-setup-key":setupKey}});if(response.ok){setMetaConnection(null);setConnected(false);setStep(0);notify("WhatsApp Business disconnected")}else{const result=await response.json() as {error?:string};setMetaError(result.error||"Disconnect failed.")}};
+  const sendMetaTest=async()=>{setMetaLoading(true);setMetaError("");try{const response=await fetch(metaApi("/api/meta/test-message"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({to:test})});const result=await response.json() as {sent?:boolean;error?:string};if(!response.ok)throw new Error(result.error||"Test message failed.");notify("Meta accepted the WhatsApp test message");next()}catch(error){setMetaError(error instanceof Error?error.message:"Test message failed.")}finally{setMetaLoading(false)}};
+  const disconnectMeta=async()=>{if(!window.confirm("Disconnect this WhatsApp Business account from Qpy Engage?"))return;const response=await fetch(metaApi("/api/meta/connection"),{method:"DELETE",headers:authHeaders(token)});if(response.ok){setMetaConnection(null);setConnected(false);setStep(0);notify("WhatsApp Business disconnected")}else{const result=await response.json() as {error?:string};setMetaError(result.error||"Disconnect failed.")}};
   const next=()=>setStep(Math.min(5,step+1));
   const nextInstagram=()=>setInstagramStep(Math.min(5,instagramStep+1));
   const activeStep=channel==="instagram"?instagramStep:step;
@@ -303,8 +407,8 @@ function Channels({step,setStep,connected,setConnected,notify}:{step:number;setS
     </>}
     {channel==="whatsapp"&&<>
     {step===0&&<><WizardTitle n="01" title="Prepare your Meta business account" text="Meta’s embedded signup handles the WhatsApp account and phone-number decision later."/><div className="wa-readiness"><div className="wa-readiness-head"><div><span>✓</span><div><strong>Meta integration checklist</strong><small>{checked.slice(0,3).filter(Boolean).length} of 3 required items ready</small></div></div><b>{Math.round(checked.slice(0,3).filter(Boolean).length/3*100)}%</b></div><div className="readiness-progress"><i style={{width:`${checked.slice(0,3).filter(Boolean).length/3*100}%`}}/></div><div className="requirements polished">{[["Facebook login","Use an account with admin access to your Meta Business portfolio."],["Business website","Meta uses this to identify and verify the business."],["Phone-number decision inside Meta","Embedded signup will show eligible existing numbers and the option to add a new one."],["Meta billing method","Needed when Meta charges for outbound template conversations."]].map(([title,copy],i)=><label key={title}><input type="checkbox" checked={checked[i]} onChange={()=>setChecked(checked.map((v,j)=>j===i?!v:v))}/><span className="check-ui">{checked[i]?"✓":""}</span><div><strong>{title}</strong><small>{copy}</small></div>{i<3?<b>Required</b>:<em>Later</em>}</label>)}</div></div><div className="secure-note"><span>⌾</span><div><strong>Secure Meta authorization</strong><small>Qpy Engage uses Meta’s own login window and never receives your Facebook password.</small></div></div><div className="wizard-actions"><span>{metaConfig?.ready?"Meta app backend is ready for embedded signup.":"Meta app credentials still need to be configured."}</span><button className="primary wa-primary" disabled={!checked.slice(0,3).every(Boolean)} onClick={next}>Continue to Meta integration →</button></div></>}
-    {step===1&&connectionMode==="automatic"&&<><WizardTitle n="02" title="Connect Qpy Engage to Meta" text="Use Meta’s official embedded signup to authorize the app and select the business assets."/>{metaError&&<div className="meta-error">⚠ {metaError}</div>}<div className="meta-server-status"><div><span className={metaConfig?.ready?"ready":"pending"}>{metaConfig?.ready?"✓":"!"}</span><div><strong>{metaConfig?.ready?"Meta app configured":"Meta app configuration required"}</strong><small>{metaConfig?.ready?`Graph API ${metaConfig.graphVersion} • webhook endpoint ready`:`Missing: ${metaConfig?.missing?.join(", ")||"loading configuration…"}`}</small></div></div><button onClick={refreshMeta}>↻ Check again</button></div><div className="meta-embedded"><div className="meta-brand"><span className="meta-loop">∞</span><div><strong>Meta</strong><small>Embedded signup</small></div><b>Secure</b></div><div className="meta-content"><h3>Connect WhatsApp Business</h3><p>Meta will ask you to sign in, select or create the WhatsApp Business Account, and choose an eligible existing or new phone number.</p><div className="meta-flow"><div><span>1</span><strong>Log in to Facebook</strong><small>Use a Meta Business administrator</small></div><i>→</i><div><span>2</span><strong>Select business assets</strong><small>Portfolio, WABA, and phone number</small></div><i>→</i><div><span>3</span><strong>Authorize Qpy Engage</strong><small>Token is exchanged only by the secure backend</small></div></div><label className="meta-setup-key">Workspace connection key<input type="password" autoComplete="off" value={setupKey} onChange={event=>setSetupKey(event.target.value)} placeholder="Enter the private setup key"/><small>This key protects your public workspace from unauthorized Meta connections.</small></label><button className="facebook-btn meta-button" disabled={!metaConfig?.ready||metaLoading} onClick={connectMeta}><span className="fb-mini">f</span> {metaLoading?"Connecting securely…":metaConnection?"Reconnect with Facebook":"Continue with Facebook"}</button><small>By continuing, you agree to Meta’s Business Messaging terms.</small></div><div className="meta-permissions"><strong>Permissions requested</strong><span>✓ Manage WhatsApp business accounts</span><span>✓ Send and receive customer messages</span><span>✓ Read phone-number quality and status</span><span>✓ Subscribe Qpy Engage to webhook events</span></div></div><div className="meta-webhook"><strong>Webhook callback</strong><code>{metaConfig?.webhookUrl||`${META_BACKEND_ORIGIN}/api/webhooks/whatsapp`}</code><small>Qpy Engage verifies Meta’s challenge and validates every webhook signature.</small></div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(0)}>Back</button><span>Meta’s window usually takes less than 3 minutes.</span></div></>}
-    {step===1&&connectionMode==="manual"&&<><WizardTitle n="02" title="Connect with Cloud API credentials" text="Use the temporary credentials in Meta API Setup while business verification is pending."/>{metaError&&<div className="meta-error">⚠ {metaError}</div>}<div className="meta-server-status"><div><span className={metaConfig?.ready?"ready":"pending"}>{metaConfig?.ready?"✓":"!"}</span><div><strong>Secure backend ready</strong><small>Credentials are verified with Meta, encrypted, and never returned to this browser.</small></div></div><button onClick={refreshMeta}>↻ Check again</button></div><div className="data-card advanced-credentials"><div className="card-head"><div><h2>Meta API Setup credentials</h2><p>Copy these values from Use cases → Connect on WhatsApp → API Setup.</p></div></div><div className="form-grid"><label>WhatsApp Business Account ID<input inputMode="numeric" value={form.wabaId} onChange={e=>setForm({...form,wabaId:e.target.value.replace(/\D/g,"")})} placeholder="WABA ID"/></label><label>Phone Number ID<input inputMode="numeric" value={form.phoneId} onChange={e=>setForm({...form,phoneId:e.target.value.replace(/\D/g,"")})} placeholder="Phone Number ID"/></label><label>Business Portfolio ID <small>Optional</small><input inputMode="numeric" value={form.businessId} onChange={e=>setForm({...form,businessId:e.target.value.replace(/\D/g,"")})} placeholder="Business ID"/></label><label>Meta access token<input type="password" autoComplete="off" value={form.token} onChange={e=>setForm({...form,token:e.target.value})} placeholder="Temporary or system-user token"/></label></div><label className="meta-setup-key">Workspace connection key<input type="password" autoComplete="off" value={setupKey} onChange={event=>setSetupKey(event.target.value)} placeholder="Enter the private setup key"/><small>This protects your public workspace from unauthorized connections.</small></label></div><div className="info-banner secure">⌾ Qpy Engage validates both IDs with Meta, subscribes the WABA to the verified webhook, and stores only an encrypted token.</div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(0)}>Back</button><button className="primary wa-primary" disabled={metaLoading||!form.wabaId||!form.phoneId||!form.token||!setupKey} onClick={connectManualMeta}>{metaLoading?"Verifying with Meta…":"Verify and connect →"}</button></div></>}
+    {step===1&&connectionMode==="automatic"&&<><WizardTitle n="02" title="Connect Qpy Engage to Meta" text="Use Meta’s official embedded signup to authorize the app and select the business assets."/>{metaError&&<div className="meta-error">⚠ {metaError}</div>}<div className="meta-server-status"><div><span className={metaConfig?.ready?"ready":"pending"}>{metaConfig?.ready?"✓":"!"}</span><div><strong>{metaConfig?.ready?"Meta app configured":"Meta app configuration required"}</strong><small>{metaConfig?.ready?`Graph API ${metaConfig.graphVersion} • webhook endpoint ready`:`Missing: ${metaConfig?.missing?.join(", ")||"loading configuration…"}`}</small></div></div><button onClick={refreshMeta}>↻ Check again</button></div><div className="meta-embedded"><div className="meta-brand"><span className="meta-loop">∞</span><div><strong>Meta</strong><small>Embedded signup</small></div><b>Secure</b></div><div className="meta-content"><h3>Connect WhatsApp Business</h3><p>Meta will ask you to sign in, select or create the WhatsApp Business Account, and choose an eligible existing or new phone number.</p><div className="meta-flow"><div><span>1</span><strong>Log in to Facebook</strong><small>Use a Meta Business administrator</small></div><i>→</i><div><span>2</span><strong>Select business assets</strong><small>Portfolio, WABA, and phone number</small></div><i>→</i><div><span>3</span><strong>Authorize Qpy Engage</strong><small>Token is exchanged only by the secure backend</small></div></div><button className="facebook-btn meta-button" disabled={!metaConfig?.ready||metaLoading} onClick={connectMeta}><span className="fb-mini">f</span> {metaLoading?"Connecting securely…":metaConnection?"Reconnect with Facebook":"Continue with Facebook"}</button><small>By continuing, you agree to Meta’s Business Messaging terms.</small></div><div className="meta-permissions"><strong>Permissions requested</strong><span>✓ Manage WhatsApp business accounts</span><span>✓ Send and receive customer messages</span><span>✓ Read phone-number quality and status</span><span>✓ Subscribe Qpy Engage to webhook events</span></div></div><div className="meta-webhook"><strong>Webhook callback</strong><code>{metaConfig?.webhookUrl||`${META_BACKEND_ORIGIN}/api/webhooks/whatsapp`}</code><small>Qpy Engage verifies Meta’s challenge and validates every webhook signature.</small></div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(0)}>Back</button><span>Meta’s window usually takes less than 3 minutes.</span></div></>}
+    {step===1&&connectionMode==="manual"&&<><WizardTitle n="02" title="Connect with Cloud API credentials" text="Use the temporary credentials in Meta API Setup while business verification is pending."/>{metaError&&<div className="meta-error">⚠ {metaError}</div>}<div className="meta-server-status"><div><span className={metaConfig?.ready?"ready":"pending"}>{metaConfig?.ready?"✓":"!"}</span><div><strong>Secure backend ready</strong><small>Credentials are verified with Meta, encrypted, and never returned to this browser.</small></div></div><button onClick={refreshMeta}>↻ Check again</button></div><div className="data-card advanced-credentials"><div className="card-head"><div><h2>Meta API Setup credentials</h2><p>Copy these values from Use cases → Connect on WhatsApp → API Setup.</p></div></div><div className="form-grid"><label>WhatsApp Business Account ID<input inputMode="numeric" value={form.wabaId} onChange={e=>setForm({...form,wabaId:e.target.value.replace(/\D/g,"")})} placeholder="WABA ID"/></label><label>Phone Number ID<input inputMode="numeric" value={form.phoneId} onChange={e=>setForm({...form,phoneId:e.target.value.replace(/\D/g,"")})} placeholder="Phone Number ID"/></label><label>Business Portfolio ID <small>Optional</small><input inputMode="numeric" value={form.businessId} onChange={e=>setForm({...form,businessId:e.target.value.replace(/\D/g,"")})} placeholder="Business ID"/></label><label>Meta access token<input type="password" autoComplete="off" value={form.token} onChange={e=>setForm({...form,token:e.target.value})} placeholder="Temporary or system-user token"/></label></div><div className="info-banner secure">⌾ Qpy Engage validates both IDs with Meta, subscribes the WABA to the verified webhook, and stores only an encrypted token.</div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(0)}>Back</button><button className="primary wa-primary" disabled={metaLoading||!form.wabaId||!form.phoneId||!form.token} onClick={connectManualMeta}>{metaLoading?"Verifying with Meta…":"Verify and connect →"}</button></div></>}
     {step===2&&<><WizardTitle n="03" title={connectionMode==="automatic"?"Confirm selected Meta assets":"Advanced connection"} text={connectionMode==="automatic"?"These assets were returned and verified by Meta.":"System-user token onboarding will use the same encrypted server connection."}/>{connectionMode==="automatic"?<div className="meta-assets"><div className="asset-card"><span>▣</span><div><small>BUSINESS PORTFOLIO</small><strong>{metaConnection?.businessId||"Selected in Meta"}</strong><em>Authorized asset</em></div><b>✓</b></div><div className="asset-card"><span className="wa">◉</span><div><small>WHATSAPP BUSINESS ACCOUNT</small><strong>{metaConnection?.wabaId||"Waiting for Meta"}</strong><em>{metaConnection?.webhookSubscribed?"Webhook subscribed":"Subscription pending"}</em></div><b>{metaConnection?"✓":"…"}</b></div><div className="asset-card featured"><span>☎</span><div><small>PHONE NUMBER</small><strong>{metaConnection?.displayPhoneNumber||"Waiting for Meta"}</strong><em>Display name: {metaConnection?.verifiedName||"—"}</em></div><b>{metaConnection?.qualityRating||"—"}</b></div><button className="text-action" onClick={refreshMeta}>↻ Refresh assets from Meta</button></div>:<div className="advanced-meta-note"><span>⌾</span><div><strong>Embedded signup is recommended</strong><p>Manual system-user tokens must also be submitted directly to the secure backend and never stored in the browser. This path will be enabled after the Meta app is configured.</p></div><button className="secondary-btn" onClick={()=>setConnectionMode("automatic")}>Use embedded signup</button></div>}<div className="info-banner secure">⌾ Access tokens are encrypted with AES-GCM on the server and are never returned to the browser.</div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(1)}>Back</button><button className="primary wa-primary" disabled={connectionMode==="automatic"&&!metaConnection} onClick={next}>Confirm connection →</button></div></>}
     {step===3&&<><WizardTitle n="04" title="Choose conversation routing" text="Decide how new WhatsApp conversations are assigned."/><div className="strategy-grid">{[["AI first","Qpy Engage answers instantly and hands off when confidence is low."],["Round robin","New conversations rotate evenly across online agents."],["Least busy","Assign to the agent with the fewest active conversations."]].map((x,i)=><label className={i===0?"selected":""} key={x[0]}><input type="radio" name="strategy" defaultChecked={i===0}/><span>✦</span><div><strong>{x[0]}</strong><p>{x[1]}</p></div></label>)}</div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(2)}>Back</button><button className="primary" onClick={next}>Save strategy →</button></div></>}
     {step===4&&<><WizardTitle n="05" title="Verify your live Meta connection" text="Send Meta’s approved hello_world template and confirm webhook health."/>{metaError&&<div className="meta-error">⚠ {metaError}</div>}<div className="wa-test-layout"><div className="test-card polished-test"><div className="test-phone"><span>WA</span><div><strong>{metaConnection?.verifiedName||"WhatsApp Business"}</strong><small>{metaConnection?.displayPhoneNumber||form.number} • Cloud API</small></div><b>{metaConnection?"Connected":"Pending"}</b></div><label>Test recipient<input value={test} onChange={e=>setTest(e.target.value)}/><small>Use an opted-in number including country code.</small></label><div className="test-message">Meta template: hello_world • English (US)</div><button className="primary wa-primary" disabled={!metaConnection||metaLoading} onClick={sendMetaTest}>➤ {metaLoading?"Sending through Meta…":"Send test message"}</button></div><div className="connection-diagnostics"><h3>Connection diagnostics</h3>{[["Cloud API",metaConnection?"Authorized":"Not connected"],["Webhook",metaConnection?.webhookSubscribed?"Subscribed":"Pending"],["Phone quality",metaConnection?.qualityRating||"Pending"],["Phone status",metaConnection?.status||"Pending"]].map(([label,value])=><div key={label}><span className={value!=="Pending"&&value!=="Not connected"?"ok":""}>{value!=="Pending"&&value!=="Not connected"?"✓":"…"}</span><label>{label}<strong>{value}</strong></label></div>)}<button onClick={refreshMeta}>↻ Run diagnostics again</button></div></div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(3)}>Back</button><span>Delivery and read receipts arrive through the verified webhook.</span></div></>}
@@ -316,8 +420,7 @@ function Channels({step,setStep,connected,setConnected,notify}:{step:number;setS
 function WizardTitle({n,title,text}:{n:string;title:string;text:string}){return <div className="wizard-title"><span>{n}</span><div><h2>{title}</h2><p>{text}</p></div></div>}
 
 function LiveInbox({notify}:{notify:(s:string)=>void}){
-  const [workspaceKey,setWorkspaceKey]=useState("");
-  const [keyDraft,setKeyDraft]=useState("");
+  const token=useAuthToken();
   const [messages,setMessages]=useState<LiveWhatsAppMessage[]>([]);
   const [selectedWaId,setSelectedWaId]=useState("");
   const [draft,setDraft]=useState("");
@@ -326,11 +429,11 @@ function LiveInbox({notify}:{notify:(s:string)=>void}){
   const [error,setError]=useState("");
   const [loaded,setLoaded]=useState(false);
 
-  const refresh=async(key=workspaceKey,silent=false)=>{
-    if(!key)return;
+  const refresh=async(silent=false)=>{
+    if(!token)return;
     if(!silent)setLoading(true);setError("");
     try{
-      const response=await fetch(metaApi("/api/meta/inbox"),{headers:{"x-qpy-setup-key":key}});
+      const response=await fetch(metaApi("/api/meta/inbox"),{headers:authHeaders(token)});
       const result=await response.json() as {messages?:LiveWhatsAppMessage[];error?:string};
       if(!response.ok)throw new Error(result.error||"Inbox could not be loaded.");
       const next=result.messages||[];setMessages(next);setLoaded(true);
@@ -339,19 +442,15 @@ function LiveInbox({notify}:{notify:(s:string)=>void}){
     }catch(problem){setError(problem instanceof Error?problem.message:"Inbox could not be loaded.")}finally{if(!silent)setLoading(false)}
   };
 
-  useEffect(()=>{const saved=sessionStorage.getItem("qpy-engage-session-key")||"";if(saved){setWorkspaceKey(saved);setKeyDraft(saved)}},[]);
-  useEffect(()=>{if(!workspaceKey)return;refresh(workspaceKey);const timer=window.setInterval(()=>refresh(workspaceKey,true),8000);return()=>window.clearInterval(timer)},[workspaceKey]);
+  useEffect(()=>{if(!token)return;refresh();const timer=window.setInterval(()=>refresh(true),8000);return()=>window.clearInterval(timer)},[token]);
 
-  const connectInbox=()=>{const key=keyDraft.trim();if(!key)return;sessionStorage.setItem("qpy-engage-session-key",key);setWorkspaceKey(key)};
   const contacts=[...new Set(messages.map(message=>message.waId).filter((id):id is string=>Boolean(id)))].map((waId,index)=>{
     const thread=messages.filter(message=>message.waId===waId&&message.text);const last=thread.at(-1);
     return {waId,thread,last,index};
   }).sort((a,b)=>Number(b.last?.timestamp||0)-Number(a.last?.timestamp||0));
   const selected=contacts.find(contact=>contact.waId===selectedWaId)||contacts[0];
   const formatTime=(message:LiveWhatsAppMessage)=>{const numeric=Number(message.timestamp||0);const date=numeric?new Date(numeric*1000):new Date(message.createdAt);return Number.isNaN(date.getTime())?"Now":date.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})};
-  const send=async()=>{if(!selected||!draft.trim()||sending)return;setSending(true);setError("");try{const response=await fetch(metaApi("/api/meta/inbox/messages"),{method:"POST",headers:{"content-type":"application/json","x-qpy-setup-key":workspaceKey},body:JSON.stringify({to:selected.waId,text:draft.trim()})});const result=await response.json() as {message?:LiveWhatsAppMessage;error?:string};if(!response.ok||!result.message)throw new Error(result.error||"Message could not be sent.");setMessages(current=>[...current,result.message!]);setDraft("");notify("WhatsApp message sent through Meta")}catch(problem){const message=problem instanceof Error?problem.message:"Message could not be sent.";setError(/auth|token|session|oauth/i.test(message)?`${message} Refresh the Meta access token in Channels → WhatsApp → Advanced, then retry.`:message)}finally{setSending(false)}};
-
-  if(!workspaceKey)return <><PageHeader title="Live WhatsApp inbox" description="Enter the workspace key to securely load customer messages from Cloudflare."/><div className="data-card live-inbox-gate"><span>⌾</span><h2>Unlock the live inbox</h2><p>This protects WhatsApp customer conversations on the public GitHub Pages application.</p><label>Workspace connection key<input type="password" autoComplete="off" value={keyDraft} onChange={event=>setKeyDraft(event.target.value)} onKeyDown={event=>event.key==="Enter"&&connectInbox()} placeholder="Enter the private setup key"/></label><button className="primary" disabled={!keyDraft.trim()} onClick={connectInbox}>Open live inbox</button></div></>;
+  const send=async()=>{if(!selected||!draft.trim()||sending)return;setSending(true);setError("");try{const response=await fetch(metaApi("/api/meta/inbox/messages"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({to:selected.waId,text:draft.trim()})});const result=await response.json() as {message?:LiveWhatsAppMessage;error?:string};if(!response.ok||!result.message)throw new Error(result.error||"Message could not be sent.");setMessages(current=>[...current,result.message!]);setDraft("");notify("WhatsApp message sent through Meta")}catch(problem){const message=problem instanceof Error?problem.message:"Message could not be sent.";setError(/auth|token|session|oauth/i.test(message)?`${message} Refresh the Meta access token in Channels → WhatsApp → Advanced, then retry.`:message)}finally{setSending(false)}};
 
   return <><PageHeader title="Live WhatsApp inbox" description="Messages received by the verified Meta webhook appear here automatically." action={<button className="secondary-btn" disabled={loading} onClick={()=>refresh()}>{loading?"Refreshing…":"↻ Refresh"}</button>}/>{error&&<div className="meta-error">⚠ {error}</div>}{loaded&&!contacts.length?<div className="data-card live-inbox-empty"><span>◉</span><h2>No WhatsApp webhook messages yet</h2><p>The connection is ready, but Meta has not delivered an inbound message to Qpy Engage. Send a dashboard test webhook from Meta Configuration, or publish the Meta app before testing real customer replies.</p><button className="primary" onClick={()=>refresh()}>Check again</button></div>:<div className="full-inbox live"><aside className="inbox-list"><div className="inbox-tools"><strong>{contacts.length} live conversation{contacts.length===1?"":"s"}</strong><small>Cloud API • refreshes every 8 seconds</small></div><div className="conversation-list">{contacts.map(contact=><button key={contact.waId} className={selected?.waId===contact.waId?"selected":""} onClick={()=>setSelectedWaId(contact.waId)}><span className={`contact-avatar ${["green","blue","lavender","peach"][contact.index%4]}`}>WA<i/></span><div><strong>+{contact.waId}</strong><small>{contact.last?.text||"WhatsApp event"}</small></div><span className="conv-meta"><small>{contact.last?formatTime(contact.last):"Now"}</small></span></button>)}</div></aside><section className="chat-panel">{selected?<><div className="chat-head"><div className="chat-person"><span className="contact-avatar green">WA<i/></span><div><strong>+{selected.waId}</strong><small>WhatsApp Cloud API • Live</small></div></div><span className="status-pill ready">● Webhook connected</span></div><div className="chat-body tall"><div className="today">Live messages</div>{selected.thread.map(message=><div key={message.id} className={`message ${message.direction==="inbound"?"customer":"agent"}`}><p>{message.text}</p><small>{message.direction==="outbound"?"You • ":""}{formatTime(message)} {message.direction==="outbound"&&`• ${message.status||"sent"}`}</small></div>)}</div><div className="composer"><div className="input-row"><input value={draft} onChange={event=>setDraft(event.target.value)} onKeyDown={event=>event.key==="Enter"&&send()} placeholder="Reply through WhatsApp…"/><button className="send" disabled={sending||!draft.trim()} onClick={send}>{sending?"…":"➤"}</button></div></div></>:<div className="live-chat-placeholder">Select a live conversation</div>}</section><aside className="customer-panel">{selected&&<><span className="contact-avatar large green">WA</span><h3>+{selected.waId}</h3><small>WhatsApp customer</small><div className="details-list"><label>Channel<strong>WhatsApp Cloud API</strong></label><label>Messages<strong>{selected.thread.length}</strong></label><label>Status<strong className="status-text">open</strong></label></div></>}</aside></div>}</>;
 }
@@ -401,8 +500,9 @@ const analyticsCompletionById:Record<number,number>={1:81,2:94,3:63,4:88};
 const analyticsResponseById:Record<number,string>={1:"7s",2:"4s",3:"12s",4:"38s"};
 function Analytics({automations,notify}:{automations:Automation[];notify:(s:string)=>void}){const [range,setRange]=useState("Last 30 days");const exportCsv=()=>{const blob=new Blob(["metric,value\nConversations,1284\nAI resolution,74.2%\nRevenue,$18600"],{type:"text/csv"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="qpy-engage-analytics.csv";a.click();notify("Analytics exported")};return <><PageHeader title="Analytics" description="Measure AI performance, team efficiency, and assisted revenue." action={<div className="header-buttons"><select value={range} onChange={e=>setRange(e.target.value)}><option>Last 7 days</option><option>Last 30 days</option><option>Last 90 days</option></select><button className="primary" onClick={exportCsv}>↓ Export CSV</button></div>}/><MetricCards/><div className="analytics-grid"><div className="data-card chart-card"><div className="card-head"><div><h2>Conversation volume</h2><p>{range} • AI and human responses</p></div><span className="legend"><i/>AI handled <i/>Team handled</span></div><div className="big-chart">{[42,55,49,72,64,83,78,95,88,108,92,118,111,132].map((h,i)=><div key={i}><i style={{height:`${h}px`}}/><b style={{height:`${Math.max(18,h*.32)}px`}}/></div>)}</div><div className="chart-axis"><span>Jun 18</span><span>Jun 24</span><span>Jun 30</span><span>Jul 6</span><span>Jul 17</span></div></div><div className="data-card channel-card"><div className="card-head"><div><h2>Resolution mix</h2><p>How conversations were completed</p></div></div><div className="large-donut"><div><strong>1,284</strong><small>Total</small></div></div><ul><li><i className="indigo"/>AI resolved <b>74%</b></li><li><i className="black"/>Team resolved <b>21%</b></li><li><i className="gray"/>Unresolved <b>5%</b></li></ul></div></div><div className="data-card"><div className="card-head"><div><h2>Automation performance</h2><p>Results attributed to active workflows.</p></div></div><table><thead><tr><th>Automation</th><th>Runs</th><th>Completion</th><th>Avg. response</th><th>Impact</th></tr></thead><tbody>{automations.map(a=><tr key={a.id}><td><strong>{a.title}</strong></td><td>{a.runs}</td><td>{analyticsCompletionById[a.id]??76}%</td><td>{analyticsResponseById[a.id]??"9s"}</td><td><b className="positive">{a.rate}</b></td></tr>)}</tbody></table></div></>}
 
-const teamConversationsById:Record<number,number>={1:284,2:198,3:143,4:0};
-function Team({members,setMembers,onInvite,notify}:{members:Member[];setMembers:(v:Member[])=>void;onInvite:()=>void;notify:(s:string)=>void}){return <><PageHeader title="Team" description="Invite teammates and control access to customer conversations." action={<button className="primary" onClick={onInvite}>＋ Invite teammate</button>}/><div className="team-summary"><article><strong>{members.length}</strong><span>Team members</span></article><article><strong>{members.filter(m=>m.status==="Active").length}</strong><span>Active now</span></article><article><strong>12m</strong><span>Avg. first response</span></article><article><strong>4.8/5</strong><span>Customer rating</span></article></div><div className="data-card"><table><thead><tr><th>Member</th><th>Role</th><th>Status</th><th>Conversations</th><th>Last active</th><th/></tr></thead><tbody>{members.map(m=><tr key={m.id}><td><div className="member-cell"><span>{m.name.split(" ").map(x=>x[0]).join("").slice(0,2)}</span><div><strong>{m.name}</strong><small>{m.email}</small></div></div></td><td><select value={m.role} disabled={m.role==="Owner"} onChange={e=>setMembers(members.map(x=>x.id===m.id?{...x,role:e.target.value as Member["role"]}:x))}><option>Owner</option><option>Admin</option><option>Agent</option><option>Analyst</option></select></td><td><span className={`status-pill ${m.status==="Active"?"ready":"syncing"}`}>{m.status}</span></td><td>{teamConversationsById[m.id]??0}</td><td>{m.status==="Active"?"Online now":"Invite pending"}</td><td><button className="dots" onClick={()=>m.role==="Owner"?notify("The workspace owner cannot be removed"):setMembers(members.filter(x=>x.id!==m.id))}>•••</button></td></tr>)}</tbody></table></div></>}
+function Team({members,role,onInvite,onUpdateRole,onRemove,notify}:{members:Member[];role:Member["role"];onInvite:()=>void;onUpdateRole:(email:string,role:Member["role"])=>void;onRemove:(email:string)=>void;notify:(s:string)=>void}){
+  const canManage = role==="Owner"||role==="Admin";
+  return <><PageHeader title="Team" description="Invite teammates and control access to customer conversations." action={<button className="primary" disabled={!canManage} onClick={onInvite}>＋ Invite teammate</button>}/><div className="team-summary"><article><strong>{members.length}</strong><span>Team members</span></article><article><strong>{members.filter(m=>m.status==="Active").length}</strong><span>Active now</span></article><article><strong>{role}</strong><span>Your role</span></article></div><div className="data-card"><table><thead><tr><th>Member</th><th>Role</th><th>Status</th><th/></tr></thead><tbody>{members.map(m=><tr key={m.id}><td><div className="member-cell"><span>{m.name.split(" ").map(x=>x[0]).join("").slice(0,2)}</span><div><strong>{m.name}</strong><small>{m.email}</small></div></div></td><td><select value={m.role} disabled={m.role==="Owner"||!canManage} onChange={e=>onUpdateRole(m.email,e.target.value as Member["role"])}>{m.role==="Owner"&&<option>Owner</option>}<option>Admin</option><option>Agent</option><option>Analyst</option></select></td><td><span className={`status-pill ${m.status==="Active"?"ready":"syncing"}`}>{m.status}</span></td><td><button className="dots" disabled={!canManage} onClick={()=>m.role==="Owner"?notify("The workspace owner cannot be removed"):onRemove(m.email)}>•••</button></td></tr>)}</tbody></table>{!members.length&&<div className="empty-row">No team members yet.</div>}</div></>}
 
 function Settings(props:{activeTab:string;setActiveTab:(s:string)=>void;connected:boolean;onChannels:()=>void;notify:(s:string)=>void}){
   if(props.activeTab!=="Billing")return <LegacySettings {...props}/>;
@@ -435,5 +535,5 @@ function LegacySettings({activeTab,setActiveTab,connected,onChannels,notify}:{ac
 function SimpleModal({title,onClose,children}:{title:string;onClose:()=>void;children:React.ReactNode}){return <div className="modal-backdrop" onMouseDown={onClose}><div className="modal" onMouseDown={e=>e.stopPropagation()}><div className="modal-head"><h2>{title}</h2><button onClick={onClose}>×</button></div>{children}</div></div>}
 function AutomationModal({template,onClose,onSave}:{template?:{name:string;trigger:string;action:string}|null;onClose:()=>void;onSave:(a:Automation)=>void}){const [name,setName]=useState(template?.name??"");const [trigger,setTrigger]=useState(template?.trigger??"New WhatsApp conversation");const [action,setAction]=useState(template?.action??"Send AI welcome message");return <SimpleModal title="Create automation" onClose={onClose}><p>Choose a trigger and what Qpy Engage should do next.</p><div className="modal-form"><label>Automation name<input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Welcome new leads"/></label><label>When this happens<select value={trigger} onChange={e=>setTrigger(e.target.value)}><option>New WhatsApp conversation</option><option>Customer asks about an order</option><option>Cart idle for 2 hours</option><option>AI confidence is low</option><option>Conversation marked resolved</option></select></label><label>Do this<select value={action} onChange={e=>setAction(e.target.value)}><option>Send AI welcome message</option><option>Fetch order status</option><option>Send recovery template</option><option>Assign to support team</option><option>Request feedback survey</option></select></label></div><div className="flow-preview"><span>Trigger</span><i>→</i><span>AI action</span><i>→</i><span>Track result</span></div><div className="modal-actions"><button className="secondary-btn" onClick={onClose}>Cancel</button><button className="primary" disabled={!name.trim()} onClick={()=>onSave({id:Date.now(),title:name,trigger,action,runs:0,rate:"New",active:true})}>Create automation</button></div></SimpleModal>}
 function SourceModal({onClose,onSave}:{onClose:()=>void;onSave:(s:Source)=>void}){const [type,setType]=useState<Source["type"]>("Website");const [name,setName]=useState("");const [pages,setPages]=useState(18);return <SimpleModal title="Add knowledge source" onClose={onClose}><div className="source-types">{(["Website","Document","FAQ"] as const).map(t=><button className={type===t?"active":""} onClick={()=>{setType(t);setName("")}} key={t}><span>{t==="Website"?"⌁":t==="Document"?"▤":"?"}</span>{t}</button>)}</div><div className="modal-form">{type==="Document"?<label className="document-upload">Upload PDF, DOCX, or TXT<input type="file" accept=".pdf,.doc,.docx,.txt" onChange={e=>{const file=e.target.files?.[0];if(file){setName(file.name);setPages(Math.max(1,Math.round(file.size/18000)))}}}/>{name&&<small>✓ {name} • approximately {pages} pages</small>}</label>:<label>{type==="Website"?"Website URL":"FAQ collection name"}<input value={name} onChange={e=>setName(e.target.value)} placeholder={type==="Website"?"https://example.com":"e.g. Customer support FAQs"}/></label>}</div><div className="modal-actions"><button className="secondary-btn" onClick={onClose}>Cancel</button><button className="primary" disabled={!name.trim()} onClick={()=>onSave({id:Date.now(),name,type,pages:type==="Website"?120:pages,status:"Syncing"})}>Add & train</button></div></SimpleModal>}
-function InviteModal({onClose,onSave}:{onClose:()=>void;onSave:(m:Member)=>void}){const [email,setEmail]=useState("");const [role,setRole]=useState<Member["role"]>("Agent");return <SimpleModal title="Invite teammate" onClose={onClose}><div className="modal-form"><label>Email address<input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="teammate@company.com"/></label><label>Role<select value={role} onChange={e=>setRole(e.target.value as Member["role"])}><option>Admin</option><option>Agent</option><option>Analyst</option></select></label></div><div className="role-note">Agents can manage conversations. Analysts can view reports. Admins can manage the workspace.</div><div className="modal-actions"><button className="secondary-btn" onClick={onClose}>Cancel</button><button className="primary" disabled={!email.includes("@")} onClick={()=>onSave({id:Date.now(),name:email.split("@")[0],email,role,status:"Invited"})}>Send invitation</button></div></SimpleModal>}
+function InviteModal({onClose,onSave}:{onClose:()=>void;onSave:(email:string,role:Member["role"])=>void}){const [email,setEmail]=useState("");const [role,setRole]=useState<Member["role"]>("Agent");return <SimpleModal title="Invite teammate" onClose={onClose}><div className="modal-form"><label>Email address<input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="teammate@company.com"/></label><label>Role<select value={role} onChange={e=>setRole(e.target.value as Member["role"])}><option>Admin</option><option>Agent</option><option>Analyst</option></select></label></div><div className="role-note">Agents can manage conversations. Analysts can view reports. Admins can manage the workspace.</div><div className="modal-actions"><button className="secondary-btn" onClick={onClose}>Cancel</button><button className="primary" disabled={!email.includes("@")} onClick={()=>onSave(email.trim().toLowerCase(),role)}>Send invitation</button></div></SimpleModal>}
 function SearchModal({onClose,onNavigate}:{onClose:()=>void;onNavigate:(s:Section)=>void}){const [q,setQ]=useState("");const pages:Section[]=["Overview","Assistants","Channels","Inbox","Campaigns","Automations","Knowledge","Analytics","Team","Settings"];return <SimpleModal title="Search Qpy Engage" onClose={onClose}><input autoFocus className="global-search" placeholder="Search pages and features…" value={q} onChange={e=>setQ(e.target.value)}/><div className="search-results">{pages.filter(p=>p.toLowerCase().includes(q.toLowerCase())).map(p=><button key={p} onClick={()=>onNavigate(p)}><span>⌕</span><div><strong>{p}</strong><small>Open {p.toLowerCase()}</small></div><b>→</b></button>)}</div></SimpleModal>}

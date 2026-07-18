@@ -1,9 +1,10 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
-import { handleMetaRequest, requireSetupKey, type MetaEnv } from "./meta";
+import { handleMetaRequest, type MetaEnv } from "./meta";
+import { handleAuthRequest, requireSession, type AuthEnv } from "./auth";
 
-interface Env extends MetaEnv {
+interface Env extends MetaEnv, AuthEnv {
   ASSETS: Fetcher;
   DB: D1Database;
   IMAGES: {
@@ -30,24 +31,28 @@ const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
+    const authResponse = await handleAuthRequest(request, env);
+    if (authResponse) return authResponse;
+
     const metaResponse = await handleMetaRequest(request, env);
     if (metaResponse) return metaResponse;
 
     if (url.pathname === "/api/state") {
       const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
       if (!env.DB) return json({ error: "Workspace database is unavailable" }, 503);
-      const denied = await requireSetupKey(request, env);
-      if (denied) return denied;
+      const session = await requireSession(request, env);
+      if (session instanceof Response) return session;
+      const scopedKey = (key: string) => `${session.workspaceId}::${key}`;
       if (request.method === "GET") {
         const key = url.searchParams.get("key");
         if (!key || !/^[a-z0-9-]{1,80}$/i.test(key)) return json({ error: "A valid key is required" }, 400);
-        const record = await env.DB.prepare("SELECT value FROM workspace_state WHERE key = ?").bind(key).first<{ value: string }>();
+        const record = await env.DB.prepare("SELECT value FROM workspace_state WHERE key = ?").bind(scopedKey(key)).first<{ value: string }>();
         return json({ value: record ? JSON.parse(record.value) : null });
       }
       if (request.method === "PUT") {
         const payload = await request.json() as { key?: string; value?: unknown };
         if (!payload.key || !/^[a-z0-9-]{1,80}$/i.test(payload.key)) return json({ error: "A valid key is required" }, 400);
-        await env.DB.prepare("INSERT INTO workspace_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP").bind(payload.key, JSON.stringify(payload.value)).run();
+        await env.DB.prepare("INSERT INTO workspace_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP").bind(scopedKey(payload.key), JSON.stringify(payload.value)).run();
         return json({ saved: true });
       }
       return json({ error: "Method not allowed" }, 405);

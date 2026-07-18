@@ -1,6 +1,6 @@
 # Qpy Engage engineering handoff
 
-Updated: July 18, 2026
+Updated: July 18, 2026 (real authentication added — read "Authentication" below before assuming the shared workspace-key model still applies)
 
 ## Source and deployments
 
@@ -40,7 +40,21 @@ Do not continue from `main`; it is behind the active branch.
 - Analytics and exports
 - Web-chat widget setup
 
-These product areas persist primarily in browser storage on GitHub Pages. They are interactive but are not yet backed by production services. Instagram is currently a sandbox/demo connection. AI responses are product simulations rather than calls to a production model.
+These product areas persist per-workspace through `/api/state` now that real accounts exist (see below), so they sync across devices/browsers for the same signed-in account, but they are still interactive simulations, not calls to production services. Instagram is currently a sandbox/demo connection. AI responses (assistant test chat, knowledge Q&A) are canned strings, not calls to a production model. Campaign "sends" and billing are simulated; no bulk WhatsApp/Instagram broadcast API or payment processor is wired up.
+
+## Authentication and multi-tenancy
+
+Real accounts replaced the single shared `default` workspace and the `x-qpy-setup-key` model:
+
+- `worker/auth.ts` implements signup/login/logout, PBKDF2 password hashing, and bearer session tokens (`sessions` table, 30-day expiry). No new secret is required — session tokens are self-contained.
+- New D1 tables: `users`, `workspaces`, `workspace_members`, `sessions`. `whatsapp_messages` gained a `workspace_id` column. All are created idempotently at request time (see `ensureAuthSchema` / `ensureMetaSchema`) the same way the existing WhatsApp tables are, so no manual migration step is required to deploy this.
+- Every `/api/meta/*` endpoint (except `config`, which is server-level non-tenant config) now requires a valid `Authorization: Bearer <token>` session instead of the old shared setup key. Connecting/disconnecting WhatsApp requires the `Owner` or `Admin` role.
+- `/api/state` is now namespaced per authenticated workspace (`${workspaceId}::${key}` internally) instead of being a single global keyspace anyone could read or write.
+- **First-signup migration**: when the very first user account is created, if a legacy `whatsapp_connections` row still exists under the old hardcoded workspace id `"default"`, that workspace id (and any `whatsapp_messages` rows with a null `workspace_id`) are adopted by that user's new workspace, so the already-connected WhatsApp number keeps working under the first real account. Every signup after that gets its own fresh workspace.
+- The frontend now gates the whole app behind login/signup (`app/page.tsx`'s `AuthGate`/`Home`/`Workspace` split). The bearer token lives in `localStorage` (`qpy-engage-auth-token`) and is attached via an `AuthTokenContext` used by `useStoredState`, `Channels`, `LiveInbox`, and the new `useWorkspaceMembers` hook (Team page — invite/role/remove now hit real `/api/workspace/members` endpoints instead of local mock state).
+- Role gating so far is minimal: Team invite/role-change/remove and WhatsApp connect/disconnect require Owner/Admin (enforced server-side); other pages don't yet differentiate by role.
+
+**Not yet done**: this was built and reviewed carefully but has not been run through `npm run build`/typecheck or exercised against a live Worker (the agent session that built it had no local Node.js). Run `npm run build` and click through signup → connect WhatsApp → invite a teammate on a preview deploy before trusting this in production. There is also no "forgot password," email verification, or workspace-switching UI yet (a user invited to a second workspace only gets attached to it in the database, with login always resolving to their `Owner` workspace first).
 
 ## Current WhatsApp/Meta status
 
@@ -66,28 +80,30 @@ Never commit or print any of these values:
 
 - `META_APP_SECRET`
 - `META_TOKEN_ENCRYPTION_KEY`
-- `META_SETUP_KEY`
 - `META_WEBHOOK_VERIFY_TOKEN`
 - Meta user or system-user access tokens
+- User password hashes / session token hashes (not secrets you set, but never log them)
 
-They are stored as Cloudflare Worker secrets. The Meta App Secret and workspace setup key were shared in the prior private development conversation. Rotate both before production. When rotating the app secret, update the Cloudflare secret immediately so webhook signature validation and `appsecret_proof` continue to work.
+They are stored as Cloudflare Worker secrets. The Meta App Secret was shared in a prior private development conversation and should still be rotated before production; update the Cloudflare secret immediately after rotating so webhook signature validation and `appsecret_proof` continue to work. `META_SETUP_KEY` is retired — it's no longer read anywhere in the code and can be deleted from Cloudflare secrets.
 
 Expected Cloudflare values:
 
 - Non-secret vars in `wrangler.jsonc`: `META_APP_ID`, `META_EMBEDDED_SIGNUP_CONFIG_ID`, `META_GRAPH_VERSION`
-- Secrets: `META_APP_SECRET`, `META_TOKEN_ENCRYPTION_KEY`, `META_SETUP_KEY`, `META_WEBHOOK_VERIFY_TOKEN`
+- Secrets: `META_APP_SECRET`, `META_TOKEN_ENCRYPTION_KEY`, `META_WEBHOOK_VERIFY_TOKEN`
 
 ## Backend API map
 
 - `GET /api/meta/config`: public non-secret Meta configuration
-- `GET /api/meta/status`: public sanitized connection status
-- `POST /api/meta/oauth/exchange`: Embedded Signup code exchange; protected by workspace key
-- `POST /api/meta/manual/connect`: manual/system-user token connection; protected by workspace key
-- `GET /api/meta/inbox`: live stored messages; protected by workspace key
-- `POST /api/meta/inbox/messages`: send live WhatsApp reply; protected by workspace key
-- `POST /api/meta/test-message`: send approved test template; protected by workspace key
-- `DELETE /api/meta/connection`: disconnect; protected by workspace key
-- `GET|POST /api/webhooks/whatsapp`: Meta challenge and signed webhook delivery
+- `GET /api/meta/status`: sanitized connection status for the caller's workspace; requires a session
+- `POST /api/meta/oauth/exchange`: Embedded Signup code exchange; requires an Owner/Admin session
+- `POST /api/meta/manual/connect`: manual/system-user token connection; requires an Owner/Admin session
+- `GET /api/meta/inbox`: live stored messages for the caller's workspace; requires a session
+- `POST /api/meta/inbox/messages`: send live WhatsApp reply; requires a session
+- `POST /api/meta/test-message`: send approved test template; requires a session
+- `DELETE /api/meta/connection`: disconnect; requires an Owner/Admin session
+- `GET|POST /api/webhooks/whatsapp`: Meta challenge and signed webhook delivery (unauthenticated by design — Meta calls this directly; resolves the workspace from the incoming `phone_number_id`)
+- `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/session`: account auth
+- `GET /api/workspace/members`, `POST /api/workspace/members` (invite), `PATCH /api/workspace/members/:email` (role), `DELETE /api/workspace/members/:email`: team management, Owner/Admin only for writes
 
 The GitHub frontend calls the Worker through `META_BACKEND_ORIGIN` in `app/page.tsx`. CORS currently allows `https://mobileecommerce.github.io`, local development, and ChatGPT Sites preview hosts.
 
@@ -124,17 +140,19 @@ vinext may generate `.wrangler/deploy/config.json` with a duplicate local `DB` b
 
 ## Recommended next work
 
-1. Create and install a permanent Meta System User Access Token; verify outbound Inbox replies.
-2. Rotate the exposed Meta App Secret and Qpy workspace setup key, then update Cloudflare secrets.
+Done: real authentication, per-workspace data isolation, and role-based access for team/WhatsApp management (see "Authentication and multi-tenancy" above) — verify with `npm run build` and a live click-through before trusting it further.
+
+1. Verify the auth changes actually build/deploy cleanly (`npm run build`, then a preview `wrangler deploy`) — they were written without a local Node.js runtime available and have not been executed.
+2. Rotate the exposed Meta App Secret, then update the Cloudflare secret; delete the now-unused `META_SETUP_KEY` secret.
 3. Add explicit token metadata/health monitoring and an admin-only credential rotation screen.
-4. Add real authentication and multi-tenant workspace isolation. The current backend uses a single `default` workspace.
-5. Replace the shared workspace-key model with authenticated user sessions and role-based access.
-6. Convert Inbox polling to realtime delivery when the authentication model is in place.
-7. Add database-backed contacts, conversation assignment, resolution, notes, and message attachments.
-8. Connect AI assistant execution to an approved model provider with retrieval, action security, audit logs, and human handoff.
-9. Implement real Instagram OAuth/webhooks, campaign template management, audience consent records, and scheduled delivery workers.
-10. Complete Meta Business Verification, App Review, Advanced Access, and Embedded Signup production onboarding.
+4. Add password reset, email verification, and a workspace-switching UI (a user invited to a second workspace is only attached to it in the database today; login always resolves to their Owner workspace).
+5. Convert Inbox polling to realtime delivery now that the authentication model is in place.
+6. Add database-backed contacts, conversation assignment, resolution, notes, and message attachments (currently only WhatsApp message history is D1-backed; contact metadata is still per-browser).
+7. Connect AI assistant execution to an approved model provider with retrieval, action security, audit logs, and human handoff.
+8. Implement real Instagram OAuth/webhooks, campaign template management, audience consent records, and scheduled delivery workers (bulk campaign "sends" are still simulated — Meta also requires approved message templates for outbound marketing sends outside the 24-hour customer-service window).
+9. Complete Meta Business Verification, App Review, Advanced Access, and Embedded Signup production onboarding.
+10. Wire up real billing (e.g. Stripe) if/when this needs to charge real customers; today's billing UI is fully simulated by design.
 
 ## Definition of production readiness
 
-Do not call the current product multi-tenant production-ready until it has authenticated accounts, per-workspace data isolation, authorization on every customer-data endpoint, durable job processing, credential rotation, monitoring, backups, rate limiting, abuse controls, audit logs, and completed Meta approvals.
+Authenticated accounts and per-workspace data isolation now exist, but do not call the product production-ready until it also has: authorization audited on every customer-data endpoint, durable job processing, credential rotation, monitoring, backups, rate limiting, abuse controls, audit logs, password reset/email verification, and completed Meta approvals.

@@ -1,18 +1,20 @@
-const DEFAULT_GRAPH_VERSION = "v25.0";
-const WORKSPACE_ID = "default";
+import { requireSession, requireRole, type AuthEnv } from "./auth";
+import { encoder, arrayBuffer, allowedOrigin, json, corsPreflight, sha256, safeEqual, bytesToBase64, base64ToBytes } from "./shared";
 
-export interface MetaEnv {
+const DEFAULT_GRAPH_VERSION = "v25.0";
+
+export interface MetaEnv extends AuthEnv {
   DB: D1Database;
   META_APP_ID?: string;
   META_APP_SECRET?: string;
   META_EMBEDDED_SIGNUP_CONFIG_ID?: string;
   META_WEBHOOK_VERIFY_TOKEN?: string;
   META_TOKEN_ENCRYPTION_KEY?: string;
-  META_SETUP_KEY?: string;
   META_GRAPH_VERSION?: string;
 }
 
 type ConnectionRow = {
+  workspace_id: string;
   business_id: string | null;
   waba_id: string;
   phone_number_id: string;
@@ -26,42 +28,6 @@ type ConnectionRow = {
   token_ciphertext: string;
   token_iv: string;
 };
-
-const encoder = new TextEncoder();
-
-function arrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-}
-
-function allowedOrigin(request: Request): string | null {
-  const origin = request.headers.get("origin");
-  if (!origin) return null;
-  const host = new URL(origin).hostname;
-  if (origin === "https://mobileecommerce.github.io" || host.endsWith(".chatgpt.site") || host === "localhost" || host === "127.0.0.1") return origin;
-  return null;
-}
-
-function json(request: Request, body: unknown, status = 200): Response {
-  const origin = allowedOrigin(request);
-  const headers = new Headers({ "content-type": "application/json", "cache-control": "no-store" });
-  if (origin) {
-    headers.set("access-control-allow-origin", origin);
-    headers.set("vary", "origin");
-  }
-  return new Response(JSON.stringify(body), { status, headers });
-}
-
-function corsPreflight(request: Request): Response {
-  const origin = allowedOrigin(request);
-  if (!origin) return new Response(null, { status: 403 });
-  return new Response(null, { status: 204, headers: {
-    "access-control-allow-origin": origin,
-    "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
-    "access-control-allow-headers": "content-type,x-qpy-setup-key",
-    "access-control-max-age": "86400",
-    "vary": "origin",
-  } });
-}
 
 async function ensureMetaSchema(db: D1Database): Promise<void> {
   await db.batch([
@@ -102,42 +68,14 @@ async function ensureMetaSchema(db: D1Database): Promise<void> {
     )`),
     db.prepare("CREATE INDEX IF NOT EXISTS whatsapp_messages_wa_id_idx ON whatsapp_messages (wa_id)"),
   ]);
-}
-
-async function sha256(value: string): Promise<ArrayBuffer> {
-  return crypto.subtle.digest("SHA-256", encoder.encode(value));
+  try { await db.prepare("ALTER TABLE whatsapp_messages ADD COLUMN workspace_id TEXT").run(); } catch { /* column already exists */ }
+  try { await db.prepare("CREATE INDEX IF NOT EXISTS whatsapp_messages_workspace_idx ON whatsapp_messages (workspace_id)").run(); } catch { /* already exists */ }
 }
 
 async function hmacHex(secret: string, value: string | Uint8Array): Promise<string> {
   const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const signature = await crypto.subtle.sign("HMAC", key, arrayBuffer(typeof value === "string" ? encoder.encode(value) : value));
   return [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function safeEqual(left: string, right: string): Promise<boolean> {
-  const [a, b] = await Promise.all([sha256(left), sha256(right)]);
-  const aa = new Uint8Array(a); const bb = new Uint8Array(b);
-  let difference = 0;
-  for (let index = 0; index < aa.length; index++) difference |= aa[index] ^ bb[index];
-  return difference === 0;
-}
-
-export async function requireSetupKey(request: Request, env: MetaEnv): Promise<Response | null> {
-  if (!env.META_SETUP_KEY) return json(request, { error: "The secure workspace connection key has not been configured on the server." }, 503);
-  const supplied = request.headers.get("x-qpy-setup-key") || "";
-  if (!supplied || !(await safeEqual(supplied, env.META_SETUP_KEY))) return json(request, { error: "The workspace connection key is incorrect." }, 401);
-  return null;
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
-}
-
-function base64ToBytes(value: string): Uint8Array {
-  const binary = atob(value);
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 }
 
 async function encryptionKey(secret: string): Promise<CryptoKey> {
@@ -188,7 +126,8 @@ async function metaError(response: Response): Promise<string> {
 }
 
 async function exchangeEmbeddedSignup(request: Request, env: MetaEnv): Promise<Response> {
-  const denied = await requireSetupKey(request, env); if (denied) return denied;
+  const session = await requireSession(request, env); if (session instanceof Response) return session;
+  const denied = requireRole(request, session, ["Owner", "Admin"]); if (denied) return denied;
   if (!env.META_APP_ID || !env.META_APP_SECRET || !env.META_TOKEN_ENCRYPTION_KEY) return json(request, { error: "Meta server credentials are incomplete." }, 503);
   const body = await request.json() as { code?: string; wabaId?: string; phoneNumberId?: string; businessId?: string };
   if (!body.code || !body.wabaId || !body.phoneNumberId || !/^\d+$/.test(body.wabaId) || !/^\d+$/.test(body.phoneNumberId)) return json(request, { error: "Meta did not return a complete WhatsApp account selection." }, 400);
@@ -220,14 +159,15 @@ async function exchangeEmbeddedSignup(request: Request, env: MetaEnv): Promise<R
     phone_number_id=excluded.phone_number_id, display_phone_number=excluded.display_phone_number, verified_name=excluded.verified_name,
     quality_rating=excluded.quality_rating, status=excluded.status, token_ciphertext=excluded.token_ciphertext, token_iv=excluded.token_iv,
     token_expires_at=excluded.token_expires_at, webhook_subscribed=1, updated_at=CURRENT_TIMESTAMP`)
-    .bind(WORKSPACE_ID, env.META_APP_ID, body.businessId || null, body.wabaId, body.phoneNumberId, phone.display_phone_number || null, phone.verified_name || null, phone.quality_rating || null, phone.status || null, encrypted.ciphertext, encrypted.iv, expiresAt).run();
+    .bind(session.workspaceId, env.META_APP_ID, body.businessId || null, body.wabaId, body.phoneNumberId, phone.display_phone_number || null, phone.verified_name || null, phone.quality_rating || null, phone.status || null, encrypted.ciphertext, encrypted.iv, expiresAt).run();
 
-  const row = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(WORKSPACE_ID).first<ConnectionRow>();
+  const row = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(session.workspaceId).first<ConnectionRow>();
   return json(request, { connected: true, connection: publicConnection(row) });
 }
 
 async function connectManualAccount(request: Request, env: MetaEnv): Promise<Response> {
-  const denied = await requireSetupKey(request, env); if (denied) return denied;
+  const session = await requireSession(request, env); if (session instanceof Response) return session;
+  const denied = requireRole(request, session, ["Owner", "Admin"]); if (denied) return denied;
   if (!env.META_APP_ID || !env.META_APP_SECRET || !env.META_TOKEN_ENCRYPTION_KEY) return json(request, { error: "Meta server credentials are incomplete." }, 503);
   const body = await request.json() as { accessToken?: string; wabaId?: string; phoneNumberId?: string; businessId?: string };
   const accessToken = (body.accessToken || "").trim();
@@ -258,20 +198,20 @@ async function connectManualAccount(request: Request, env: MetaEnv): Promise<Res
     phone_number_id=excluded.phone_number_id, display_phone_number=excluded.display_phone_number, verified_name=excluded.verified_name,
     quality_rating=excluded.quality_rating, status=excluded.status, token_ciphertext=excluded.token_ciphertext, token_iv=excluded.token_iv,
     token_expires_at=NULL, webhook_subscribed=1, updated_at=CURRENT_TIMESTAMP`)
-    .bind(WORKSPACE_ID, env.META_APP_ID, businessId || null, wabaId, phoneNumberId, phone.display_phone_number || null, phone.verified_name || null, phone.quality_rating || null, phone.status || null, encrypted.ciphertext, encrypted.iv).run();
+    .bind(session.workspaceId, env.META_APP_ID, businessId || null, wabaId, phoneNumberId, phone.display_phone_number || null, phone.verified_name || null, phone.quality_rating || null, phone.status || null, encrypted.ciphertext, encrypted.iv).run();
 
-  const row = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(WORKSPACE_ID).first<ConnectionRow>();
+  const row = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(session.workspaceId).first<ConnectionRow>();
   return json(request, { connected: true, connection: publicConnection(row) });
 }
 
 async function sendTestMessage(request: Request, env: MetaEnv): Promise<Response> {
-  const denied = await requireSetupKey(request, env); if (denied) return denied;
+  const session = await requireSession(request, env); if (session instanceof Response) return session;
   if (!env.META_TOKEN_ENCRYPTION_KEY || !env.META_APP_SECRET) return json(request, { error: "Meta server credentials are incomplete." }, 503);
   const body = await request.json() as { to?: string };
   const to = (body.to || "").replace(/[^\d]/g, "");
   if (to.length < 8 || to.length > 15) return json(request, { error: "Enter a valid recipient number including country code." }, 400);
   await ensureMetaSchema(env.DB);
-  const connection = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(WORKSPACE_ID).first<ConnectionRow>();
+  const connection = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(session.workspaceId).first<ConnectionRow>();
   if (!connection) return json(request, { error: "Connect a WhatsApp account first." }, 409);
   const token = await decryptToken(connection.token_ciphertext, connection.token_iv, env.META_TOKEN_ENCRYPTION_KEY);
   const proof = await hmacHex(env.META_APP_SECRET, token);
@@ -286,12 +226,12 @@ async function sendTestMessage(request: Request, env: MetaEnv): Promise<Response
 }
 
 async function getInbox(request: Request, env: MetaEnv): Promise<Response> {
-  const denied = await requireSetupKey(request, env); if (denied) return denied;
-  const connection = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(WORKSPACE_ID).first<ConnectionRow>();
+  const session = await requireSession(request, env); if (session instanceof Response) return session;
+  const connection = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(session.workspaceId).first<ConnectionRow>();
   if (!connection) return json(request, { error: "Connect a WhatsApp account first." }, 409);
   const result = await env.DB.prepare(`SELECT id, direction, wa_id, message_type, message_text, status, message_timestamp, created_at
-    FROM whatsapp_messages WHERE phone_number_id = ? OR phone_number_id IS NULL
-    ORDER BY COALESCE(CAST(message_timestamp AS INTEGER), 0) ASC, created_at ASC LIMIT 500`).bind(connection.phone_number_id).all<{
+    FROM whatsapp_messages WHERE workspace_id = ?
+    ORDER BY COALESCE(CAST(message_timestamp AS INTEGER), 0) ASC, created_at ASC LIMIT 500`).bind(session.workspaceId).all<{
       id: string; direction: string; wa_id: string | null; message_type: string | null; message_text: string | null;
       status: string | null; message_timestamp: string | null; created_at: string;
     }>();
@@ -312,14 +252,14 @@ async function getInbox(request: Request, env: MetaEnv): Promise<Response> {
 }
 
 async function sendInboxMessage(request: Request, env: MetaEnv): Promise<Response> {
-  const denied = await requireSetupKey(request, env); if (denied) return denied;
+  const session = await requireSession(request, env); if (session instanceof Response) return session;
   if (!env.META_TOKEN_ENCRYPTION_KEY || !env.META_APP_SECRET) return json(request, { error: "Meta server credentials are incomplete." }, 503);
   const body = await request.json() as { to?: string; text?: string };
   const to = (body.to || "").replace(/[^\d]/g, "");
   const text = (body.text || "").trim();
   if (to.length < 8 || to.length > 15) return json(request, { error: "Select a valid WhatsApp customer." }, 400);
   if (!text || text.length > 4096) return json(request, { error: "Message text must be between 1 and 4096 characters." }, 400);
-  const connection = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(WORKSPACE_ID).first<ConnectionRow>();
+  const connection = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(session.workspaceId).first<ConnectionRow>();
   if (!connection) return json(request, { error: "Connect a WhatsApp account first." }, 409);
   const token = await decryptToken(connection.token_ciphertext, connection.token_iv, env.META_TOKEN_ENCRYPTION_KEY);
   const proof = await hmacHex(env.META_APP_SECRET, token);
@@ -332,10 +272,10 @@ async function sendInboxMessage(request: Request, env: MetaEnv): Promise<Respons
   const payload = await response.json() as { messages?: Array<{ id: string }> };
   const id = payload.messages?.[0]?.id || crypto.randomUUID();
   await env.DB.prepare(`INSERT INTO whatsapp_messages
-    (id, direction, wa_id, phone_number_id, message_type, message_text, status, message_timestamp, payload)
-    VALUES (?, 'outbound', ?, ?, 'text', ?, 'accepted', ?, ?)
+    (id, direction, wa_id, phone_number_id, workspace_id, message_type, message_text, status, message_timestamp, payload)
+    VALUES (?, 'outbound', ?, ?, ?, 'text', ?, 'accepted', ?, ?)
     ON CONFLICT(id) DO UPDATE SET message_text=excluded.message_text, status=excluded.status, payload=excluded.payload`)
-    .bind(id, to, connection.phone_number_id, text, String(Math.floor(Date.now() / 1000)), JSON.stringify(payload)).run();
+    .bind(id, to, connection.phone_number_id, session.workspaceId, text, String(Math.floor(Date.now() / 1000)), JSON.stringify(payload)).run();
   return json(request, { sent: true, message: { id, direction: "outbound", waId: to, type: "text", text, status: "accepted", timestamp: String(Math.floor(Date.now() / 1000)), createdAt: new Date().toISOString() } });
 }
 
@@ -358,17 +298,26 @@ async function receiveWebhook(request: Request, env: MetaEnv): Promise<Response>
   await ensureMetaSchema(env.DB);
   const eventId = request.headers.get("x-hub-signature-256") || crypto.randomUUID();
   await env.DB.prepare("INSERT OR IGNORE INTO whatsapp_webhook_events (id, object_type, payload) VALUES (?, ?, ?)").bind(eventId, payload.object || "unknown", JSON.stringify(payload)).run();
+  const workspaceCache = new Map<string, string | null>();
+  const resolveWorkspace = async (phoneNumberId: string | null): Promise<string | null> => {
+    if (!phoneNumberId) return null;
+    if (workspaceCache.has(phoneNumberId)) return workspaceCache.get(phoneNumberId)!;
+    const owner = await env.DB.prepare("SELECT workspace_id FROM whatsapp_connections WHERE phone_number_id = ?").bind(phoneNumberId).first<{ workspace_id: string }>();
+    workspaceCache.set(phoneNumberId, owner?.workspace_id || null);
+    return owner?.workspace_id || null;
+  };
   for (const entry of payload.entry || []) for (const change of entry.changes || []) {
     const value = change.value || {}; const phoneNumberId = value.metadata?.phone_number_id || null;
+    const workspaceId = await resolveWorkspace(phoneNumberId);
     for (const item of value.messages || []) {
       const id = String(item.id || crypto.randomUUID()); const text = (item.text as { body?: string } | undefined)?.body || null;
-      await env.DB.prepare("INSERT OR IGNORE INTO whatsapp_messages (id, direction, wa_id, phone_number_id, message_type, message_text, status, message_timestamp, payload) VALUES (?, 'inbound', ?, ?, ?, ?, 'received', ?, ?)")
-        .bind(id, item.from ? String(item.from) : null, phoneNumberId, item.type ? String(item.type) : null, text, item.timestamp ? String(item.timestamp) : null, JSON.stringify(item)).run();
+      await env.DB.prepare("INSERT OR IGNORE INTO whatsapp_messages (id, direction, wa_id, phone_number_id, workspace_id, message_type, message_text, status, message_timestamp, payload) VALUES (?, 'inbound', ?, ?, ?, ?, ?, 'received', ?, ?)")
+        .bind(id, item.from ? String(item.from) : null, phoneNumberId, workspaceId, item.type ? String(item.type) : null, text, item.timestamp ? String(item.timestamp) : null, JSON.stringify(item)).run();
     }
     for (const item of value.statuses || []) {
       const id = String(item.id || crypto.randomUUID());
-      await env.DB.prepare("INSERT INTO whatsapp_messages (id, direction, wa_id, phone_number_id, status, message_timestamp, payload) VALUES (?, 'outbound', ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, message_timestamp=excluded.message_timestamp, payload=excluded.payload")
-        .bind(id, item.recipient_id ? String(item.recipient_id) : null, phoneNumberId, item.status ? String(item.status) : null, item.timestamp ? String(item.timestamp) : null, JSON.stringify(item)).run();
+      await env.DB.prepare("INSERT INTO whatsapp_messages (id, direction, wa_id, phone_number_id, workspace_id, status, message_timestamp, payload) VALUES (?, 'outbound', ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, message_timestamp=excluded.message_timestamp, payload=excluded.payload")
+        .bind(id, item.recipient_id ? String(item.recipient_id) : null, phoneNumberId, workspaceId, item.status ? String(item.status) : null, item.timestamp ? String(item.timestamp) : null, JSON.stringify(item)).run();
     }
   }
   return new Response("EVENT_RECEIVED", { status: 200, headers: { "content-type": "text/plain" } });
@@ -387,12 +336,13 @@ export async function handleMetaRequest(request: Request, env: MetaEnv): Promise
     appId: env.META_APP_ID || null,
     configId: env.META_EMBEDDED_SIGNUP_CONFIG_ID || null,
     graphVersion: graphVersion(env),
-    ready: Boolean(env.META_APP_ID && env.META_APP_SECRET && env.META_EMBEDDED_SIGNUP_CONFIG_ID && env.META_TOKEN_ENCRYPTION_KEY && env.META_SETUP_KEY && env.META_WEBHOOK_VERIFY_TOKEN),
+    ready: Boolean(env.META_APP_ID && env.META_APP_SECRET && env.META_EMBEDDED_SIGNUP_CONFIG_ID && env.META_TOKEN_ENCRYPTION_KEY && env.META_WEBHOOK_VERIFY_TOKEN),
     webhookUrl: `${url.origin}/api/webhooks/whatsapp`,
-    missing: [!env.META_APP_ID&&"META_APP_ID", !env.META_APP_SECRET&&"META_APP_SECRET", !env.META_EMBEDDED_SIGNUP_CONFIG_ID&&"META_EMBEDDED_SIGNUP_CONFIG_ID", !env.META_TOKEN_ENCRYPTION_KEY&&"META_TOKEN_ENCRYPTION_KEY", !env.META_SETUP_KEY&&"META_SETUP_KEY", !env.META_WEBHOOK_VERIFY_TOKEN&&"META_WEBHOOK_VERIFY_TOKEN"].filter(Boolean),
+    missing: [!env.META_APP_ID&&"META_APP_ID", !env.META_APP_SECRET&&"META_APP_SECRET", !env.META_EMBEDDED_SIGNUP_CONFIG_ID&&"META_EMBEDDED_SIGNUP_CONFIG_ID", !env.META_TOKEN_ENCRYPTION_KEY&&"META_TOKEN_ENCRYPTION_KEY", !env.META_WEBHOOK_VERIFY_TOKEN&&"META_WEBHOOK_VERIFY_TOKEN"].filter(Boolean),
   });
   if (url.pathname === "/api/meta/status" && request.method === "GET") {
-    const row = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(WORKSPACE_ID).first<ConnectionRow>();
+    const session = await requireSession(request, env); if (session instanceof Response) return session;
+    const row = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(session.workspaceId).first<ConnectionRow>();
     return json(request, { connected: Boolean(row), connection: publicConnection(row) });
   }
   if (url.pathname === "/api/meta/oauth/exchange" && request.method === "POST") return exchangeEmbeddedSignup(request, env);
@@ -401,8 +351,9 @@ export async function handleMetaRequest(request: Request, env: MetaEnv): Promise
   if (url.pathname === "/api/meta/inbox" && request.method === "GET") return getInbox(request, env);
   if (url.pathname === "/api/meta/inbox/messages" && request.method === "POST") return sendInboxMessage(request, env);
   if (url.pathname === "/api/meta/connection" && request.method === "DELETE") {
-    const denied = await requireSetupKey(request, env); if (denied) return denied;
-    await env.DB.prepare("DELETE FROM whatsapp_connections WHERE workspace_id = ?").bind(WORKSPACE_ID).run();
+    const session = await requireSession(request, env); if (session instanceof Response) return session;
+    const denied = requireRole(request, session, ["Owner", "Admin"]); if (denied) return denied;
+    await env.DB.prepare("DELETE FROM whatsapp_connections WHERE workspace_id = ?").bind(session.workspaceId).run();
     return json(request, { disconnected: true });
   }
   return json(request, { error: "Not found" }, 404);

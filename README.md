@@ -34,6 +34,8 @@ The first command validates the Cloudflare/vinext application. The second create
 - `app/globals.css`: shared application styles
 - `app/live-inbox.css`: live WhatsApp Inbox styles
 - `worker/meta.ts`: Meta OAuth, manual Cloud API connection, encrypted token storage, webhooks, Inbox, and message sending
+- `worker/auth.ts`: account signup/login/logout, sessions, and workspace member management
+- `worker/shared.ts`: crypto and HTTP helpers shared by `meta.ts` and `auth.ts`
 - `worker/index.ts`: Cloudflare Worker entry point
 - `db/schema.ts` and `drizzle/`: Cloudflare D1 schema and migrations
 - `wrangler.jsonc`: production Worker and D1 configuration

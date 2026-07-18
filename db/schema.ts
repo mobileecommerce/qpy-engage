@@ -37,10 +37,44 @@ export const whatsappMessages = sqliteTable("whatsapp_messages", {
   direction: text("direction").notNull(),
   waId: text("wa_id"),
   phoneNumberId: text("phone_number_id"),
+  workspaceId: text("workspace_id"),
   messageType: text("message_type"),
   messageText: text("message_text"),
   status: text("status"),
   messageTimestamp: text("message_timestamp"),
   payload: text("payload").notNull(),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const users = sqliteTable("users", {
+  id: text("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  passwordSalt: text("password_salt").notNull(),
+  name: text("name"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const workspaces = sqliteTable("workspaces", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  ownerUserId: text("owner_user_id").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const workspaceMembers = sqliteTable("workspace_members", {
+  workspaceId: text("workspace_id").notNull(),
+  userId: text("user_id"),
+  email: text("email").notNull(),
+  role: text("role").notNull().default("Agent"),
+  status: text("status").notNull().default("Invited"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const sessions = sqliteTable("sessions", {
+  tokenHash: text("token_hash").primaryKey(),
+  userId: text("user_id").notNull(),
+  workspaceId: text("workspace_id").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  expiresAt: text("expires_at").notNull(),
 });
