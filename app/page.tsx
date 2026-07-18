@@ -97,30 +97,37 @@ const nav: [string, Section][] = [["⌂","Overview"],["✦","Assistants"],["◫"
 
 const AUTH_TOKEN_KEY = "qpy-engage-auth-token";
 const AuthTokenContext = createContext<string | null>(null);
+const AuthWorkspaceContext = createContext<string | null>(null);
 function authHeaders(token: string | null): Record<string,string> { return token ? { authorization: `Bearer ${token}` } : {}; }
 function useAuthToken(): string | null { return useContext(AuthTokenContext); }
+function useWorkspaceId(): string | null { return useContext(AuthWorkspaceContext); }
 
 function useStoredState<T>(key: string, initial: T) {
   const token = useAuthToken();
+  const workspaceId = useWorkspaceId();
   const [value, setValue] = useState<T>(initial);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     let cancelled=false;
-    const legacyKey=key.replace(/^qpy-engage-/,"wavely-");
+    setLoaded(false);
+    // Scope the local cache to the signed-in workspace so switching accounts on the same
+    // browser never leaks one workspace's cached settings into another's.
+    const localKey=workspaceId?`${key}::ws:${workspaceId}`:null;
     const load=async()=>{
-      try { const saved=localStorage.getItem(key)??localStorage.getItem(legacyKey); if(saved&&!cancelled)setValue(JSON.parse(saved)); } catch {}
-      if(token)try { const headers=authHeaders(token); let response=await fetch(metaApi(`/api/state?key=${encodeURIComponent(key)}`),{headers});let data=response.ok?await response.json():{value:null};if(data.value===null&&legacyKey!==key){response=await fetch(metaApi(`/api/state?key=${encodeURIComponent(legacyKey)}`),{headers});data=response.ok?await response.json():data}if(data.value!==null&&!cancelled)setValue(data.value); } catch {}
+      if(localKey)try { const saved=localStorage.getItem(localKey); if(saved&&!cancelled)setValue(JSON.parse(saved)); } catch {}
+      if(token)try { const headers=authHeaders(token); const response=await fetch(metaApi(`/api/state?key=${encodeURIComponent(key)}`),{headers});const data=response.ok?await response.json():{value:null};if(data.value!==null&&!cancelled)setValue(data.value); } catch {}
       if(!cancelled)setLoaded(true);
     };
     load();
     return()=>{cancelled=true};
-  }, [key, token]);
+  }, [key, token, workspaceId]);
   useEffect(() => {
     if(!loaded)return;
-    localStorage.setItem(key,JSON.stringify(value));
+    const localKey=workspaceId?`${key}::ws:${workspaceId}`:null;
+    if(localKey)localStorage.setItem(localKey,JSON.stringify(value));
     const timer=window.setTimeout(()=>{if(token)fetch(metaApi("/api/state"),{method:"PUT",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({key,value})}).catch(()=>{});},350);
     return()=>window.clearTimeout(timer);
-  }, [key, loaded, value, token]);
+  }, [key, loaded, value, token, workspaceId]);
   return [value, setValue] as const;
 }
 
@@ -208,7 +215,7 @@ export default function Home() {
 
   if (authLoading) return <div className="auth-loading">Loading Qpy Engage…</div>;
   if (!session) return <AuthGate onAuthed={handleAuthed}/>;
-  return <AuthTokenContext.Provider value={session.token}><Workspace session={session} onLogout={handleLogout}/></AuthTokenContext.Provider>;
+  return <AuthTokenContext.Provider value={session.token}><AuthWorkspaceContext.Provider value={session.workspace.id}><Workspace session={session} onLogout={handleLogout}/></AuthWorkspaceContext.Provider></AuthTokenContext.Provider>;
 }
 
 function AuthGate({onAuthed}:{onAuthed:(session:AuthSession)=>void}){
