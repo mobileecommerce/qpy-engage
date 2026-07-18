@@ -280,7 +280,7 @@ function Workspace({session,onLogout}:{session:AuthSession;onLogout:()=>void}) {
 
   const body = section === "Overview" ? <Overview onNavigate={go} onCreate={openAutomation} connected={connected} conversations={conversations} automations={automations}/> :
     section === "Assistants" ? <Assistants sources={sources} onKnowledge={()=>go("Knowledge")} onChannels={()=>go("Channels")} onAnalytics={()=>go("Analytics")} notify={notify}/> :
-    section === "Channels" ? <Channels step={channelStep} setStep={setChannelStep} connected={connected} setConnected={setConnected} notify={notify}/> :
+    section === "Channels" ? <Channels step={channelStep} setStep={setChannelStep} connected={connected} setConnected={setConnected} workspaceId={session.workspace.id} notify={notify}/> :
     section === "Inbox" ? connected?<LiveInbox notify={notify}/>:<Inbox conversations={conversations} setConversations={setConversations} selected={selected} setSelectedId={setSelectedId} messages={messages[selected.id]??[]} draft={draft} setDraft={setDraft} sendMessage={sendMessage} aiActive={aiActive} setAiActive={setAiActive} notify={notify}/> :
     section === "Campaigns" ? <Campaigns notify={notify}/> :
     section === "Automations" ? <Automations items={automations} setItems={setAutomations} onCreate={openAutomation} notify={notify}/> :
@@ -305,7 +305,24 @@ function Workspace({session,onLogout}:{session:AuthSession;onLogout:()=>void}) {
     </section>
     <nav className="mobile-nav" aria-label="Mobile navigation">{nav.slice(0,5).map(([icon,label])=><button key={label} onClick={()=>go(label)} className={section===label?"active":""}><span>{icon}</span><small>{label}</small></button>)}</nav>
     {modal==="automation"&&<AutomationModal template={automationTemplate} onClose={()=>setModal(null)} onSave={(item)=>{setAutomations([...automations,item]);setModal(null);notify("Automation created")}}/>}
-    {modal==="source"&&<SourceModal onClose={()=>setModal(null)} onSave={(item)=>{setSources([...sources,item]);setModal(null);notify("Knowledge source added")}}/>}
+    {modal==="source"&&<SourceModal onClose={()=>setModal(null)} onSave={(item)=>{
+      setSources([...sources,item]);setModal(null);notify("Knowledge source added");
+      if(item.type==="Website"){
+        fetch(metaApi("/api/knowledge/fetch-website"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(session.token)},body:JSON.stringify({url:item.name,sourceId:item.id})})
+          .then(async response=>{
+            const result=await response.json() as {fetched?:boolean;charCount?:number;error?:string};
+            if(response.ok&&result.fetched){
+              const pages=Math.max(1,Math.round((result.charCount||0)/2000));
+              setSources(current=>current.map(s=>s.id===item.id?{...s,pages,status:"Ready"}:s));
+              notify(`${item.name} indexed — the assistant can now use its content`);
+            }else{
+              setSources(current=>current.map(s=>s.id===item.id?{...s,status:"Ready"}:s));
+              notify(result.error||"Could not fetch that website — the assistant will only know its name.");
+            }
+          })
+          .catch(()=>{setSources(current=>current.map(s=>s.id===item.id?{...s,status:"Ready"}:s));notify("Could not fetch that website — the assistant will only know its name.")});
+      }
+    }}/>}
     {modal==="invite"&&<InviteModal onClose={()=>setModal(null)} onSave={async(email,role)=>{const error=await invite(email,role);if(error){notify(error)}else{setModal(null);notify("Invitation sent")}}}/>}
     {modal==="search"&&<SearchModal onClose={()=>setModal(null)} onNavigate={(s)=>{go(s);setModal(null)}}/>}
     {modal==="notifications"&&<SimpleModal title="Notifications" onClose={()=>setModal(null)}><div className="notification-center">{[["AI requested human help","Aisha’s order question needs review","Inbox"],["Campaign scheduled","Weekend showroom event • Jul 19 at 09:30","Campaigns"],["Knowledge synchronized","4 sources are ready","Knowledge"]].map(([title,copy,target])=><button key={title} onClick={()=>{setModal(null);go(target as Section)}}><span>✓</span><div><strong>{title}</strong><small>{copy}</small></div><b>Open →</b></button>)}</div><div className="modal-actions"><button className="secondary-btn" onClick={()=>setModal(null)}>Mark all read</button></div></SimpleModal>}
@@ -359,12 +376,25 @@ function Assistants({sources,onKnowledge,onChannels,onAnalytics,notify}:{sources
   const token=useAuthToken();
   const callActiveRef=useRef(false);
   const recognitionRef=useRef<SpeechRecognitionLike|null>(null);
+  const [knowledgeContent,setKnowledgeContent]=useState<Record<number,string>>({});
+  useEffect(()=>{
+    if(!token||!selectedSources.length){setKnowledgeContent({});return}
+    fetch(metaApi(`/api/knowledge/content?ids=${selectedSources.join(",")}`),{headers:authHeaders(token)})
+      .then(response=>response.ok?response.json():{content:{}})
+      .then(data=>setKnowledgeContent((data as {content?:Record<number,string>}).content||{}))
+      .catch(()=>{});
+  },[token,selectedSources.join(",")]);
   const next=()=>setStep(Math.min(7,step+1));
   const toggleSource=(id:number)=>setSelectedSources(selectedSources.includes(id)?selectedSources.filter(x=>x!==id):[...selectedSources,id]);
   const toggleChannel=(name:string)=>setSelectedChannels(selectedChannels.includes(name)?selectedChannels.filter(x=>x!==name):[...selectedChannels,name]);
   const buildSystemPrompt=()=>{
-    const sourceNames=sources.filter(s=>selectedSources.includes(s.id)).map(s=>s.name).join(", ")||"no connected sources yet";
-    return `${config.role}\n\nTone: ${config.tone}. Preferred language: ${config.language}.\n\nFallback and human handoff policy: ${config.fallback}\n\nRestricted topics you must never answer — hand these off instead: ${policies.restricted}\n\nConnected knowledge sources (names only — you were not given their actual content, so never claim a specific fact, price, or policy came from them): ${sourceNames}.\n\nKeep replies concise and helpful. Never invent prices, availability, order details, or policies you were not given.`;
+    const relevantSources=sources.filter(s=>selectedSources.includes(s.id));
+    const sourceNames=relevantSources.map(s=>s.name).join(", ")||"no connected sources yet";
+    const knowledgeText=relevantSources.map(s=>knowledgeContent[s.id]).filter(Boolean).join("\n\n").slice(0,12000);
+    let prompt=`${config.role}\n\nTone: ${config.tone}. Preferred language: ${config.language}.\n\nFallback and human handoff policy: ${config.fallback}\n\nRestricted topics you must never answer — hand these off instead: ${policies.restricted}\n\nConnected knowledge sources: ${sourceNames}.`;
+    prompt+=knowledgeText?`\n\nReference material from those sources — use this to answer factual questions, and do not state facts beyond what's here:\n${knowledgeText}`:" You were not given their actual content, so never claim a specific fact, price, or policy came from them.";
+    prompt+="\n\nKeep replies concise and helpful. Never invent prices, availability, order details, or policies you were not given.";
+    return prompt;
   };
   const toApiMessages=(list:Message[])=>list.map(m=>({role:(m.from==="customer"?"user":"assistant") as "user"|"assistant",content:m.text}));
   const sendTest=async()=>{
@@ -454,7 +484,7 @@ function Assistants({sources,onKnowledge,onChannels,onAnalytics,notify}:{sources
   </div></section></div></>;
 }
 
-function Channels({step,setStep,connected,setConnected,notify}:{step:number;setStep:(n:number)=>void;connected:boolean;setConnected:(v:boolean)=>void;notify:(s:string)=>void}){
+function Channels({step,setStep,connected,setConnected,workspaceId,notify}:{step:number;setStep:(n:number)=>void;connected:boolean;setConnected:(v:boolean)=>void;workspaceId:string;notify:(s:string)=>void}){
   const labels=["Requirements","Facebook","Credentials","Strategy","Testing","All done"];
   const [channel,setChannel]=useStoredState<"whatsapp"|"instagram"|"webchat">("qpy-engage-selected-channel","whatsapp");
   const [instagramStep,setInstagramStep]=useStoredState("qpy-engage-instagram-step",0);
@@ -470,7 +500,7 @@ function Channels({step,setStep,connected,setConnected,notify}:{step:number;setS
   const [metaLoading,setMetaLoading]=useState(false);
   const [metaError,setMetaError]=useState("");
   const token=useAuthToken();
-  const copyWidget=async()=>{const code='<script src="https://mobileecommerce.github.io/qpy-engage/widget.js" data-workspace="atelier-home"></script>';try{await navigator.clipboard.writeText(code);notify("Web chat installation code copied")}catch{const blob=new Blob([code],{type:"text/plain"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="qpy-engage-widget.txt";a.click();URL.revokeObjectURL(a.href);notify("Web chat installation file downloaded")}};
+  const copyWidget=async()=>{const code=`<script src="https://mobileecommerce.github.io/qpy-engage/widget.js" data-workspace="${workspaceId}"></script>`;try{await navigator.clipboard.writeText(code);notify("Web chat installation code copied")}catch{const blob=new Blob([code],{type:"text/plain"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="qpy-engage-widget.txt";a.click();URL.revokeObjectURL(a.href);notify("Web chat installation file downloaded")}};
   const refreshMeta=async()=>{try{const [configResponse,statusResponse]=await Promise.all([fetch(metaApi("/api/meta/config")),fetch(metaApi("/api/meta/status"),{headers:authHeaders(token)})]);const config=await configResponse.json() as MetaConfig;const status=await statusResponse.json() as {connected:boolean;connection:MetaConnection|null};setMetaConfig(config);setMetaConnection(status.connection);if(status.connection){setConnected(true);setForm(current=>({...current,business:status.connection?.verifiedName||current.business,number:status.connection?.displayPhoneNumber||current.number,phoneId:status.connection?.phoneNumberId||current.phoneId,wabaId:status.connection?.wabaId||current.wabaId}))}}catch{setMetaError("The secure Qpy Engage backend is not reachable.")}};
   useEffect(()=>{refreshMeta()},[token]);
   const connectMeta=async()=>{

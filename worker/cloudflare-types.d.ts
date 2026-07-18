@@ -14,6 +14,26 @@ interface Fetcher {
   fetch(request: Request): Promise<Response>;
 }
 
+interface HTMLRewriterElement {
+  tagName: string;
+  onEndTag(handler: () => void): void;
+}
+
+interface HTMLRewriterTextChunk {
+  text: string;
+  lastInTextNode: boolean;
+}
+
+interface HTMLRewriterElementHandlers {
+  element?(element: HTMLRewriterElement): void;
+  text?(chunk: HTMLRewriterTextChunk): void;
+}
+
+declare class HTMLRewriter {
+  on(selector: string, handlers: HTMLRewriterElementHandlers): HTMLRewriter;
+  transform(response: Response): Response;
+}
+
 declare module "cloudflare:workers" {
   export const env: { DB: D1Database };
 }

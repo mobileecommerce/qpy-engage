@@ -4,8 +4,10 @@ import handler from "vinext/server/app-router-entry";
 import { handleMetaRequest, type MetaEnv } from "./meta";
 import { handleAuthRequest, requireSession, type AuthEnv } from "./auth";
 import { handleAssistantRequest, type AssistantEnv } from "./assistant";
+import { handleKnowledgeRequest, type KnowledgeEnv } from "./knowledge";
+import { handleWidgetRequest, type WidgetEnv } from "./widget";
 
-interface Env extends MetaEnv, AuthEnv, AssistantEnv {
+interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv {
   ASSETS: Fetcher;
   DB: D1Database;
   ANTHROPIC_API_KEY?: string;
@@ -38,6 +40,12 @@ const worker = {
 
     const assistantResponse = await handleAssistantRequest(request, env);
     if (assistantResponse) return assistantResponse;
+
+    const knowledgeResponse = await handleKnowledgeRequest(request, env);
+    if (knowledgeResponse) return knowledgeResponse;
+
+    const widgetResponse = await handleWidgetRequest(request, env);
+    if (widgetResponse) return widgetResponse;
 
     const metaResponse = await handleMetaRequest(request, env);
     if (metaResponse) return metaResponse;
