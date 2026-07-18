@@ -142,6 +142,7 @@ async function signup(request: Request, env: AuthEnv): Promise<Response> {
       const legacy = await env.DB.prepare("SELECT workspace_id FROM whatsapp_connections WHERE workspace_id = 'default'").first();
       if (legacy) {
         workspaceId = "default";
+        try { await env.DB.prepare("ALTER TABLE whatsapp_messages ADD COLUMN workspace_id TEXT").run(); } catch { /* column already exists */ }
         await env.DB.prepare("UPDATE whatsapp_messages SET workspace_id = 'default' WHERE workspace_id IS NULL").run();
       }
     } catch { /* whatsapp_connections doesn't exist yet on a fresh deployment; nothing to claim */ }
