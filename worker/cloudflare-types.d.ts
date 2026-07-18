@@ -16,6 +16,7 @@ interface Fetcher {
 
 interface HTMLRewriterElement {
   tagName: string;
+  getAttribute(name: string): string | null;
   onEndTag(handler: () => void): void;
 }
 

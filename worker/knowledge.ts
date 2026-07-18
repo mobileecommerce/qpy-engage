@@ -29,7 +29,8 @@ async function fetchWebsiteText(url: string): Promise<string> {
   const contentType = response.headers.get("content-type") || "";
   if (!contentType.includes("html")) throw new Error("That URL did not return an HTML page.");
 
-  const chunks: string[] = [];
+  const bodyChunks: string[] = [];
+  const metaParts: string[] = [];
   let skipDepth = 0;
   const rewriter = new HTMLRewriter()
     .on("script, style, noscript, head", {
@@ -40,7 +41,16 @@ async function fetchWebsiteText(url: string): Promise<string> {
     })
     .on("*", {
       text(chunk) {
-        if (skipDepth === 0 && chunk.text) chunks.push(chunk.text);
+        if (skipDepth === 0 && chunk.text) bodyChunks.push(chunk.text);
+      },
+    })
+    .on("title", {
+      text(chunk) { if (chunk.text) metaParts.push(chunk.text); },
+    })
+    .on('meta[name="description"], meta[property="og:description"], meta[name="og:description"]', {
+      element(element) {
+        const content = element.getAttribute("content");
+        if (content) metaParts.push(content);
       },
     });
 
@@ -48,7 +58,12 @@ async function fetchWebsiteText(url: string): Promise<string> {
   const reader = transformed.body?.getReader();
   if (reader) { while (true) { const { done } = await reader.read(); if (done) break; } }
 
-  const text = chunks.join(" ").replace(/\s+/g, " ").trim();
+  const bodyText = bodyChunks.join(" ").replace(/\s+/g, " ").trim();
+  const metaText = metaParts.join(" — ").replace(/\s+/g, " ").trim();
+
+  // Client-rendered pages often have little or no text in the raw HTML body;
+  // fall back to title/meta description so there's at least something real to ground on.
+  const text = bodyText.length > metaText.length ? bodyText : [metaText, bodyText].filter(Boolean).join(" — ");
   return text.slice(0, MAX_CONTENT_LENGTH);
 }
 

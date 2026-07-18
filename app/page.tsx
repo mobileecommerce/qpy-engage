@@ -7,7 +7,7 @@ type Section = "Overview" | "Assistants" | "Channels" | "Inbox" | "Campaigns" | 
 type Message = { from: "customer" | "ai" | "agent"; text: string; time: string };
 type Conversation = { id: string; initials: string; name: string; preview: string; time: string; unread: number; tone: string; status: "open" | "resolved"; email: string; phone: string; tags: string[]; notes?: string[] };
 type Automation = { id: number; title: string; trigger: string; action: string; runs: number; rate: string; active: boolean };
-type Source = { id: number; name: string; type: "Website" | "Document" | "FAQ"; pages: number; status: "Ready" | "Syncing" };
+type Source = { id: number; name: string; type: "Website" | "Document" | "FAQ"; pages: number; status: "Ready" | "Syncing" | "Failed" };
 type Member = { id: string; userId: string | null; name: string; email: string; role: "Owner" | "Admin" | "Agent" | "Analyst"; status: "Active" | "Invited" };
 type AuthUser = { id: string; email: string; name: string | null };
 type AuthWorkspace = { id: string; name: string };
@@ -316,11 +316,11 @@ function Workspace({session,onLogout}:{session:AuthSession;onLogout:()=>void}) {
               setSources(current=>current.map(s=>s.id===item.id?{...s,pages,status:"Ready"}:s));
               notify(`${item.name} indexed — the assistant can now use its content`);
             }else{
-              setSources(current=>current.map(s=>s.id===item.id?{...s,status:"Ready"}:s));
-              notify(result.error||"Could not fetch that website — the assistant will only know its name.");
+              setSources(current=>current.map(s=>s.id===item.id?{...s,pages:0,status:"Failed"}:s));
+              notify(result.error||"Could not fetch that website — the assistant will only know its name, not its content.");
             }
           })
-          .catch(()=>{setSources(current=>current.map(s=>s.id===item.id?{...s,status:"Ready"}:s));notify("Could not fetch that website — the assistant will only know its name.")});
+          .catch(()=>{setSources(current=>current.map(s=>s.id===item.id?{...s,pages:0,status:"Failed"}:s));notify("Could not fetch that website — the assistant will only know its name, not its content.")});
       }
     }}/>}
     {modal==="invite"&&<InviteModal onClose={()=>setModal(null)} onSave={async(email,role)=>{const error=await invite(email,role);if(error){notify(error)}else{setModal(null);notify("Invitation sent")}}}/>}
