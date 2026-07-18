@@ -67,4 +67,20 @@
 .auth-card>p{color:var(--muted);font-size:11px;margin:0 0 18px;line-height:1.5}
 .auth-card .modal-form{margin-bottom:14px}
 .auth-switch{border:0;background:transparent;color:#504bd2;font-size:10px;font-weight:700;padding:12px 0 0;width:100%;text-align:center}
+.widget-preview-frame{display:flex;flex-direction:column;align-items:center;gap:8px;margin:18px 0}
+.widget-preview-frame small{color:#8d94a1;font-size:9px}
+.widget-preview-launcher{width:56px;height:56px;border-radius:50%;display:grid;place-items:center;box-shadow:0 10px 30px #0003}
+.widget-preview-launcher img{width:30px;height:30px;border-radius:50%;object-fit:cover}
+.widget-preview-launcher.effect-pulse{animation:widget-pulse 2.2s infinite}
+.widget-preview-launcher.effect-bounce{animation:widget-bounce 2.6s infinite}
+@keyframes widget-pulse{0%,100%{box-shadow:0 10px 30px #0003,0 0 0 0 #4c50ee73}50%{box-shadow:0 10px 30px #0003,0 0 0 14px #4c50ee00}}
+@keyframes widget-bounce{0%,20%,50%,80%,100%{transform:translateY(0)}40%{transform:translateY(-8px)}60%{transform:translateY(-4px)}}
+.widget-icon-grid{display:flex;gap:10px;margin:6px 0 20px;flex-wrap:wrap;justify-content:center}
+.widget-icon-grid button,.widget-icon-upload{display:flex;flex-direction:column;align-items:center;gap:6px;border:1px solid var(--line);border-radius:10px;padding:9px;background:#fff;min-width:64px}
+.widget-icon-grid button span,.widget-icon-upload span,.widget-icon-upload img{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:#e7e9ee;color:#69707e;font-size:14px;object-fit:cover}
+.widget-icon-grid button.selected,.widget-icon-upload.selected{border-color:var(--blue);background:var(--blue-soft)}
+.widget-icon-grid button small,.widget-icon-upload small{font-size:8px;color:#7e8694}
+.widget-icon-upload{cursor:pointer}
+.widget-icon-upload input{display:none}
+.widget-placement{margin-left:0}
 .auth-loading{min-height:100vh;display:grid;place-items:center;color:var(--muted);font-size:12px}

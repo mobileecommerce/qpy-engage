@@ -18,7 +18,7 @@ function widgetJson(body: unknown, status = 200): Response {
 function widgetCorsPreflight(): Response {
   return new Response(null, { status: 204, headers: {
     "access-control-allow-origin": "*",
-    "access-control-allow-methods": "POST,OPTIONS",
+    "access-control-allow-methods": "GET,POST,OPTIONS",
     "access-control-allow-headers": "content-type",
     "access-control-max-age": "86400",
   } });
@@ -99,10 +99,22 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   return widgetJson({ reply: result.reply });
 }
 
+async function getConfig(request: Request, env: WidgetEnv): Promise<Response> {
+  if (!env.DB) return widgetJson({ error: "Workspace database is unavailable." }, 503);
+  const url = new URL(request.url);
+  const workspaceId = (url.searchParams.get("workspaceId") || "").trim();
+  if (!workspaceId) return widgetJson({ error: "Missing workspace id." }, 400);
+  const workspace = await env.DB.prepare("SELECT id FROM workspaces WHERE id = ?").bind(workspaceId).first();
+  if (!workspace) return widgetJson({ error: "Unknown workspace." }, 404);
+  const appearance = await readWorkspaceState(env.DB, workspaceId, "qpy-engage-widget-appearance");
+  return widgetJson({ appearance: appearance || null });
+}
+
 export async function handleWidgetRequest(request: Request, env: WidgetEnv): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/widget/")) return null;
   if (request.method === "OPTIONS") return widgetCorsPreflight();
   if (url.pathname === "/api/widget/respond" && request.method === "POST") return respond(request, env);
+  if (url.pathname === "/api/widget/config" && request.method === "GET") return getConfig(request, env);
   return widgetJson({ error: "Not found" }, 404);
 }
