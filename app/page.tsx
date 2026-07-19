@@ -104,7 +104,7 @@ function useStoredState<T>(key: string, initial: T) {
     const timer=window.setTimeout(()=>{if(token)fetch(metaApi("/api/state"),{method:"PUT",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({key,value})}).catch(()=>{});},350);
     return()=>window.clearTimeout(timer);
   }, [key, loaded, value, token, workspaceId]);
-  return [value, setValue] as const;
+  return [value, setValue, loaded] as const;
 }
 
 function useWorkspaceMembers(token: string | null) {
@@ -237,13 +237,12 @@ const SECTIONS: Section[] = ["Overview","Assistants","Channels","Inbox","Campaig
 
 function Workspace({session,onLogout}:{session:AuthSession;onLogout:()=>void}) {
   const sectionStorageKey = `qpy-engage-last-section::ws:${session.workspace.id}`;
-  const [section, setSection] = useState<Section>(() => {
-    if (typeof window === "undefined") return "Overview";
-    try {
-      const stored = window.localStorage.getItem(sectionStorageKey);
-      return stored && (SECTIONS as string[]).includes(stored) ? stored as Section : "Overview";
-    } catch { return "Overview"; }
-  });
+  // Always boot into Overview first, then switch to whatever section was last open once
+  // `connected` (see below) has resolved its real value — restoring straight into a section
+  // like Inbox before that resolves lets it briefly render against the default `connected:false`,
+  // then flips to true mid-mount, and that unmount/remount race was crashing the page.
+  const [section, setSection] = useState<Section>("Overview");
+  const restoredSectionRef = useRef(false);
   const [conversations, setConversations] = useStoredState("qpy-engage-conversations", initialConversations);
   const [messages, setMessages] = useStoredState("qpy-engage-messages", initialMessages);
   const [automations, setAutomations] = useStoredState("qpy-engage-automations", initialAutomations);
@@ -256,7 +255,15 @@ function Workspace({session,onLogout}:{session:AuthSession;onLogout:()=>void}) {
   const [modal, setModal] = useState<null | "automation" | "source" | "invite" | "search" | "help" | "profile" | "notifications">(null);
   const [automationTemplate, setAutomationTemplate] = useState<{name:string;trigger:string;action:string} | null>(null);
   const [channelStep, setChannelStep] = useStoredState("qpy-engage-channel-step", 0);
-  const [connected, setConnected] = useStoredState("qpy-engage-whatsapp-connected", false);
+  const [connected, setConnected, connectedLoaded] = useStoredState("qpy-engage-whatsapp-connected", false);
+  useEffect(() => {
+    if (restoredSectionRef.current || !connectedLoaded) return;
+    restoredSectionRef.current = true;
+    try {
+      const stored = window.localStorage.getItem(sectionStorageKey);
+      if (stored && (SECTIONS as string[]).includes(stored)) setSection(stored as Section);
+    } catch { /* ignore */ }
+  }, [connectedLoaded, sectionStorageKey]);
   const [settingsTab, setSettingsTab] = useState("General");
 
   const selected = conversations.find(c => c.id === selectedId) ?? conversations[0];
