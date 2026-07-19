@@ -18,6 +18,12 @@ function sqliteNow(): string {
   return new Date().toISOString().slice(0, 19).replace("T", " ");
 }
 
+function sqliteNowPlusSeconds(seconds: number): string {
+  return new Date(Date.now() + seconds * 1000).toISOString().slice(0, 19).replace("T", " ");
+}
+
+const TYPING_TTL_SECONDS = 6;
+
 function widgetJson(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "access-control-allow-origin": "*", "vary": "origin", "cache-control": "no-store" } });
 }
@@ -53,6 +59,17 @@ async function ensureWidgetSchema(db: D1Database): Promise<void> {
     ai_active INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (workspace_id, session_id)
   )`).run();
+  await db.prepare(`CREATE TABLE IF NOT EXISTS widget_typing_state (
+    workspace_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    typing_until TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, session_id)
+  )`).run();
+}
+
+async function isAgentTyping(db: D1Database, workspaceId: string, sessionId: string): Promise<boolean> {
+  const row = await db.prepare(`SELECT typing_until FROM widget_typing_state WHERE workspace_id = ? AND session_id = ?`).bind(workspaceId, sessionId).first<{ typing_until: string }>();
+  return Boolean(row && row.typing_until > sqliteNow());
 }
 
 async function isAiActive(db: D1Database, workspaceId: string, sessionId: string): Promise<boolean> {
@@ -159,7 +176,8 @@ async function pollMessages(request: Request, env: WidgetEnv): Promise<Response>
       .bind(workspaceId, sessionId, after).all<{ role: string; content: string; created_at: string }>()
     : await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role != 'user' ORDER BY created_at ASC LIMIT 50`)
       .bind(workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>();
-  return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })) });
+  const typing = await isAgentTyping(env.DB, workspaceId, sessionId);
+  return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), typing });
 }
 
 async function getConfig(request: Request, env: WidgetEnv): Promise<Response> {
@@ -228,6 +246,19 @@ async function setTakeover(request: Request, env: WidgetEnv): Promise<Response> 
   return json(request, { ok: true, aiActive: Boolean(body.active) });
 }
 
+async function setAgentTyping(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const body = await request.json() as { sessionId?: string };
+  const sessionId = (body.sessionId || "").trim();
+  if (!sessionId) return json(request, { error: "Missing sessionId." }, 400);
+  await ensureWidgetSchema(env.DB);
+  await env.DB.prepare(`INSERT INTO widget_typing_state (workspace_id, session_id, typing_until) VALUES (?, ?, ?)
+    ON CONFLICT(workspace_id, session_id) DO UPDATE SET typing_until = excluded.typing_until`)
+    .bind(session.workspaceId, sessionId, sqliteNowPlusSeconds(TYPING_TTL_SECONDS)).run();
+  return json(request, { ok: true });
+}
+
 async function sendAgentReply(request: Request, env: WidgetEnv): Promise<Response> {
   const session = await requireSession(request, env);
   if (session instanceof Response) return session;
@@ -263,5 +294,6 @@ export async function handleWidgetRequest(request: Request, env: WidgetEnv): Pro
   if (url.pathname === "/api/widget/messages" && request.method === "GET") return getMessages(request, env);
   if (url.pathname === "/api/widget/takeover" && request.method === "POST") return setTakeover(request, env);
   if (url.pathname === "/api/widget/reply" && request.method === "POST") return sendAgentReply(request, env);
+  if (url.pathname === "/api/widget/typing" && request.method === "POST") return setAgentTyping(request, env);
   return json(request, { error: "Not found" }, 404);
 }
