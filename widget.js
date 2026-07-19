@@ -3,6 +3,9 @@
   var API_ORIGIN = "https://qpy-engage-api.qpy-engage.workers.dev";
   var currentScript = document.currentScript;
   var workspaceId = currentScript ? currentScript.getAttribute("data-workspace") : null;
+  // One id per page load, so any AI action triggered more than once in the same visit
+  // (e.g. sharing a phone number, then a name) updates the same captured lead.
+  var sessionId = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2));
 
   var ICONS = {
     chat: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-4.5 7.5 8.5 8.5 0 0 1-7.6.9L3 21l1.9-5.9a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>',
@@ -72,7 +75,7 @@
       fetch(API_ORIGIN + "/api/widget/respond", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ workspaceId: workspaceId, message: text, history: history }),
+        body: JSON.stringify({ workspaceId: workspaceId, message: text, history: history, sessionId: sessionId }),
       })
         .then(function (response) { return response.json().then(function (data) { return { ok: response.ok, data: data }; }); })
         .then(function (result) {
