@@ -8,6 +8,25 @@ export interface WidgetEnv extends AuthEnv {
   ANTHROPIC_API_KEY?: string;
 }
 
+// The system prompt asks Claude not to use Markdown (this widget renders plain text), but that
+// instruction isn't always followed — this is the guaranteed backstop. Scoped to the widget only:
+// WhatsApp has its own real *bold*/_italic_ syntax that must be preserved, so this must never run
+// on that channel's replies.
+function sanitizeWidgetReply(text: string): string {
+  return text
+    .replace(/```[a-zA-Z]*\n?([\s\S]*?)```/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*\*([^*]+)\*\*\*/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/(^|\s)\*([^\s*][^*]*?)\*(?=$|\s|[.,!?])/g, "$1$2")
+    .replace(/(^|\s)_([^\s_][^_]*?)_(?=$|\s|[.,!?])/g, "$1$2")
+    .split("\n")
+    .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, "").replace(/^\s*#{1,6}\s+/, ""))
+    .join("\n")
+    .trim();
+}
+
 const RATE_LIMIT_PER_MINUTE = 20;
 const MAX_MESSAGE_LENGTH = 4000;
 const MAX_KNOWLEDGE_LENGTH = 12000;
@@ -123,14 +142,19 @@ async function buildSystemPrompt(db: D1Database, workspaceId: string): Promise<s
   const language = config?.language || "English";
   const fallback = config?.fallback || "If you are unsure or the request is sensitive, say so and offer to connect the customer with a human.";
 
-  let prompt = `${role}\n\nTone: ${tone}. Preferred language: ${language}.\n\nFallback and human handoff policy: ${fallback}`;
+  let prompt = "FORMATTING RULE, applies to every reply you send: this chat widget renders your text exactly as-is, with no Markdown support. "
+    + "Absolutely no **bold**, *italics*, `code`, bullet characters (-, *, •), numbered lists (1., 2.), or # headings — those will show up as literal, ugly punctuation to the customer. "
+    + "Write only in plain conversational sentences and paragraphs. "
+    + `Wrong: "Here's what we offer:\\n- Fast setup\\n- 24/7 support\\n- **No contracts**" `
+    + `Right: "We offer fast setup, 24/7 support, and there's no contract required." `
+    + "If an answer has several distinct points, write each as its own short paragraph (blank line between them) — never a list.\n\n";
+  prompt += `${role}\n\nTone: ${tone}. Preferred language: ${language}.\n\nFallback and human handoff policy: ${fallback}`;
   if (policies?.restricted) prompt += `\n\nRestricted topics you must never answer — offer human handoff instead: ${policies.restricted}`;
   prompt += `\n\nConnected knowledge sources: ${sourceNames}.`;
   prompt += knowledgeText
     ? `\n\nReference material from those sources — use this to answer factual questions, and do not state facts beyond what's here:\n${knowledgeText}`
     : " You were not given their actual content, so never claim a specific fact, price, or policy came from them.";
   prompt += "\n\nKeep replies concise and helpful. Never invent prices, availability, order details, or policies you were not given. You are chatting with a website visitor, not through WhatsApp.";
-  prompt += "\n\nThis chat widget displays your replies as plain text only — it does not render Markdown. Never use **bold**, *italics*, bullet points (-, *, •), numbered lists, or headings (#). Write in plain, natural sentences. If a longer answer has multiple points, separate them into short paragraphs (a blank line between each) rather than a list.";
   return prompt;
 }
 
@@ -225,7 +249,7 @@ async function answerIfUnanswered(env: WidgetEnv, workspaceId: string, sessionId
   const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions, recordSubmission, onCustomerName);
   if (result.reply) {
     await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`)
-      .bind(workspaceId, sessionId, result.reply, sqliteNow()).run();
+      .bind(workspaceId, sessionId, sanitizeWidgetReply(result.reply), sqliteNow()).run();
   }
 }
 
@@ -249,7 +273,7 @@ async function maybeSendHoldingMessage(env: WidgetEnv, workspaceId: string, sess
   const result = await callClaude(env.ANTHROPIC_API_KEY, systemPrompt, history);
   if (result.reply) {
     await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`)
-      .bind(workspaceId, sessionId, result.reply, sqliteNow()).run();
+      .bind(workspaceId, sessionId, sanitizeWidgetReply(result.reply), sqliteNow()).run();
   }
 }
 
@@ -293,12 +317,13 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, messages, actions, recordSubmission, onCustomerName);
   if (result.error) return widgetJson({ error: result.error }, result.status || 502);
 
+  const reply = result.reply ? sanitizeWidgetReply(result.reply) : result.reply;
   const repliedAt = sqliteNow();
-  if (sessionId && result.reply) {
-    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`).bind(workspaceId, sessionId, result.reply, repliedAt).run();
+  if (sessionId && reply) {
+    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`).bind(workspaceId, sessionId, reply, repliedAt).run();
   }
 
-  return widgetJson({ reply: result.reply, serverTime: repliedAt });
+  return widgetJson({ reply, serverTime: repliedAt });
 }
 
 async function pollMessages(request: Request, env: WidgetEnv): Promise<Response> {
