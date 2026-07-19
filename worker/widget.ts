@@ -130,6 +130,7 @@ async function buildSystemPrompt(db: D1Database, workspaceId: string): Promise<s
     ? `\n\nReference material from those sources — use this to answer factual questions, and do not state facts beyond what's here:\n${knowledgeText}`
     : " You were not given their actual content, so never claim a specific fact, price, or policy came from them.";
   prompt += "\n\nKeep replies concise and helpful. Never invent prices, availability, order details, or policies you were not given. You are chatting with a website visitor, not through WhatsApp.";
+  prompt += "\n\nThis chat widget displays your replies as plain text only — it does not render Markdown. Never use **bold**, *italics*, bullet points (-, *, •), numbered lists, or headings (#). Write in plain, natural sentences. If a longer answer has multiple points, separate them into short paragraphs (a blank line between each) rather than a list.";
   return prompt;
 }
 
