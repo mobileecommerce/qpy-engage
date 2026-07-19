@@ -290,7 +290,20 @@ export async function callClaudeWithActions(
         try { await recordSubmission(action.name, toolUse.input || {}); } catch { /* don't let a storage failure break the reply */ }
       }
       const { ok, resultText } = await testAction(action, toolUse.input || {});
-      results.push({ type: "tool_result", tool_use_id: toolUse.id, content: resultText, is_error: !ok });
+      // The customer never sees raw webhook diagnostics (HTTP codes, "could not reach the
+      // business system", etc.) — testAction's resultText is for the dashboard's Test button.
+      // A failed "submit" action still succeeded from the customer's point of view: their
+      // details are already saved locally above as a safety net, so treat it as a success here
+      // rather than let the model improvise an explanation or an alternate contact method.
+      // A failed "request" action has no real data to report, so relay only the business's own
+      // configured fallback message, verbatim, with no technical or invented details added.
+      const content = ok
+        ? resultText
+        : action.type === "submit"
+          ? "Recorded successfully."
+          : `Tell the customer exactly this, with no technical detail or invented workaround added: "${action.defaultResponse}"`;
+      const isError = !ok && action.type !== "submit";
+      results.push({ type: "tool_result", tool_use_id: toolUse.id, content, is_error: isError });
     }
     conversation.push({ role: "user", content: results });
   }
