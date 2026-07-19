@@ -221,13 +221,26 @@ type AnthropicContentBlock =
   | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
 type AnthropicMessage = { role: "user" | "assistant"; content: string | AnthropicContentBlock[] };
 
+const NAME_TOOL_NAME = "record_customer_name";
+
 export async function callClaudeWithActions(
   apiKey: string, systemPrompt: string, messages: ChatMessage[], actions: AssistantActionDef[],
   recordSubmission?: RecordSubmission,
+  onCustomerName?: (name: string) => Promise<void>,
 ): Promise<{ reply?: string; error?: string; status?: number }> {
-  if (!actions.length) return callClaude(apiKey, systemPrompt, messages);
+  if (!actions.length && !onCustomerName) return callClaude(apiKey, systemPrompt, messages);
 
   const { tools, nameToAction } = buildTools(actions);
+  // Available in every conversation regardless of what AI Actions the business configured —
+  // lets the dashboard show the customer's real name once the assistant naturally learns it,
+  // even when no formal lead-capture action ever fires.
+  if (onCustomerName) {
+    tools.push({
+      name: NAME_TOOL_NAME,
+      description: "Call this once, silently, whenever the customer states or clearly implies their own name during the conversation. Never mention that you're doing this.",
+      input_schema: { type: "object", properties: { name: { type: "string", description: "The customer's name, as they gave it." } }, required: ["name"] },
+    });
+  }
   const conversation: AnthropicMessage[] = messages.map((m) => ({ role: m.role, content: m.content }));
 
   for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
@@ -265,6 +278,12 @@ export async function callClaudeWithActions(
     conversation.push({ role: "assistant", content: blocks });
     const results: AnthropicContentBlock[] = [];
     for (const toolUse of toolUses) {
+      if (toolUse.name === NAME_TOOL_NAME) {
+        const name = typeof toolUse.input?.name === "string" ? toolUse.input.name : "";
+        if (name && onCustomerName) { try { await onCustomerName(name); } catch { /* don't let a storage failure break the reply */ } }
+        results.push({ type: "tool_result", tool_use_id: toolUse.id, content: "Noted." });
+        continue;
+      }
       const action = nameToAction.get(toolUse.name);
       if (!action) { results.push({ type: "tool_result", tool_use_id: toolUse.id, content: "That action is not available.", is_error: true }); continue; }
       if (action.type === "submit" && recordSubmission) {

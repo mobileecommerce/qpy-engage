@@ -64,6 +64,9 @@ async function ensureWidgetSchema(db: D1Database): Promise<void> {
     ai_active INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (workspace_id, session_id)
   )`).run();
+  // Idempotent migration for a table created before customer_name existed — SQLite disallows
+  // adding a column and reading it in the same statement batch, so this must stay a no-op once applied.
+  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN customer_name TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
   await db.prepare(`CREATE TABLE IF NOT EXISTS widget_typing_state (
     workspace_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
@@ -135,22 +138,38 @@ function extractCustomerName(rawData: string): string | null {
   return null;
 }
 
-// Widget visitors are anonymous until an AI Action captures their name — once one has,
-// the dashboard should address them by name instead of "Website visitor".
+// Widget visitors are anonymous until we learn their name — either passively, from Claude
+// noticing it in conversation (widget_conversation_state.customer_name), or from a business's
+// own AI Action explicitly capturing one (action_submissions). The explicit capture wins when
+// both exist, since it's a deliberate business-configured field rather than an overheard guess.
 async function getCustomerNames(db: D1Database, workspaceId: string, sessionIds: string[]): Promise<Map<string, string>> {
   const names = new Map<string, string>();
   if (!sessionIds.length) return names;
+  const placeholders = sessionIds.map(() => "?").join(",");
   try {
-    const placeholders = sessionIds.map(() => "?").join(",");
+    const result = await db.prepare(`SELECT session_id, customer_name FROM widget_conversation_state WHERE workspace_id = ? AND session_id IN (${placeholders}) AND customer_name != ''`)
+      .bind(workspaceId, ...sessionIds).all<{ session_id: string; customer_name: string }>();
+    for (const row of result.results || []) names.set(row.session_id, row.customer_name);
+  } catch { /* widget_conversation_state may not exist yet */ }
+  try {
     const result = await db.prepare(`SELECT session_id, data FROM action_submissions WHERE workspace_id = ? AND session_id IN (${placeholders})`)
       .bind(workspaceId, ...sessionIds).all<{ session_id: string; data: string }>();
     for (const row of result.results || []) {
-      if (names.has(row.session_id)) continue;
       const name = extractCustomerName(row.data);
       if (name) names.set(row.session_id, name);
     }
   } catch { /* action_submissions may not exist yet if no action has ever fired */ }
   return names;
+}
+
+// Called when Claude's built-in name-capture tool fires — see NAME_TOOL_NAME in shared.ts.
+async function saveLearnedCustomerName(db: D1Database, workspaceId: string, sessionId: string, rawName: string): Promise<void> {
+  const name = rawName.trim().slice(0, 80);
+  if (!name || !sessionId) return;
+  await ensureWidgetSchema(db);
+  await db.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, customer_name) VALUES (?, ?, ?)
+    ON CONFLICT(workspace_id, session_id) DO UPDATE SET customer_name = excluded.customer_name`)
+    .bind(workspaceId, sessionId, name).run();
 }
 
 async function getConversationHistory(db: D1Database, workspaceId: string, sessionId: string): Promise<ChatMessage[]> {
@@ -176,7 +195,8 @@ async function answerIfUnanswered(env: WidgetEnv, workspaceId: string, sessionId
   const storedActions = await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions");
   const actions = sanitizeActions(storedActions || []);
   const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
-  const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions, recordSubmission);
+  const onCustomerName = (name: string) => saveLearnedCustomerName(env.DB, workspaceId, sessionId, name);
+  const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions, recordSubmission, onCustomerName);
   if (result.reply) {
     await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`)
       .bind(workspaceId, sessionId, result.reply, sqliteNow()).run();
@@ -243,7 +263,8 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   const storedActions = await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions");
   const actions = sanitizeActions(storedActions || []);
   const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
-  const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, messages, actions, recordSubmission);
+  const onCustomerName = (name: string) => saveLearnedCustomerName(env.DB, workspaceId, sessionId, name);
+  const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, messages, actions, recordSubmission, onCustomerName);
   if (result.error) return widgetJson({ error: result.error }, result.status || 502);
 
   const repliedAt = sqliteNow();

@@ -233,8 +233,17 @@ function AuthGate({onAuthed}:{onAuthed:(session:AuthSession)=>void}){
   </div></main>;
 }
 
+const SECTIONS: Section[] = ["Overview","Assistants","Channels","Inbox","Campaigns","Automations","Knowledge","Leads","Analytics","Team","Settings"];
+
 function Workspace({session,onLogout}:{session:AuthSession;onLogout:()=>void}) {
-  const [section, setSection] = useState<Section>("Overview");
+  const sectionStorageKey = `qpy-engage-last-section::ws:${session.workspace.id}`;
+  const [section, setSection] = useState<Section>(() => {
+    if (typeof window === "undefined") return "Overview";
+    try {
+      const stored = window.localStorage.getItem(sectionStorageKey);
+      return stored && (SECTIONS as string[]).includes(stored) ? stored as Section : "Overview";
+    } catch { return "Overview"; }
+  });
   const [conversations, setConversations] = useStoredState("qpy-engage-conversations", initialConversations);
   const [messages, setMessages] = useStoredState("qpy-engage-messages", initialMessages);
   const [automations, setAutomations] = useStoredState("qpy-engage-automations", initialAutomations);
@@ -254,7 +263,7 @@ function Workspace({session,onLogout}:{session:AuthSession;onLogout:()=>void}) {
   const displayName = session.user.name || session.user.email.split("@")[0];
   const initials = displayName.split(/\s+/).map(w=>w[0]).join("").slice(0,2).toUpperCase() || "U";
   const notify = (text: string) => { setToast(text); window.setTimeout(() => setToast(""), 2200); };
-  const go = (next: Section) => { setSection(next); window.scrollTo({top:0,behavior:"smooth"}); };
+  const go = (next: Section) => { setSection(next); try { window.localStorage.setItem(sectionStorageKey, next); } catch {} window.scrollTo({top:0,behavior:"smooth"}); };
   const sendMessage = () => { if (!draft.trim()) return; setMessages({...messages,[selected.id]:[...(messages[selected.id]??[]),{from:"agent",text:draft.trim(),time:"Now"}]}); setDraft(""); };
   const openAutomation = (template?:{name:string;trigger:string;action:string}) => {setAutomationTemplate(template??null);setModal("automation")};
   const exportWorkspace=()=>{const data:Record<string,unknown>={};for(let i=0;i<localStorage.length;i++){const key=localStorage.key(i);if(key?.startsWith("qpy-engage-")){try{data[key]=JSON.parse(localStorage.getItem(key)||"null")}catch{data[key]=localStorage.getItem(key)}}}const blob=new Blob([JSON.stringify({product:"Qpy Engage",exportedAt:new Date().toISOString(),data},null,2)],{type:"application/json"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="qpy-engage-workspace.json";a.click();URL.revokeObjectURL(a.href);notify("Workspace backup downloaded")};
@@ -786,10 +795,11 @@ function WebChatInbox({notify}:{notify:(s:string)=>void}){
 
 // Lightweight, decoupled from LiveInbox's own polling — just enough to know how many real
 // WhatsApp conversations exist and what they look like, for the "All" tab and tab visibility.
-function useWhatsappSummaries(connected:boolean,token:string|null):{waId:string;lastText:string;lastAt:number}[]{
+function useWhatsappSummaries(connected:boolean,token:string|null):{summaries:{waId:string;lastText:string;lastAt:number}[];loaded:boolean}{
   const [summaries,setSummaries]=useState<{waId:string;lastText:string;lastAt:number}[]>([]);
+  const [loaded,setLoaded]=useState(false);
   useEffect(()=>{
-    if(!connected||!token){setSummaries([]);return}
+    if(!connected||!token){setSummaries([]);setLoaded(true);return}
     let cancelled=false;
     const load=async()=>{
       try{
@@ -805,18 +815,20 @@ function useWhatsappSummaries(connected:boolean,token:string|null):{waId:string;
         }
         setSummaries([...byId.values()]);
       }catch{/* keep previous summaries on a transient failure */}
+      finally{if(!cancelled)setLoaded(true)}
     };
     load();
     const timer=window.setInterval(load,8000);
     return()=>{cancelled=true;window.clearInterval(timer)};
   },[connected,token]);
-  return summaries;
+  return {summaries,loaded};
 }
 
-function useWebchatSummaries(token:string|null):WidgetConversationSummary[]{
+function useWebchatSummaries(token:string|null):{summaries:WidgetConversationSummary[];loaded:boolean}{
   const [summaries,setSummaries]=useState<WidgetConversationSummary[]>([]);
+  const [loaded,setLoaded]=useState(false);
   useEffect(()=>{
-    if(!token){setSummaries([]);return}
+    if(!token){setSummaries([]);setLoaded(true);return}
     let cancelled=false;
     const load=async()=>{
       try{
@@ -824,20 +836,22 @@ function useWebchatSummaries(token:string|null):WidgetConversationSummary[]{
         const result=await response.json() as {conversations?:WidgetConversationSummary[]};
         if(!cancelled)setSummaries(result.conversations||[]);
       }catch{/* keep previous summaries on a transient failure */}
+      finally{if(!cancelled)setLoaded(true)}
     };
     load();
     const timer=window.setInterval(load,4000);
     return()=>{cancelled=true;window.clearInterval(timer)};
   },[token]);
-  return summaries;
+  return {summaries,loaded};
 }
 
 type InboxChannelKey="all"|"whatsapp"|"instagram"|"webchat";
 
 function InboxHub(props:{connected:boolean;conversations:Conversation[];setConversations:(v:Conversation[])=>void;selected:Conversation;setSelectedId:(s:string)=>void;messages:Message[];draft:string;setDraft:(s:string)=>void;sendMessage:()=>void;aiActive:boolean;setAiActive:(v:boolean)=>void;onConnect:()=>void;notify:(s:string)=>void}){
   const token=useAuthToken();
-  const waSummaries=useWhatsappSummaries(props.connected,token);
-  const webSummaries=useWebchatSummaries(token);
+  const {summaries:waSummaries,loaded:waLoaded}=useWhatsappSummaries(props.connected,token);
+  const {summaries:webSummaries,loaded:webLoaded}=useWebchatSummaries(token);
+  const ready=waLoaded&&webLoaded;
   const waCount=props.connected?waSummaries.length:props.conversations.length;
   const webCount=webSummaries.length;
   // Instagram messaging isn't wired to any real backend yet (see HANDOFF.md) — it stays at
@@ -856,14 +870,17 @@ function InboxHub(props:{connected:boolean;conversations:Conversation[];setConve
   const visibleKeys=visibleTabs.map(t=>t.key).join(",");
   const [tab,setTab]=useState<InboxChannelKey>("whatsapp");
   useEffect(()=>{
+    if(!ready)return;
     const keys=visibleKeys.split(",") as InboxChannelKey[];
     if(!keys.includes(tab))setTab(keys[0]);
-  },[visibleKeys]);
+  },[visibleKeys,ready]);
 
   const merged=[
     ...waSummaries.map(s=>({channel:"whatsapp" as const,key:"wa:"+s.waId,name:"+"+s.waId,preview:s.lastText,at:s.lastAt})),
     ...webSummaries.map(s=>({channel:"webchat" as const,key:"web:"+s.sessionId,name:s.customerName||"Website visitor",preview:s.lastMessage.slice(0,60),at:new Date(s.lastAt).getTime()})),
   ].sort((a,b)=>b.at-a.at);
+
+  if(!ready)return<><PageHeader title="Inbox" description="Manage every customer conversation from one place."/><p className="empty-hint">Loading…</p></>;
 
   return <>
     <div className="test-mode-tabs">{visibleTabs.map(t=><button key={t.key} className={tab===t.key?"active":""} onClick={()=>setTab(t.key)}>{t.label}</button>)}</div>
