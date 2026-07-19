@@ -222,13 +222,15 @@ type AnthropicContentBlock =
 type AnthropicMessage = { role: "user" | "assistant"; content: string | AnthropicContentBlock[] };
 
 const NAME_TOOL_NAME = "record_customer_name";
+const NEEDS_HUMAN_TOOL_NAME = "flag_for_human";
 
 export async function callClaudeWithActions(
   apiKey: string, systemPrompt: string, messages: ChatMessage[], actions: AssistantActionDef[],
   recordSubmission?: RecordSubmission,
   onCustomerName?: (name: string) => Promise<void>,
+  onNeedsHuman?: (reason: string) => Promise<void>,
 ): Promise<{ reply?: string; error?: string; status?: number }> {
-  if (!actions.length && !onCustomerName) return callClaude(apiKey, systemPrompt, messages);
+  if (!actions.length && !onCustomerName && !onNeedsHuman) return callClaude(apiKey, systemPrompt, messages);
 
   const { tools, nameToAction } = buildTools(actions);
   // Available in every conversation regardless of what AI Actions the business configured —
@@ -239,6 +241,13 @@ export async function callClaudeWithActions(
       name: NAME_TOOL_NAME,
       description: "Call this once, silently, whenever the customer states or clearly implies their own name during the conversation. Never mention that you're doing this.",
       input_schema: { type: "object", properties: { name: { type: "string", description: "The customer's name, as they gave it." } }, required: ["name"] },
+    });
+  }
+  if (onNeedsHuman) {
+    tools.push({
+      name: NEEDS_HUMAN_TOOL_NAME,
+      description: "Call this when the customer explicitly insists on speaking with a human/agent after you've already tried to help or asked what they need — see the business hours and handoff instructions above for exactly when to call this.",
+      input_schema: { type: "object", properties: { reason: { type: "string", description: "One short phrase summarizing what the customer needs, for the team's dashboard." } }, required: ["reason"] },
     });
   }
   const conversation: AnthropicMessage[] = messages.map((m) => ({ role: m.role, content: m.content }));
@@ -282,6 +291,12 @@ export async function callClaudeWithActions(
         const name = typeof toolUse.input?.name === "string" ? toolUse.input.name : "";
         if (name && onCustomerName) { try { await onCustomerName(name); } catch { /* don't let a storage failure break the reply */ } }
         results.push({ type: "tool_result", tool_use_id: toolUse.id, content: "Noted." });
+        continue;
+      }
+      if (toolUse.name === NEEDS_HUMAN_TOOL_NAME) {
+        const reason = typeof toolUse.input?.reason === "string" ? toolUse.input.reason : "Customer asked for a human.";
+        if (onNeedsHuman) { try { await onNeedsHuman(reason); } catch { /* don't let a storage failure break the reply */ } }
+        results.push({ type: "tool_result", tool_use_id: toolUse.id, content: "Noted — the team has been flagged." });
         continue;
       }
       const action = nameToAction.get(toolUse.name);

@@ -86,6 +86,8 @@ async function ensureWidgetSchema(db: D1Database): Promise<void> {
   // Idempotent migration for a table created before customer_name existed — SQLite disallows
   // adding a column and reading it in the same statement batch, so this must stay a no-op once applied.
   try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN customer_name TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
+  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN needs_attention INTEGER NOT NULL DEFAULT 0`).run(); } catch { /* already exists */ }
+  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN attention_reason TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
   await db.prepare(`CREATE TABLE IF NOT EXISTS widget_typing_state (
     workspace_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
@@ -128,6 +130,34 @@ async function readWorkspaceState<T>(db: D1Database, workspaceId: string, key: s
   try { return JSON.parse(row.value) as T; } catch { return null; }
 }
 
+const WEEKDAY_KEYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
+type WeekdayKey = (typeof WEEKDAY_KEYS)[number];
+type WorkingHours = {
+  enabled: boolean;
+  timezone: string;
+  days: Record<WeekdayKey, { open: boolean; start: string; end: string }>;
+};
+
+// Computes real open/closed status from the business's configured hours, in their own
+// timezone, at the actual current moment — not just a static label the business has to keep
+// updating by hand.
+function computeBusinessHoursStatus(hours: WorkingHours | null, now: Date): string | null {
+  if (!hours || !hours.enabled) return null;
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: hours.timezone, weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(now);
+    const weekday = (parts.find((p) => p.type === "weekday")?.value || "").toLowerCase().slice(0, 3) as WeekdayKey;
+    const hh = parts.find((p) => p.type === "hour")?.value || "00";
+    const mm = parts.find((p) => p.type === "minute")?.value || "00";
+    const nowHM = `${hh}:${mm}`;
+    const today = hours.days[weekday];
+    if (!today || !today.open) return `We are currently OUTSIDE business hours (closed today, ${hours.timezone} time). Let the customer know a team member will follow up once we reopen.`;
+    const isOpen = nowHM >= today.start && nowHM <= today.end;
+    return isOpen
+      ? `We are currently WITHIN business hours (today's hours: ${today.start}–${today.end} ${hours.timezone} time).`
+      : `We are currently OUTSIDE business hours (today's hours are ${today.start}–${today.end} ${hours.timezone} time, current time is ${nowHM}). Let the customer know a team member will follow up once we reopen.`;
+  } catch { return null; }
+}
+
 async function buildSystemPrompt(db: D1Database, workspaceId: string): Promise<string> {
   const config = await readWorkspaceState<{ role?: string; tone?: string; language?: string; fallback?: string }>(db, workspaceId, "qpy-engage-assistant-config-v2");
   const policies = await readWorkspaceState<{ restricted?: string }>(db, workspaceId, "qpy-engage-assistant-policies");
@@ -155,6 +185,12 @@ async function buildSystemPrompt(db: D1Database, workspaceId: string): Promise<s
     ? `\n\nReference material from those sources — use this to answer factual questions, and do not state facts beyond what's here:\n${knowledgeText}`
     : " You were not given their actual content, so never claim a specific fact, price, or policy came from them.";
   prompt += "\n\nKeep replies concise and helpful. Never invent prices, availability, order details, or policies you were not given. You are chatting with a website visitor, not through WhatsApp.";
+
+  const workingHours = await readWorkspaceState<WorkingHours>(db, workspaceId, "qpy-engage-working-hours");
+  const hoursStatus = computeBusinessHoursStatus(workingHours, new Date());
+  if (hoursStatus) prompt += `\n\nBusiness hours status: ${hoursStatus}`;
+
+  prompt += "\n\nIf the customer asks to speak with a human, an agent, or a real person: do not hand off immediately. First, try to help them yourself or ask what they need, since you may be able to resolve it. Only if they explicitly insist on a human after that (or clearly restate the request) should you call the flag_for_human tool, and let them know a team member has been notified and will follow up" + (hoursStatus?.includes("OUTSIDE") ? ", mentioning that this is currently outside business hours" : "") + ".";
   return prompt;
 }
 
@@ -222,6 +258,15 @@ async function saveLearnedCustomerName(db: D1Database, workspaceId: string, sess
     .bind(workspaceId, sessionId, name).run();
 }
 
+// Called when Claude's built-in flag_for_human tool fires — see NEEDS_HUMAN_TOOL_NAME in shared.ts.
+async function flagConversationForHuman(db: D1Database, workspaceId: string, sessionId: string, reason: string): Promise<void> {
+  if (!sessionId) return;
+  await ensureWidgetSchema(db);
+  await db.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, needs_attention, attention_reason) VALUES (?, ?, 1, ?)
+    ON CONFLICT(workspace_id, session_id) DO UPDATE SET needs_attention = 1, attention_reason = excluded.attention_reason`)
+    .bind(workspaceId, sessionId, reason.trim().slice(0, 200)).run();
+}
+
 async function getConversationHistory(db: D1Database, workspaceId: string, sessionId: string): Promise<ChatMessage[]> {
   const result = await db.prepare(`SELECT role, content FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC LIMIT 50`)
     .bind(workspaceId, sessionId).all<{ role: string; content: string }>();
@@ -246,7 +291,8 @@ async function answerIfUnanswered(env: WidgetEnv, workspaceId: string, sessionId
   const actions = sanitizeActions(storedActions || []);
   const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
   const onCustomerName = (name: string) => saveLearnedCustomerName(env.DB, workspaceId, sessionId, name);
-  const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions, recordSubmission, onCustomerName);
+  const onNeedsHuman = (reason: string) => flagConversationForHuman(env.DB, workspaceId, sessionId, reason);
+  const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions, recordSubmission, onCustomerName, onNeedsHuman);
   if (result.reply) {
     await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`)
       .bind(workspaceId, sessionId, sanitizeWidgetReply(result.reply), sqliteNow()).run();
@@ -314,7 +360,8 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   const actions = sanitizeActions(storedActions || []);
   const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
   const onCustomerName = (name: string) => saveLearnedCustomerName(env.DB, workspaceId, sessionId, name);
-  const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, messages, actions, recordSubmission, onCustomerName);
+  const onNeedsHuman = (reason: string) => flagConversationForHuman(env.DB, workspaceId, sessionId, reason);
+  const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, messages, actions, recordSubmission, onCustomerName, onNeedsHuman);
   if (result.error) return widgetJson({ error: result.error }, result.status || 502);
 
   const reply = result.reply ? sanitizeWidgetReply(result.reply) : result.reply;
@@ -341,7 +388,8 @@ async function pollMessages(request: Request, env: WidgetEnv): Promise<Response>
     : await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role != 'user' ORDER BY created_at ASC LIMIT 50`)
       .bind(workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>();
   const typing = await isAgentTyping(env.DB, workspaceId, sessionId);
-  return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), typing });
+  const aiActive = await isAiActive(env.DB, workspaceId, sessionId);
+  return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), typing, aiActive });
 }
 
 // Lets a returning visitor's widget (same tab, after a page refresh) rebuild its transcript
@@ -357,7 +405,8 @@ async function getHistory(request: Request, env: WidgetEnv): Promise<Response> {
   await ensureWidgetSchema(env.DB);
   const result = await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC LIMIT 200`)
     .bind(workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>();
-  return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })) });
+  const aiActive = await isAiActive(env.DB, workspaceId, sessionId);
+  return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), aiActive });
 }
 
 async function getConfig(request: Request, env: WidgetEnv): Promise<Response> {
@@ -391,14 +440,23 @@ async function listConversations(request: Request, env: WidgetEnv): Promise<Resp
       bySession.set(row.session_id, { sessionId: row.session_id, messageCount: 1, lastMessage: row.content, lastRole: row.role, firstAt: row.created_at, lastAt: row.created_at });
     }
   }
-  const stateResult = await env.DB.prepare(`SELECT session_id, ai_active FROM widget_conversation_state WHERE workspace_id = ?`)
-    .bind(session.workspaceId).all<{ session_id: string; ai_active: number }>();
+  const stateResult = await env.DB.prepare(`SELECT session_id, ai_active, needs_attention, attention_reason FROM widget_conversation_state WHERE workspace_id = ?`)
+    .bind(session.workspaceId).all<{ session_id: string; ai_active: number; needs_attention: number; attention_reason: string }>();
   const aiActiveBySession = new Map((stateResult.results || []).map((r) => [r.session_id, r.ai_active === 1]));
+  const needsAttentionBySession = new Map((stateResult.results || []).map((r) => [r.session_id, r.needs_attention === 1]));
+  const attentionReasonBySession = new Map((stateResult.results || []).map((r) => [r.session_id, r.attention_reason]));
 
   const names = await getCustomerNames(env.DB, session.workspaceId, [...bySession.keys()]);
   const leadStatuses = await getLeadStatuses(env.DB, session.workspaceId, [...bySession.keys()]);
   const conversations = [...bySession.values()]
-    .map((c) => ({ ...c, aiActive: aiActiveBySession.get(c.sessionId) ?? true, customerName: names.get(c.sessionId) || null, leadStatus: leadStatuses.get(c.sessionId) || null }))
+    .map((c) => ({
+      ...c,
+      aiActive: aiActiveBySession.get(c.sessionId) ?? true,
+      customerName: names.get(c.sessionId) || null,
+      leadStatus: leadStatuses.get(c.sessionId) || null,
+      needsAttention: needsAttentionBySession.get(c.sessionId) ?? false,
+      attentionReason: attentionReasonBySession.get(c.sessionId) || null,
+    }))
     .sort((a, b) => b.lastAt.localeCompare(a.lastAt));
   return json(request, { conversations });
 }
@@ -417,6 +475,13 @@ async function getMessages(request: Request, env: WidgetEnv): Promise<Response> 
   return json(request, { messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), aiActive });
 }
 
+// Acknowledges (clears) a conversation's "needs a human" flag — called when an agent takes
+// over, since taking over is itself the acknowledgment that the flag was seen.
+async function clearNeedsAttention(db: D1Database, workspaceId: string, sessionId: string): Promise<void> {
+  await db.prepare(`UPDATE widget_conversation_state SET needs_attention = 0 WHERE workspace_id = ? AND session_id = ?`)
+    .bind(workspaceId, sessionId).run();
+}
+
 async function setTakeover(request: Request, env: WidgetEnv): Promise<Response> {
   const session = await requireSession(request, env);
   if (session instanceof Response) return session;
@@ -433,6 +498,7 @@ async function setTakeover(request: Request, env: WidgetEnv): Promise<Response> 
     .bind(session.workspaceId, sessionId, notice).run();
 
   if (body.active) await answerIfUnanswered(env, session.workspaceId, sessionId);
+  else await clearNeedsAttention(env.DB, session.workspaceId, sessionId);
 
   return json(request, { ok: true, aiActive: Boolean(body.active) });
 }
