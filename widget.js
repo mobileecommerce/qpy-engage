@@ -58,6 +58,7 @@
 
     var launch = root.querySelector(".qpy-launch");
     var panel = root.querySelector(".qpy-panel");
+    var headerSubtitle = root.querySelector("header small");
     var close = root.querySelector("header button");
     var form = root.querySelector("form");
     var input = root.querySelector("input");
@@ -69,10 +70,15 @@
     var typingEl = null;
     var awaitingAiReply = false;
 
+    function setHandlingLabel(isAiActive) {
+      headerSubtitle.textContent = isAiActive === false ? "Our team" : "AI assistant";
+    }
+
     if (resumedSessionId && workspaceId) {
       fetch(API_ORIGIN + "/api/widget/history?workspaceId=" + encodeURIComponent(workspaceId) + "&sessionId=" + encodeURIComponent(sessionId))
         .then(function (response) { return response.ok ? response.json() : { messages: [] }; })
         .then(function (data) {
+          setHandlingLabel(data.aiActive);
           var stored = data.messages || [];
           if (!stored.length) return;
           messages.innerHTML = "";
@@ -114,6 +120,7 @@
       if (lastSeenAt) url += "&after=" + encodeURIComponent(lastSeenAt);
       fetch(url).then(function (response) { return response.ok ? response.json() : { messages: [], typing: false }; })
         .then(function (data) {
+          setHandlingLabel(data.aiActive);
           (data.messages || []).forEach(function (m) {
             // A poll request can be in flight at the same moment the in-flight respond() call
             // (which owns displaying its own reply) saves and shows that same message — since
@@ -169,6 +176,7 @@
           if (result.data && result.data.serverTime) lastSeenAt = result.data.serverTime;
           if (result.ok && result.data && result.data.humanHandling) {
             // A team member has taken over — the AI stays quiet; their typing/reply arrive via polling.
+            setHandlingLabel(false);
             return;
           }
           var answer = result.ok && result.data && result.data.reply ? result.data.reply : (result.data && result.data.error) || "Sorry, I couldn't respond right now.";
