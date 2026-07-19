@@ -1,4 +1,4 @@
-import { callClaudeWithActions, sanitizeChatMessages, sanitizeActions, json, corsPreflight, allowedOrigin } from "./shared";
+import { callClaude, callClaudeWithActions, sanitizeChatMessages, sanitizeActions, json, corsPreflight, allowedOrigin, type ChatMessage } from "./shared";
 import { getStoredKnowledgeContent } from "./knowledge";
 import { saveSubmission } from "./leads";
 import { requireSession, type AuthEnv } from "./auth";
@@ -23,6 +23,11 @@ function sqliteNowPlusSeconds(seconds: number): string {
 }
 
 const TYPING_TTL_SECONDS = 6;
+const HOLDING_MESSAGE_DELAY_SECONDS = 300;
+
+function msSince(sqliteTimestamp: string): number {
+  return Date.now() - new Date(sqliteTimestamp.replace(" ", "T") + "Z").getTime();
+}
 
 function widgetJson(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "access-control-allow-origin": "*", "vary": "origin", "cache-control": "no-store" } });
@@ -116,6 +121,60 @@ async function buildSystemPrompt(db: D1Database, workspaceId: string): Promise<s
   return prompt;
 }
 
+async function getConversationHistory(db: D1Database, workspaceId: string, sessionId: string): Promise<ChatMessage[]> {
+  const result = await db.prepare(`SELECT role, content FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC LIMIT 50`)
+    .bind(workspaceId, sessionId).all<{ role: string; content: string }>();
+  return (result.results || [])
+    .filter((r) => r.role === "user" || r.role === "assistant" || r.role === "agent")
+    .map((r) => ({ role: r.role === "user" ? "user" as const : "assistant" as const, content: r.content }));
+}
+
+// When a human hands a conversation back to the AI, the customer's most recent message may
+// still be sitting unanswered (they sent it while the human had it, but never replied). Rather
+// than leave the visitor waiting for their *next* message, have the AI answer it right away.
+async function answerIfUnanswered(env: WidgetEnv, workspaceId: string, sessionId: string): Promise<void> {
+  if (!sessionId || !env.ANTHROPIC_API_KEY) return;
+  const lastRow = await env.DB.prepare(`SELECT role FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at DESC LIMIT 1`)
+    .bind(workspaceId, sessionId).first<{ role: string }>();
+  if (!lastRow || lastRow.role !== "user") return;
+
+  const history = await getConversationHistory(env.DB, workspaceId, sessionId);
+  if (!history.length) return;
+  const systemPrompt = await buildSystemPrompt(env.DB, workspaceId);
+  const storedActions = await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions");
+  const actions = sanitizeActions(storedActions || []);
+  const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
+  const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions, recordSubmission);
+  if (result.reply) {
+    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`)
+      .bind(workspaceId, sessionId, result.reply, sqliteNow()).run();
+  }
+}
+
+// If a human has taken over but hasn't replied in a while, send one brief, contextual holding
+// message so the visitor isn't left wondering if anyone saw their message. This does NOT hand
+// control back to the AI — it's just a reassurance, and only fires once per unanswered gap
+// (inserting this reply makes it the new "last message", so the check naturally goes quiet
+// until the customer writes again).
+async function maybeSendHoldingMessage(env: WidgetEnv, workspaceId: string, sessionId: string): Promise<void> {
+  if (!sessionId || !env.ANTHROPIC_API_KEY) return;
+  if (await isAiActive(env.DB, workspaceId, sessionId)) return;
+  const lastRow = await env.DB.prepare(`SELECT role, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at DESC LIMIT 1`)
+    .bind(workspaceId, sessionId).first<{ role: string; created_at: string }>();
+  if (!lastRow || lastRow.role !== "user") return;
+  if (msSince(lastRow.created_at) < HOLDING_MESSAGE_DELAY_SECONDS * 1000) return;
+
+  const history = await getConversationHistory(env.DB, workspaceId, sessionId);
+  if (!history.length) return;
+  const systemPrompt = (await buildSystemPrompt(env.DB, workspaceId))
+    + "\n\nThe human teammate handling this conversation hasn't replied in a few minutes. Send ONE brief, warm holding message acknowledging the wait and reassuring the customer someone will be with them shortly — reference what they asked about if relevant. Do not attempt to answer their question yourself.";
+  const result = await callClaude(env.ANTHROPIC_API_KEY, systemPrompt, history);
+  if (result.reply) {
+    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`)
+      .bind(workspaceId, sessionId, result.reply, sqliteNow()).run();
+  }
+}
+
 async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   if (!env.DB) return widgetJson({ error: "Workspace database is unavailable." }, 503);
   if (!env.ANTHROPIC_API_KEY) return widgetJson({ error: "This chat isn't configured yet." }, 503);
@@ -171,6 +230,7 @@ async function pollMessages(request: Request, env: WidgetEnv): Promise<Response>
   const after = (url.searchParams.get("after") || "").trim();
   if (!workspaceId || !sessionId) return widgetJson({ error: "Missing workspaceId or sessionId." }, 400);
   await ensureWidgetSchema(env.DB);
+  await maybeSendHoldingMessage(env, workspaceId, sessionId);
   const result = after
     ? await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role != 'user' AND created_at > ? ORDER BY created_at ASC LIMIT 50`)
       .bind(workspaceId, sessionId, after).all<{ role: string; content: string; created_at: string }>()
@@ -228,6 +288,7 @@ async function getMessages(request: Request, env: WidgetEnv): Promise<Response> 
   const sessionId = (url.searchParams.get("sessionId") || "").trim();
   if (!sessionId) return json(request, { error: "Missing sessionId." }, 400);
   await ensureWidgetSchema(env.DB);
+  await maybeSendHoldingMessage(env, session.workspaceId, sessionId);
   const result = await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC LIMIT 500`)
     .bind(session.workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>();
   const aiActive = await isAiActive(env.DB, session.workspaceId, sessionId);
@@ -248,6 +309,8 @@ async function setTakeover(request: Request, env: WidgetEnv): Promise<Response> 
   const notice = body.active ? "You're now chatting with our AI assistant again." : "You've been connected with a team member.";
   await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content) VALUES (?, ?, 'system', ?)`)
     .bind(session.workspaceId, sessionId, notice).run();
+
+  if (body.active) await answerIfUnanswered(env, session.workspaceId, sessionId);
 
   return json(request, { ok: true, aiActive: Boolean(body.active) });
 }
