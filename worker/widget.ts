@@ -1,8 +1,9 @@
-import { callClaudeWithActions, sanitizeChatMessages, sanitizeActions } from "./shared";
+import { callClaudeWithActions, sanitizeChatMessages, sanitizeActions, json, corsPreflight, allowedOrigin } from "./shared";
 import { getStoredKnowledgeContent } from "./knowledge";
 import { saveSubmission } from "./leads";
+import { requireSession, type AuthEnv } from "./auth";
 
-export interface WidgetEnv {
+export interface WidgetEnv extends AuthEnv {
   DB: D1Database;
   ANTHROPIC_API_KEY?: string;
 }
@@ -31,6 +32,15 @@ async function ensureWidgetSchema(db: D1Database): Promise<void> {
     count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (workspace_id, window_start)
   )`).run();
+  await db.prepare(`CREATE TABLE IF NOT EXISTS widget_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_widget_messages_workspace ON widget_messages (workspace_id, created_at)`).run();
 }
 
 async function withinRateLimit(db: D1Database, workspaceId: string): Promise<boolean> {
@@ -97,6 +107,12 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
   const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, messages, actions, recordSubmission);
   if (result.error) return widgetJson({ error: result.error }, result.status || 502);
+
+  if (sessionId && result.reply) {
+    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content) VALUES (?, ?, 'user', ?)`).bind(workspaceId, sessionId, message).run();
+    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content) VALUES (?, ?, 'assistant', ?)`).bind(workspaceId, sessionId, result.reply).run();
+  }
+
   return widgetJson({ reply: result.reply });
 }
 
@@ -111,11 +127,58 @@ async function getConfig(request: Request, env: WidgetEnv): Promise<Response> {
   return widgetJson({ appearance: appearance || null });
 }
 
+async function listConversations(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  await ensureWidgetSchema(env.DB);
+  const result = await env.DB.prepare(`SELECT session_id, role, content, created_at FROM widget_messages WHERE workspace_id = ? ORDER BY created_at ASC LIMIT 3000`)
+    .bind(session.workspaceId).all<{ session_id: string; role: string; content: string; created_at: string }>();
+
+  const bySession = new Map<string, { sessionId: string; messageCount: number; lastMessage: string; lastRole: string; firstAt: string; lastAt: string }>();
+  for (const row of result.results || []) {
+    const existing = bySession.get(row.session_id);
+    if (existing) {
+      existing.messageCount++;
+      existing.lastMessage = row.content;
+      existing.lastRole = row.role;
+      existing.lastAt = row.created_at;
+    } else {
+      bySession.set(row.session_id, { sessionId: row.session_id, messageCount: 1, lastMessage: row.content, lastRole: row.role, firstAt: row.created_at, lastAt: row.created_at });
+    }
+  }
+  const conversations = [...bySession.values()].sort((a, b) => b.lastAt.localeCompare(a.lastAt));
+  return json(request, { conversations });
+}
+
+async function getMessages(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const url = new URL(request.url);
+  const sessionId = (url.searchParams.get("sessionId") || "").trim();
+  if (!sessionId) return json(request, { error: "Missing sessionId." }, 400);
+  await ensureWidgetSchema(env.DB);
+  const result = await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC LIMIT 500`)
+    .bind(session.workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>();
+  return json(request, { messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })) });
+}
+
 export async function handleWidgetRequest(request: Request, env: WidgetEnv): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/widget/")) return null;
-  if (request.method === "OPTIONS") return widgetCorsPreflight();
-  if (url.pathname === "/api/widget/respond" && request.method === "POST") return respond(request, env);
-  if (url.pathname === "/api/widget/config" && request.method === "GET") return getConfig(request, env);
-  return widgetJson({ error: "Not found" }, 404);
+
+  // Public, unauthenticated widget endpoints — wildcard CORS, since any customer site embeds these.
+  if (url.pathname === "/api/widget/respond" || url.pathname === "/api/widget/config") {
+    if (request.method === "OPTIONS") return widgetCorsPreflight();
+    if (url.pathname === "/api/widget/respond" && request.method === "POST") return respond(request, env);
+    if (url.pathname === "/api/widget/config" && request.method === "GET") return getConfig(request, env);
+    return widgetJson({ error: "Not found" }, 404);
+  }
+
+  // Authenticated dashboard endpoints for reviewing past widget conversations.
+  if (request.method === "OPTIONS") return corsPreflight(request);
+  if (request.headers.get("origin") && !allowedOrigin(request)) return json(request, { error: "Origin not allowed" }, 403);
+  if (!env.DB) return json(request, { error: "Workspace database is unavailable." }, 503);
+  if (url.pathname === "/api/widget/conversations" && request.method === "GET") return listConversations(request, env);
+  if (url.pathname === "/api/widget/messages" && request.method === "GET") return getMessages(request, env);
+  return json(request, { error: "Not found" }, 404);
 }

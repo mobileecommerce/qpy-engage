@@ -264,7 +264,7 @@ function Workspace({session,onLogout}:{session:AuthSession;onLogout:()=>void}) {
   const body = section === "Overview" ? <Overview onNavigate={go} onCreate={openAutomation} connected={connected} conversations={conversations} automations={automations} sources={sources} userName={session.user.name||session.user.email.split("@")[0]} workspaceName={session.workspace.name}/> :
     section === "Assistants" ? <Assistants sources={sources} workspaceName={session.workspace.name} onKnowledge={()=>go("Knowledge")} onChannels={()=>go("Channels")} onAnalytics={()=>go("Analytics")} notify={notify}/> :
     section === "Channels" ? <Channels step={channelStep} setStep={setChannelStep} connected={connected} setConnected={setConnected} workspaceId={session.workspace.id} workspaceName={session.workspace.name} notify={notify}/> :
-    section === "Inbox" ? (connected?<LiveInbox notify={notify}/>:conversations.length?<Inbox conversations={conversations} setConversations={setConversations} selected={selected} setSelectedId={setSelectedId} messages={messages[selected.id]??[]} draft={draft} setDraft={setDraft} sendMessage={sendMessage} aiActive={aiActive} setAiActive={setAiActive} notify={notify}/>:<EmptyInbox onConnect={()=>go("Channels")}/>) :
+    section === "Inbox" ? <InboxHub connected={connected} conversations={conversations} setConversations={setConversations} selected={selected} setSelectedId={setSelectedId} messages={messages[selected.id]??[]} draft={draft} setDraft={setDraft} sendMessage={sendMessage} aiActive={aiActive} setAiActive={setAiActive} onConnect={()=>go("Channels")} notify={notify}/> :
     section === "Campaigns" ? <Campaigns notify={notify}/> :
     section === "Automations" ? <Automations items={automations} setItems={setAutomations} onCreate={openAutomation} notify={notify}/> :
     section === "Knowledge" ? <Knowledge sources={sources} setSources={setSources} onAdd={()=>setModal("source")} notify={notify}/> :
@@ -700,6 +700,52 @@ function LiveInbox({notify}:{notify:(s:string)=>void}){
 
 function EmptyInbox({onConnect}:{onConnect:()=>void}){
   return <><PageHeader title="Unified inbox" description="Manage every customer conversation from one place."/><div className="empty-state"><span>◉</span><h3>No conversations yet</h3><p>Connect a channel like WhatsApp to start receiving real customer messages here.</p><button className="primary" onClick={onConnect}>Connect a channel →</button></div></>;
+}
+
+type WidgetConversationSummary={sessionId:string;messageCount:number;lastMessage:string;lastRole:string;firstAt:string;lastAt:string};
+type WidgetMessage={role:string;content:string;createdAt:string};
+
+function WebChatInbox({notify}:{notify:(s:string)=>void}){
+  const token=useAuthToken();
+  const [conversations,setConversations]=useState<WidgetConversationSummary[]>([]);
+  const [selectedSessionId,setSelectedSessionId]=useState("");
+  const [messages,setMessages]=useState<WidgetMessage[]>([]);
+  const [loading,setLoading]=useState(true);
+  const [loadingMessages,setLoadingMessages]=useState(false);
+  const load=async()=>{
+    if(!token){setLoading(false);return}
+    setLoading(true);
+    try{
+      const response=await fetch(metaApi("/api/widget/conversations"),{headers:authHeaders(token)});
+      const result=await response.json() as {conversations?:WidgetConversationSummary[];error?:string};
+      if(!response.ok)throw new Error(result.error||"Could not load web chat conversations.");
+      setConversations(result.conversations||[]);
+    }catch(error){notify(error instanceof Error?error.message:"Could not load web chat conversations.")}
+    finally{setLoading(false)}
+  };
+  useEffect(()=>{load()},[token]);
+  useEffect(()=>{
+    if(!selectedSessionId||!token){setMessages([]);return}
+    setLoadingMessages(true);
+    fetch(metaApi(`/api/widget/messages?sessionId=${encodeURIComponent(selectedSessionId)}`),{headers:authHeaders(token)})
+      .then(r=>r.json())
+      .then((data:{messages?:WidgetMessage[]})=>setMessages(data.messages||[]))
+      .catch(()=>notify("Could not load that conversation."))
+      .finally(()=>setLoadingMessages(false));
+  },[selectedSessionId,token]);
+  const selected=conversations.find(c=>c.sessionId===selectedSessionId);
+  return <><PageHeader title="Web chat conversations" description="Real visitor conversations from your website chat widget — read-only, since visitors are anonymous and can't be replied to directly here." action={<button className="secondary-btn" onClick={load}>↻ Refresh</button>}/>
+  {loading?<p className="empty-hint">Loading…</p>:!conversations.length?<div className="empty-state"><span>◌</span><h3>No web chat conversations yet</h3><p>When a visitor uses your website's chat widget, the conversation will appear here automatically.</p></div>:
+  <div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><strong>{conversations.length} conversation{conversations.length===1?"":"s"}</strong></div><div className="conversation-list">{conversations.map(c=><button key={c.sessionId} className={c.sessionId===selectedSessionId?"selected":""} onClick={()=>setSelectedSessionId(c.sessionId)}><span className="contact-avatar blue">◌<i/></span><div><strong>Website visitor</strong><small>{c.lastMessage.slice(0,60)}</small></div><span className="conv-meta"><small>{new Date(c.lastAt).toLocaleString()}</small></span></button>)}</div></aside><section className="chat-panel">{selected?<><div className="chat-head"><div className="chat-person"><span className="contact-avatar blue">◌<i/></span><div><strong>Website visitor</strong><small>{selected.messageCount} messages</small></div></div></div><div className="chat-body tall"><div className="today">{new Date(selected.firstAt).toLocaleDateString()}</div>{loadingMessages?<p className="empty-hint">Loading…</p>:messages.map((m,i)=><div key={i} className={`message ${m.role==="user"?"customer":"ai"}`}><p>{m.content}</p><small>{m.role==="user"?"Visitor":"✦ Assistant"} • {new Date(m.createdAt).toLocaleTimeString()}</small></div>)}</div></>:<div className="live-chat-placeholder">Select a conversation</div>}</section></div>}
+  </>;
+}
+
+function InboxHub(props:{connected:boolean;conversations:Conversation[];setConversations:(v:Conversation[])=>void;selected:Conversation;setSelectedId:(s:string)=>void;messages:Message[];draft:string;setDraft:(s:string)=>void;sendMessage:()=>void;aiActive:boolean;setAiActive:(v:boolean)=>void;onConnect:()=>void;notify:(s:string)=>void}){
+  const [tab,setTab]=useState<"whatsapp"|"webchat">("whatsapp");
+  return <>
+    <div className="test-mode-tabs"><button className={tab==="whatsapp"?"active":""} onClick={()=>setTab("whatsapp")}>◉ WhatsApp</button><button className={tab==="webchat"?"active":""} onClick={()=>setTab("webchat")}>◌ Web chat</button></div>
+    {tab==="whatsapp"?(props.connected?<LiveInbox notify={props.notify}/>:props.conversations.length?<Inbox conversations={props.conversations} setConversations={props.setConversations} selected={props.selected} setSelectedId={props.setSelectedId} messages={props.messages} draft={props.draft} setDraft={props.setDraft} sendMessage={props.sendMessage} aiActive={props.aiActive} setAiActive={props.setAiActive} notify={props.notify}/>:<EmptyInbox onConnect={props.onConnect}/>):<WebChatInbox notify={props.notify}/>}
+  </>;
 }
 
 function Inbox({conversations,setConversations,selected,setSelectedId,messages,draft,setDraft,sendMessage,aiActive,setAiActive,notify}:{conversations:Conversation[];setConversations:(v:Conversation[])=>void;selected:Conversation;setSelectedId:(s:string)=>void;messages:Message[];draft:string;setDraft:(s:string)=>void;sendMessage:()=>void;aiActive:boolean;setAiActive:(v:boolean)=>void;notify:(s:string)=>void}){
