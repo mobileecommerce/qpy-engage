@@ -56,22 +56,50 @@
     var sendButton = root.querySelector("form button");
     var messages = root.querySelector("main");
     var history = [];
-    launch.onclick = function () { panel.hidden = false; launch.hidden = true; input.focus(); };
+    var lastSeenAt = "";
+    var pollTimer = null;
+
+    function appendMessage(cls, text) {
+      messages.insertAdjacentHTML("beforeend", '<p class="' + cls + '"></p>');
+      messages.lastElementChild.textContent = text;
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    function pollForReplies() {
+      if (!sessionId) return;
+      var url = API_ORIGIN + "/api/widget/poll?workspaceId=" + encodeURIComponent(workspaceId) + "&sessionId=" + encodeURIComponent(sessionId);
+      if (lastSeenAt) url += "&after=" + encodeURIComponent(lastSeenAt);
+      fetch(url).then(function (response) { return response.ok ? response.json() : { messages: [] }; })
+        .then(function (data) {
+          (data.messages || []).forEach(function (m) {
+            appendMessage("qpy-ai", m.content);
+            history.push({ role: m.role === "user" ? "user" : "assistant", content: m.content });
+            lastSeenAt = m.createdAt;
+          });
+        })
+        .catch(function () {});
+    }
+
+    function startPolling() {
+      if (pollTimer) return;
+      pollTimer = setInterval(pollForReplies, 4000);
+    }
+
+    launch.onclick = function () { panel.hidden = false; launch.hidden = true; input.focus(); startPolling(); };
     close.onclick = function () { panel.hidden = true; launch.hidden = false; };
     if (!workspaceId) {
-      messages.insertAdjacentHTML("beforeend", '<p class="qpy-ai">This chat widget is missing its workspace id — copy the install code again from Qpy Engage Channels settings.</p>');
+      appendMessage("qpy-ai", "This chat widget is missing its workspace id — copy the install code again from Qpy Engage Channels settings.");
     }
     form.onsubmit = function (event) {
       event.preventDefault();
       if (!workspaceId) return;
       var text = input.value.trim();
       if (!text) return;
-      messages.insertAdjacentHTML("beforeend", '<p class="qpy-user"></p>');
-      messages.lastElementChild.textContent = text;
+      appendMessage("qpy-user", text);
       input.value = "";
       input.disabled = true;
       sendButton.disabled = true;
-      messages.scrollTop = messages.scrollHeight;
+      startPolling();
       fetch(API_ORIGIN + "/api/widget/respond", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -79,17 +107,18 @@
       })
         .then(function (response) { return response.json().then(function (data) { return { ok: response.ok, data: data }; }); })
         .then(function (result) {
-          var answer = result.ok && result.data && result.data.reply ? result.data.reply : (result.data && result.data.error) || "Sorry, I couldn't respond right now.";
           history.push({ role: "user", content: text });
+          if (result.data && result.data.serverTime) lastSeenAt = result.data.serverTime;
+          if (result.ok && result.data && result.data.humanHandling) {
+            // A team member has taken over — the AI stays quiet and their reply arrives via polling.
+            return;
+          }
+          var answer = result.ok && result.data && result.data.reply ? result.data.reply : (result.data && result.data.error) || "Sorry, I couldn't respond right now.";
           if (result.ok) history.push({ role: "assistant", content: answer });
-          messages.insertAdjacentHTML("beforeend", '<p class="qpy-ai"></p>');
-          messages.lastElementChild.textContent = answer;
-          messages.scrollTop = messages.scrollHeight;
+          appendMessage("qpy-ai", answer);
         })
         .catch(function () {
-          messages.insertAdjacentHTML("beforeend", '<p class="qpy-ai"></p>');
-          messages.lastElementChild.textContent = "Sorry, I couldn't reach support chat right now. Please try again shortly.";
-          messages.scrollTop = messages.scrollHeight;
+          appendMessage("qpy-ai", "Sorry, I couldn't reach support chat right now. Please try again shortly.");
         })
         .then(function () { input.disabled = false; sendButton.disabled = false; input.focus(); });
     };

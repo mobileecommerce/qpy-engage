@@ -12,6 +12,12 @@ const RATE_LIMIT_PER_MINUTE = 20;
 const MAX_MESSAGE_LENGTH = 4000;
 const MAX_KNOWLEDGE_LENGTH = 12000;
 
+function sqliteNow(): string {
+  // Matches SQLite's own CURRENT_TIMESTAMP format so an explicit value here sorts identically
+  // to values inserted via the column default elsewhere.
+  return new Date().toISOString().slice(0, 19).replace("T", " ");
+}
+
 function widgetJson(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "access-control-allow-origin": "*", "vary": "origin", "cache-control": "no-store" } });
 }
@@ -41,6 +47,18 @@ async function ensureWidgetSchema(db: D1Database): Promise<void> {
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`).run();
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_widget_messages_workspace ON widget_messages (workspace_id, created_at)`).run();
+  await db.prepare(`CREATE TABLE IF NOT EXISTS widget_conversation_state (
+    workspace_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    ai_active INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (workspace_id, session_id)
+  )`).run();
+}
+
+async function isAiActive(db: D1Database, workspaceId: string, sessionId: string): Promise<boolean> {
+  if (!sessionId) return true;
+  const row = await db.prepare(`SELECT ai_active FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`).bind(workspaceId, sessionId).first<{ ai_active: number }>();
+  return row ? row.ai_active === 1 : true;
 }
 
 async function withinRateLimit(db: D1Database, workspaceId: string): Promise<boolean> {
@@ -98,6 +116,18 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
 
   const message = (body.message || "").trim().slice(0, MAX_MESSAGE_LENGTH);
   if (!message) return widgetJson({ error: "No message to respond to." }, 400);
+
+  const receivedAt = sqliteNow();
+  if (sessionId) {
+    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'user', ?, ?)`).bind(workspaceId, sessionId, message, receivedAt).run();
+  }
+
+  // A human agent can take over a conversation from the dashboard — once they do, the AI
+  // stops auto-replying so the visitor only hears from the person handling their chat.
+  if (!(await isAiActive(env.DB, workspaceId, sessionId))) {
+    return widgetJson({ reply: null, humanHandling: true, serverTime: receivedAt });
+  }
+
   const history = sanitizeChatMessages(body.history).slice(-6);
   const messages = [...history, { role: "user" as const, content: message }];
 
@@ -108,12 +138,28 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, messages, actions, recordSubmission);
   if (result.error) return widgetJson({ error: result.error }, result.status || 502);
 
+  const repliedAt = sqliteNow();
   if (sessionId && result.reply) {
-    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content) VALUES (?, ?, 'user', ?)`).bind(workspaceId, sessionId, message).run();
-    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content) VALUES (?, ?, 'assistant', ?)`).bind(workspaceId, sessionId, result.reply).run();
+    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`).bind(workspaceId, sessionId, result.reply, repliedAt).run();
   }
 
-  return widgetJson({ reply: result.reply });
+  return widgetJson({ reply: result.reply, serverTime: repliedAt });
+}
+
+async function pollMessages(request: Request, env: WidgetEnv): Promise<Response> {
+  if (!env.DB) return widgetJson({ error: "Workspace database is unavailable." }, 503);
+  const url = new URL(request.url);
+  const workspaceId = (url.searchParams.get("workspaceId") || "").trim();
+  const sessionId = (url.searchParams.get("sessionId") || "").trim();
+  const after = (url.searchParams.get("after") || "").trim();
+  if (!workspaceId || !sessionId) return widgetJson({ error: "Missing workspaceId or sessionId." }, 400);
+  await ensureWidgetSchema(env.DB);
+  const result = after
+    ? await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role != 'user' AND created_at > ? ORDER BY created_at ASC LIMIT 50`)
+      .bind(workspaceId, sessionId, after).all<{ role: string; content: string; created_at: string }>()
+    : await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role != 'user' ORDER BY created_at ASC LIMIT 50`)
+      .bind(workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>();
+  return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })) });
 }
 
 async function getConfig(request: Request, env: WidgetEnv): Promise<Response> {
@@ -146,7 +192,13 @@ async function listConversations(request: Request, env: WidgetEnv): Promise<Resp
       bySession.set(row.session_id, { sessionId: row.session_id, messageCount: 1, lastMessage: row.content, lastRole: row.role, firstAt: row.created_at, lastAt: row.created_at });
     }
   }
-  const conversations = [...bySession.values()].sort((a, b) => b.lastAt.localeCompare(a.lastAt));
+  const stateResult = await env.DB.prepare(`SELECT session_id, ai_active FROM widget_conversation_state WHERE workspace_id = ?`)
+    .bind(session.workspaceId).all<{ session_id: string; ai_active: number }>();
+  const aiActiveBySession = new Map((stateResult.results || []).map((r) => [r.session_id, r.ai_active === 1]));
+
+  const conversations = [...bySession.values()]
+    .map((c) => ({ ...c, aiActive: aiActiveBySession.get(c.sessionId) ?? true }))
+    .sort((a, b) => b.lastAt.localeCompare(a.lastAt));
   return json(request, { conversations });
 }
 
@@ -159,7 +211,35 @@ async function getMessages(request: Request, env: WidgetEnv): Promise<Response> 
   await ensureWidgetSchema(env.DB);
   const result = await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC LIMIT 500`)
     .bind(session.workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>();
-  return json(request, { messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })) });
+  const aiActive = await isAiActive(env.DB, session.workspaceId, sessionId);
+  return json(request, { messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), aiActive });
+}
+
+async function setTakeover(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const body = await request.json() as { sessionId?: string; active?: boolean };
+  const sessionId = (body.sessionId || "").trim();
+  if (!sessionId) return json(request, { error: "Missing sessionId." }, 400);
+  await ensureWidgetSchema(env.DB);
+  await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, ai_active) VALUES (?, ?, ?)
+    ON CONFLICT(workspace_id, session_id) DO UPDATE SET ai_active = excluded.ai_active`)
+    .bind(session.workspaceId, sessionId, body.active ? 1 : 0).run();
+  return json(request, { ok: true, aiActive: Boolean(body.active) });
+}
+
+async function sendAgentReply(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const body = await request.json() as { sessionId?: string; message?: string };
+  const sessionId = (body.sessionId || "").trim();
+  const message = (body.message || "").trim().slice(0, MAX_MESSAGE_LENGTH);
+  if (!sessionId) return json(request, { error: "Missing sessionId." }, 400);
+  if (!message) return json(request, { error: "Write a reply before sending." }, 400);
+  await ensureWidgetSchema(env.DB);
+  await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content) VALUES (?, ?, 'agent', ?)`)
+    .bind(session.workspaceId, sessionId, message).run();
+  return json(request, { ok: true });
 }
 
 export async function handleWidgetRequest(request: Request, env: WidgetEnv): Promise<Response | null> {
@@ -167,18 +247,21 @@ export async function handleWidgetRequest(request: Request, env: WidgetEnv): Pro
   if (!url.pathname.startsWith("/api/widget/")) return null;
 
   // Public, unauthenticated widget endpoints — wildcard CORS, since any customer site embeds these.
-  if (url.pathname === "/api/widget/respond" || url.pathname === "/api/widget/config") {
+  if (url.pathname === "/api/widget/respond" || url.pathname === "/api/widget/config" || url.pathname === "/api/widget/poll") {
     if (request.method === "OPTIONS") return widgetCorsPreflight();
     if (url.pathname === "/api/widget/respond" && request.method === "POST") return respond(request, env);
     if (url.pathname === "/api/widget/config" && request.method === "GET") return getConfig(request, env);
+    if (url.pathname === "/api/widget/poll" && request.method === "GET") return pollMessages(request, env);
     return widgetJson({ error: "Not found" }, 404);
   }
 
-  // Authenticated dashboard endpoints for reviewing past widget conversations.
+  // Authenticated dashboard endpoints for reviewing and taking over widget conversations.
   if (request.method === "OPTIONS") return corsPreflight(request);
   if (request.headers.get("origin") && !allowedOrigin(request)) return json(request, { error: "Origin not allowed" }, 403);
   if (!env.DB) return json(request, { error: "Workspace database is unavailable." }, 503);
   if (url.pathname === "/api/widget/conversations" && request.method === "GET") return listConversations(request, env);
   if (url.pathname === "/api/widget/messages" && request.method === "GET") return getMessages(request, env);
+  if (url.pathname === "/api/widget/takeover" && request.method === "POST") return setTakeover(request, env);
+  if (url.pathname === "/api/widget/reply" && request.method === "POST") return sendAgentReply(request, env);
   return json(request, { error: "Not found" }, 404);
 }

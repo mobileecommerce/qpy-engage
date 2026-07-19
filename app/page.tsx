@@ -702,7 +702,7 @@ function EmptyInbox({onConnect}:{onConnect:()=>void}){
   return <><PageHeader title="Unified inbox" description="Manage every customer conversation from one place."/><div className="empty-state"><span>◉</span><h3>No conversations yet</h3><p>Connect a channel like WhatsApp to start receiving real customer messages here.</p><button className="primary" onClick={onConnect}>Connect a channel →</button></div></>;
 }
 
-type WidgetConversationSummary={sessionId:string;messageCount:number;lastMessage:string;lastRole:string;firstAt:string;lastAt:string};
+type WidgetConversationSummary={sessionId:string;messageCount:number;lastMessage:string;lastRole:string;firstAt:string;lastAt:string;aiActive:boolean};
 type WidgetMessage={role:string;content:string;createdAt:string};
 
 function WebChatInbox({notify}:{notify:(s:string)=>void}){
@@ -710,8 +710,11 @@ function WebChatInbox({notify}:{notify:(s:string)=>void}){
   const [conversations,setConversations]=useState<WidgetConversationSummary[]>([]);
   const [selectedSessionId,setSelectedSessionId]=useState("");
   const [messages,setMessages]=useState<WidgetMessage[]>([]);
+  const [aiActive,setAiActiveState]=useState(true);
   const [loading,setLoading]=useState(true);
   const [loadingMessages,setLoadingMessages]=useState(false);
+  const [reply,setReply]=useState("");
+  const [sendingReply,setSendingReply]=useState(false);
   const load=async()=>{
     if(!token){setLoading(false);return}
     setLoading(true);
@@ -724,19 +727,42 @@ function WebChatInbox({notify}:{notify:(s:string)=>void}){
     finally{setLoading(false)}
   };
   useEffect(()=>{load()},[token]);
-  useEffect(()=>{
+  const loadMessages=()=>{
     if(!selectedSessionId||!token){setMessages([]);return}
     setLoadingMessages(true);
     fetch(metaApi(`/api/widget/messages?sessionId=${encodeURIComponent(selectedSessionId)}`),{headers:authHeaders(token)})
       .then(r=>r.json())
-      .then((data:{messages?:WidgetMessage[]})=>setMessages(data.messages||[]))
+      .then((data:{messages?:WidgetMessage[];aiActive?:boolean})=>{setMessages(data.messages||[]);setAiActiveState(data.aiActive??true)})
       .catch(()=>notify("Could not load that conversation."))
       .finally(()=>setLoadingMessages(false));
-  },[selectedSessionId,token]);
+  };
+  useEffect(loadMessages,[selectedSessionId,token]);
   const selected=conversations.find(c=>c.sessionId===selectedSessionId);
-  return <><PageHeader title="Web chat conversations" description="Real visitor conversations from your website chat widget — read-only, since visitors are anonymous and can't be replied to directly here." action={<button className="secondary-btn" onClick={load}>↻ Refresh</button>}/>
+  const toggleTakeover=async()=>{
+    if(!selectedSessionId)return;
+    const nextActive=!aiActive;
+    try{
+      const response=await fetch(metaApi("/api/widget/takeover"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({sessionId:selectedSessionId,active:nextActive})});
+      if(!response.ok)throw new Error();
+      setAiActiveState(nextActive);
+      setConversations(current=>current.map(c=>c.sessionId===selectedSessionId?{...c,aiActive:nextActive}:c));
+      notify(nextActive?"Handed this conversation back to the AI":"You've taken over this conversation — the AI will stay quiet");
+    }catch{notify("Could not change who's handling this conversation.")}
+  };
+  const sendReply=async()=>{
+    if(!reply.trim()||!selectedSessionId||sendingReply)return;
+    setSendingReply(true);
+    try{
+      const response=await fetch(metaApi("/api/widget/reply"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({sessionId:selectedSessionId,message:reply.trim()})});
+      if(!response.ok)throw new Error();
+      setReply("");
+      loadMessages();
+    }catch{notify("Could not send that reply.")}
+    finally{setSendingReply(false)}
+  };
+  return <><PageHeader title="Web chat conversations" description="Real visitor conversations from your website chat widget. Take over any conversation to reply as a human instead of the AI." action={<button className="secondary-btn" onClick={load}>↻ Refresh</button>}/>
   {loading?<p className="empty-hint">Loading…</p>:!conversations.length?<div className="empty-state"><span>◌</span><h3>No web chat conversations yet</h3><p>When a visitor uses your website's chat widget, the conversation will appear here automatically.</p></div>:
-  <div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><strong>{conversations.length} conversation{conversations.length===1?"":"s"}</strong></div><div className="conversation-list">{conversations.map(c=><button key={c.sessionId} className={c.sessionId===selectedSessionId?"selected":""} onClick={()=>setSelectedSessionId(c.sessionId)}><span className="contact-avatar blue">◌<i/></span><div><strong>Website visitor</strong><small>{c.lastMessage.slice(0,60)}</small></div><span className="conv-meta"><small>{new Date(c.lastAt).toLocaleString()}</small></span></button>)}</div></aside><section className="chat-panel">{selected?<><div className="chat-head"><div className="chat-person"><span className="contact-avatar blue">◌<i/></span><div><strong>Website visitor</strong><small>{selected.messageCount} messages</small></div></div></div><div className="chat-body tall"><div className="today">{new Date(selected.firstAt).toLocaleDateString()}</div>{loadingMessages?<p className="empty-hint">Loading…</p>:messages.map((m,i)=><div key={i} className={`message ${m.role==="user"?"customer":"ai"}`}><p>{m.content}</p><small>{m.role==="user"?"Visitor":"✦ Assistant"} • {new Date(m.createdAt).toLocaleTimeString()}</small></div>)}</div></>:<div className="live-chat-placeholder">Select a conversation</div>}</section></div>}
+  <div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><strong>{conversations.length} conversation{conversations.length===1?"":"s"}</strong></div><div className="conversation-list">{conversations.map(c=><button key={c.sessionId} className={c.sessionId===selectedSessionId?"selected":""} onClick={()=>setSelectedSessionId(c.sessionId)}><span className="contact-avatar blue">◌<i/></span><div><strong>Website visitor</strong><small>{c.lastMessage.slice(0,60)}</small></div><span className="conv-meta"><small>{new Date(c.lastAt).toLocaleString()}</small>{!c.aiActive&&<b>You</b>}</span></button>)}</div></aside><section className="chat-panel">{selected?<><div className="chat-head"><div className="chat-person"><span className="contact-avatar blue">◌<i/></span><div><strong>Website visitor</strong><small>{selected.messageCount} messages</small></div></div><div className="ai-state"><span className={aiActive?"pulse":"pulse off"}>✦</span><div><strong>{aiActive?"AI is handling":"You're handling"}</strong><small>{aiActive?"Take over to reply yourself":"AI is paused for this visitor"}</small></div><button onClick={toggleTakeover}>{aiActive?"Take over":"Hand to AI"}</button></div></div><div className="chat-body tall"><div className="today">{new Date(selected.firstAt).toLocaleDateString()}</div>{loadingMessages?<p className="empty-hint">Loading…</p>:messages.map((m,i)=><div key={i} className={`message ${m.role==="user"?"customer":"ai"}`}><p>{m.content}</p><small>{m.role==="user"?"Visitor":m.role==="agent"?"You":"✦ Assistant"} • {new Date(m.createdAt).toLocaleTimeString()}</small></div>)}</div>{!aiActive&&<div className="composer"><div className="input-row"><input value={reply} onChange={e=>setReply(e.target.value)} onKeyDown={e=>e.key==="Enter"&&sendReply()} placeholder="Reply as yourself…" disabled={sendingReply}/><button className="send" disabled={sendingReply||!reply.trim()} onClick={sendReply}>➤</button></div></div>}</>:<div className="live-chat-placeholder">Select a conversation</div>}</section></div>}
   </>;
 }
 
