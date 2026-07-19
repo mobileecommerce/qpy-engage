@@ -134,7 +134,7 @@ async function getConversationHistory(db: D1Database, workspaceId: string, sessi
 // than leave the visitor waiting for their *next* message, have the AI answer it right away.
 async function answerIfUnanswered(env: WidgetEnv, workspaceId: string, sessionId: string): Promise<void> {
   if (!sessionId || !env.ANTHROPIC_API_KEY) return;
-  const lastRow = await env.DB.prepare(`SELECT role FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at DESC LIMIT 1`)
+  const lastRow = await env.DB.prepare(`SELECT role FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role != 'system' ORDER BY created_at DESC LIMIT 1`)
     .bind(workspaceId, sessionId).first<{ role: string }>();
   if (!lastRow || lastRow.role !== "user") return;
 
@@ -159,7 +159,7 @@ async function answerIfUnanswered(env: WidgetEnv, workspaceId: string, sessionId
 async function maybeSendHoldingMessage(env: WidgetEnv, workspaceId: string, sessionId: string): Promise<void> {
   if (!sessionId || !env.ANTHROPIC_API_KEY) return;
   if (await isAiActive(env.DB, workspaceId, sessionId)) return;
-  const lastRow = await env.DB.prepare(`SELECT role, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at DESC LIMIT 1`)
+  const lastRow = await env.DB.prepare(`SELECT role, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role != 'system' ORDER BY created_at DESC LIMIT 1`)
     .bind(workspaceId, sessionId).first<{ role: string; created_at: string }>();
   if (!lastRow || lastRow.role !== "user") return;
   if (msSince(lastRow.created_at) < HOLDING_MESSAGE_DELAY_SECONDS * 1000) return;
