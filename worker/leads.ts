@@ -21,8 +21,13 @@ async function ensureLeadsSchema(db: D1Database): Promise<void> {
   )`).run();
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_action_submissions_workspace ON action_submissions (workspace_id, created_at DESC)`).run();
   // Idempotent migration for tables created before session_id/updated_at existed.
+  // SQLite disallows a non-constant default (e.g. CURRENT_TIMESTAMP) on ALTER TABLE ADD COLUMN,
+  // so add with a constant default and backfill separately.
   try { await db.prepare(`ALTER TABLE action_submissions ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
-  try { await db.prepare(`ALTER TABLE action_submissions ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP`).run(); } catch { /* already exists */ }
+  try {
+    await db.prepare(`ALTER TABLE action_submissions ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''`).run();
+    await db.prepare(`UPDATE action_submissions SET updated_at = created_at WHERE updated_at = ''`).run();
+  } catch { /* already exists */ }
 }
 
 export async function saveSubmission(db: D1Database, workspaceId: string, sessionId: string, actionName: string, channel: string, data: Record<string, unknown>): Promise<void> {
