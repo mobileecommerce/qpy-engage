@@ -723,28 +723,38 @@ function WebChatInbox({notify}:{notify:(s:string)=>void}){
     lastTypingPingRef.current=now;
     fetch(metaApi("/api/widget/typing"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({sessionId:selectedSessionId})}).catch(()=>{});
   };
-  const load=async()=>{
+  const load=async(silent?:boolean)=>{
     if(!token){setLoading(false);return}
-    setLoading(true);
+    if(!silent)setLoading(true);
     try{
       const response=await fetch(metaApi("/api/widget/conversations"),{headers:authHeaders(token)});
       const result=await response.json() as {conversations?:WidgetConversationSummary[];error?:string};
       if(!response.ok)throw new Error(result.error||"Could not load web chat conversations.");
       setConversations(result.conversations||[]);
-    }catch(error){notify(error instanceof Error?error.message:"Could not load web chat conversations.")}
-    finally{setLoading(false)}
+    }catch(error){if(!silent)notify(error instanceof Error?error.message:"Could not load web chat conversations.")}
+    finally{if(!silent)setLoading(false)}
   };
   useEffect(()=>{load()},[token]);
-  const loadMessages=()=>{
+  const loadMessages=(silent?:boolean)=>{
     if(!selectedSessionId||!token){setMessages([]);return}
-    setLoadingMessages(true);
+    if(!silent)setLoadingMessages(true);
     fetch(metaApi(`/api/widget/messages?sessionId=${encodeURIComponent(selectedSessionId)}`),{headers:authHeaders(token)})
       .then(r=>r.json())
       .then((data:{messages?:WidgetMessage[];aiActive?:boolean})=>{setMessages(data.messages||[]);setAiActiveState(data.aiActive??true)})
-      .catch(()=>notify("Could not load that conversation."))
-      .finally(()=>setLoadingMessages(false));
+      .catch(()=>{if(!silent)notify("Could not load that conversation.")})
+      .finally(()=>{if(!silent)setLoadingMessages(false)});
   };
-  useEffect(loadMessages,[selectedSessionId,token]);
+  useEffect(()=>loadMessages(),[selectedSessionId,token]);
+  // Poll for new visitor/agent messages and new conversations while this page is open,
+  // so replies show up automatically instead of needing a manual refresh.
+  useEffect(()=>{
+    if(!token)return;
+    const interval=window.setInterval(()=>{
+      load(true);
+      loadMessages(true);
+    },4000);
+    return()=>window.clearInterval(interval);
+  },[token,selectedSessionId]);
   const selected=conversations.find(c=>c.sessionId===selectedSessionId);
   const toggleTakeover=async()=>{
     if(!selectedSessionId)return;
@@ -768,9 +778,9 @@ function WebChatInbox({notify}:{notify:(s:string)=>void}){
     }catch{notify("Could not send that reply.")}
     finally{setSendingReply(false)}
   };
-  return <><PageHeader title="Web chat conversations" description="Real visitor conversations from your website chat widget. Take over any conversation to reply as a human instead of the AI." action={<button className="secondary-btn" onClick={load}>↻ Refresh</button>}/>
+  return <><PageHeader title="Web chat conversations" description="Real visitor conversations from your website chat widget. Take over any conversation to reply as a human instead of the AI." action={<button className="secondary-btn" onClick={()=>load()}>↻ Refresh</button>}/>
   {loading?<p className="empty-hint">Loading…</p>:!conversations.length?<div className="empty-state"><span>◌</span><h3>No web chat conversations yet</h3><p>When a visitor uses your website's chat widget, the conversation will appear here automatically.</p></div>:
-  <div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><strong>{conversations.length} conversation{conversations.length===1?"":"s"}</strong></div><div className="conversation-list">{conversations.map(c=><button key={c.sessionId} className={c.sessionId===selectedSessionId?"selected":""} onClick={()=>setSelectedSessionId(c.sessionId)}><span className="contact-avatar blue">◌<i/></span><div><strong>Website visitor</strong><small>{c.lastMessage.slice(0,60)}</small></div><span className="conv-meta"><small>{new Date(c.lastAt).toLocaleString()}</small>{!c.aiActive&&<b>You</b>}</span></button>)}</div></aside><section className="chat-panel">{selected?<><div className="chat-head"><div className="chat-person"><span className="contact-avatar blue">◌<i/></span><div><strong>Website visitor</strong><small>{selected.messageCount} messages</small></div></div><div className="ai-state"><span className={aiActive?"pulse":"pulse off"}>✦</span><div><strong>{aiActive?"AI is handling":"You're handling"}</strong><small>{aiActive?"Take over to reply yourself":"AI is paused for this visitor"}</small></div><button onClick={toggleTakeover}>{aiActive?"Take over":"Hand to AI"}</button></div></div><div className="chat-body tall"><div className="today">{new Date(selected.firstAt).toLocaleDateString()}</div>{loadingMessages?<p className="empty-hint">Loading…</p>:messages.map((m,i)=><div key={i} className={`message ${m.role==="user"?"customer":"ai"}`}><p>{m.content}</p><small>{m.role==="user"?"Visitor":m.role==="agent"?"You":"✦ Assistant"} • {new Date(m.createdAt).toLocaleTimeString()}</small></div>)}</div>{!aiActive&&<div className="composer"><div className="input-row"><input value={reply} onChange={e=>{setReply(e.target.value);pingTyping()}} onKeyDown={e=>e.key==="Enter"&&sendReply()} placeholder="Reply as yourself…" disabled={sendingReply}/><button className="send" disabled={sendingReply||!reply.trim()} onClick={sendReply}>➤</button></div></div>}</>:<div className="live-chat-placeholder">Select a conversation</div>}</section></div>}
+  <div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><strong>{conversations.length} conversation{conversations.length===1?"":"s"}</strong></div><div className="conversation-list">{conversations.map(c=><button key={c.sessionId} className={c.sessionId===selectedSessionId?"selected":""} onClick={()=>setSelectedSessionId(c.sessionId)}><span className="contact-avatar blue">◌<i/></span><div><strong>Website visitor</strong><small>{c.lastMessage.slice(0,60)}</small></div><span className="conv-meta"><small>{new Date(c.lastAt).toLocaleString()}</small>{!c.aiActive&&<b>You</b>}</span></button>)}</div></aside><section className="chat-panel">{selected?<><div className="chat-head"><div className="chat-person"><span className="contact-avatar blue">◌<i/></span><div><strong>Website visitor</strong><small>{selected.messageCount} messages</small></div></div><div className="ai-state"><span className={aiActive?"pulse":"pulse off"}>✦</span><div><strong>{aiActive?"AI is handling":"You're handling"}</strong><small>{aiActive?"Take over to reply yourself":"AI is paused for this visitor"}</small></div><button onClick={toggleTakeover}>{aiActive?"Take over":"Hand to AI"}</button></div></div><div className="chat-body tall"><div className="today">{new Date(selected.firstAt).toLocaleDateString()}</div>{loadingMessages?<p className="empty-hint">Loading…</p>:messages.map((m,i)=>m.role==="system"?<div key={i} className="today">{m.content}</div>:<div key={i} className={`message ${m.role==="user"?"customer":"ai"}`}><p>{m.content}</p><small>{m.role==="user"?"Visitor":m.role==="agent"?"You":"✦ Assistant"} • {new Date(m.createdAt).toLocaleTimeString()}</small></div>)}</div>{!aiActive&&<div className="composer"><div className="input-row"><input value={reply} onChange={e=>{setReply(e.target.value);pingTyping()}} onKeyDown={e=>e.key==="Enter"&&sendReply()} placeholder="Reply as yourself…" disabled={sendingReply}/><button className="send" disabled={sendingReply||!reply.trim()} onClick={sendReply}>➤</button></div></div>}</>:<div className="live-chat-placeholder">Select a conversation</div>}</section></div>}
   </>;
 }
 

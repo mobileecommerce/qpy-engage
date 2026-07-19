@@ -31,20 +31,24 @@
     return "Q";
   }
 
-  function render(appearance) {
+  function render(appearance, assistantName, welcome) {
     var color = (appearance && appearance.color) || "#4c50ee";
     var placement = appearance && appearance.placement === "left" ? "left" : "right";
     var effect = (appearance && appearance.effect) || "none";
+    var name = assistantName || "AI assistant";
+    var greeting = welcome || "Hi! How can I help today?";
 
     var root = document.createElement("div");
     root.id = "qpy-engage-widget";
     if (placement === "left") root.className = "qpy-left";
-    root.innerHTML = '<button aria-label="Open customer chat" class="qpy-launch effect-' + effect + '">' + launcherContent(appearance) + '</button><section class="qpy-panel" hidden><header><strong>Chat with us</strong><small>AI assistant</small><button aria-label="Close chat">×</button></header><main><p class="qpy-ai">Hi! How can I help today?</p></main><form><input aria-label="Message" placeholder="Type a message…"><button aria-label="Send message">➤</button></form></section>';
+    root.innerHTML = '<button aria-label="Open customer chat" class="qpy-launch effect-' + effect + '">' + launcherContent(appearance) + '</button><section class="qpy-panel" hidden><header><strong></strong><small>AI assistant</small><button aria-label="Close chat">×</button></header><main><p class="qpy-ai"></p></main><form><input aria-label="Message" placeholder="Type a message…"><button aria-label="Send message">➤</button></form></section>';
+    root.querySelector("header strong").textContent = name;
+    root.querySelector("main p").textContent = greeting;
     root.style.setProperty("--qpy-color", color);
     root.style.setProperty("--qpy-glow", hexToRgba(color, 0.45));
 
     var style = document.createElement("style");
-    style.textContent = "#qpy-engage-widget{position:fixed;right:22px;bottom:22px;z-index:2147483647;font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#20232b}#qpy-engage-widget.qpy-left{right:auto;left:22px}.qpy-launch{width:54px;height:54px;border:0;border-radius:50%;background:var(--qpy-color,#4c50ee);color:#fff;font-size:20px;font-weight:800;box-shadow:0 10px 30px #0003;display:grid;place-items:center}.qpy-launch[hidden]{display:none}.qpy-launch img{width:28px;height:28px;border-radius:50%;object-fit:cover}.qpy-launch.effect-pulse{animation:qpy-pulse 2.2s infinite}.qpy-launch.effect-bounce{animation:qpy-bounce 2.6s infinite}@keyframes qpy-pulse{0%,100%{box-shadow:0 10px 30px #0003,0 0 0 0 var(--qpy-glow,rgba(76,80,238,.45))}50%{box-shadow:0 10px 30px #0003,0 0 0 14px rgba(0,0,0,0)}}@keyframes qpy-bounce{0%,20%,50%,80%,100%{transform:translateY(0)}40%{transform:translateY(-10px)}60%{transform:translateY(-5px)}}.qpy-panel{position:absolute;right:0;bottom:66px;width:min(340px,calc(100vw - 28px));height:440px;background:#fff;border:1px solid #e1e3e8;border-radius:16px;box-shadow:0 18px 60px #0003;overflow:hidden;display:flex;flex-direction:column}.qpy-panel[hidden]{display:none}#qpy-engage-widget.qpy-left .qpy-panel{right:auto;left:0}.qpy-panel header{height:60px;padding:0 15px;background:#171923;color:#fff;display:grid;grid-template-columns:1fr auto;align-content:center;flex:none}.qpy-panel header small{grid-column:1;color:#b9bec8;font-size:11px}.qpy-panel header button{grid-column:2;grid-row:1/3;border:0;background:transparent;color:#fff;font-size:24px}.qpy-panel main{flex:1;padding:14px;background:#f5f6f8;overflow:auto}.qpy-panel main p{max-width:78%;padding:9px 11px;border-radius:10px;line-height:1.45;margin:7px 0}.qpy-ai{background:#fff}.qpy-user{background:var(--qpy-color,#4c50ee);color:#fff;margin-left:auto!important}.qpy-typing{display:flex;gap:4px;padding:12px 14px!important}.qpy-typing span{width:6px;height:6px;border-radius:50%;background:#9aa1af;animation:qpy-typing-bounce 1.2s infinite}.qpy-typing span:nth-child(2){animation-delay:.2s}.qpy-typing span:nth-child(3){animation-delay:.4s}@keyframes qpy-typing-bounce{0%,60%,100%{transform:translateY(0);opacity:.5}30%{transform:translateY(-4px);opacity:1}}.qpy-panel form{height:64px;display:flex;gap:7px;padding:10px;border-top:1px solid #e1e3e8;flex:none}.qpy-panel input{flex:1;min-width:0;border:1px solid #d9dce3;border-radius:8px;padding:0 10px}.qpy-panel form button{width:42px;border:0;border-radius:8px;background:var(--qpy-color,#4c50ee);color:#fff}.qpy-panel form button:disabled{opacity:.5}";
+    style.textContent = "#qpy-engage-widget{position:fixed;right:22px;bottom:22px;z-index:2147483647;font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#20232b}#qpy-engage-widget.qpy-left{right:auto;left:22px}.qpy-launch{width:54px;height:54px;border:0;border-radius:50%;background:var(--qpy-color,#4c50ee);color:#fff;font-size:20px;font-weight:800;box-shadow:0 10px 30px #0003;display:grid;place-items:center}.qpy-launch[hidden]{display:none}.qpy-launch img{width:28px;height:28px;border-radius:50%;object-fit:cover}.qpy-launch.effect-pulse{animation:qpy-pulse 2.2s infinite}.qpy-launch.effect-bounce{animation:qpy-bounce 2.6s infinite}@keyframes qpy-pulse{0%,100%{box-shadow:0 10px 30px #0003,0 0 0 0 var(--qpy-glow,rgba(76,80,238,.45))}50%{box-shadow:0 10px 30px #0003,0 0 0 14px rgba(0,0,0,0)}}@keyframes qpy-bounce{0%,20%,50%,80%,100%{transform:translateY(0)}40%{transform:translateY(-10px)}60%{transform:translateY(-5px)}}.qpy-panel{position:absolute;right:0;bottom:66px;width:min(340px,calc(100vw - 28px));height:440px;background:#fff;border:1px solid #e1e3e8;border-radius:16px;box-shadow:0 18px 60px #0003;overflow:hidden;display:flex;flex-direction:column}.qpy-panel[hidden]{display:none}#qpy-engage-widget.qpy-left .qpy-panel{right:auto;left:0}.qpy-panel header{height:60px;padding:0 15px;background:#171923;color:#fff;display:grid;grid-template-columns:1fr auto;align-content:center;flex:none}.qpy-panel header strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.qpy-panel header small{grid-column:1;color:#b9bec8;font-size:11px}.qpy-panel header button{grid-column:2;grid-row:1/3;border:0;background:transparent;color:#fff;font-size:24px}.qpy-panel main{flex:1;padding:14px;background:#f5f6f8;overflow:auto}.qpy-panel main p{max-width:78%;padding:9px 11px;border-radius:10px;line-height:1.45;margin:7px 0}.qpy-ai{background:#fff}.qpy-user{background:var(--qpy-color,#4c50ee);color:#fff;margin-left:auto!important}.qpy-system{background:transparent!important;color:#8d94a1;font-size:11px;text-align:center;max-width:100%!important;margin:4px auto!important}.qpy-typing{display:flex;align-items:center;gap:6px;padding:9px 11px!important}.qpy-typing em{font-style:normal;font-size:11px;color:#69707e}.qpy-typing span{width:6px;height:6px;border-radius:50%;background:#9aa1af;animation:qpy-typing-bounce 1.2s infinite;flex:none}.qpy-typing span:nth-child(3){animation-delay:.2s}.qpy-typing span:nth-child(4){animation-delay:.4s}@keyframes qpy-typing-bounce{0%,60%,100%{transform:translateY(0);opacity:.5}30%{transform:translateY(-4px);opacity:1}}.qpy-panel form{height:64px;display:flex;gap:7px;padding:10px;border-top:1px solid #e1e3e8;flex:none}.qpy-panel input{flex:1;min-width:0;border:1px solid #d9dce3;border-radius:8px;padding:0 10px}.qpy-panel form button{width:42px;border:0;border-radius:8px;background:var(--qpy-color,#4c50ee);color:#fff}.qpy-panel form button:disabled{opacity:.5}";
     document.head.appendChild(style);
     document.body.appendChild(root);
 
@@ -59,15 +63,18 @@
     var lastSeenAt = "";
     var pollTimer = null;
     var typingEl = null;
+    var awaitingAiReply = false;
 
     function hideTyping() {
       if (typingEl) { typingEl.remove(); typingEl = null; }
     }
 
-    function showTyping() {
-      if (typingEl) return;
-      messages.insertAdjacentHTML("beforeend", '<p class="qpy-ai qpy-typing"><span></span><span></span><span></span></p>');
-      typingEl = messages.lastElementChild;
+    function showTyping(label) {
+      if (!typingEl) {
+        messages.insertAdjacentHTML("beforeend", '<p class="qpy-ai qpy-typing"><em></em><span></span><span></span><span></span></p>');
+        typingEl = messages.lastElementChild;
+      }
+      typingEl.querySelector("em").textContent = label;
       messages.scrollTop = messages.scrollHeight;
     }
 
@@ -85,11 +92,14 @@
       fetch(url).then(function (response) { return response.ok ? response.json() : { messages: [], typing: false }; })
         .then(function (data) {
           (data.messages || []).forEach(function (m) {
-            appendMessage("qpy-ai", m.content);
-            history.push({ role: m.role === "user" ? "user" : "assistant", content: m.content });
+            appendMessage(m.role === "system" ? "qpy-system" : "qpy-ai", m.content);
+            if (m.role !== "system") history.push({ role: m.role === "user" ? "user" : "assistant", content: m.content });
             lastSeenAt = m.createdAt;
           });
-          if (data.typing) showTyping(); else hideTyping();
+          if (data.typing) showTyping("Agent is typing…");
+          // Don't clear the indicator here if we're still waiting on the AI's own reply —
+          // that belongs to the in-flight request below, not this unrelated poll tick.
+          else if (!awaitingAiReply) hideTyping();
         })
         .catch(function () {});
     }
@@ -114,7 +124,8 @@
       input.disabled = true;
       sendButton.disabled = true;
       startPolling();
-      showTyping();
+      awaitingAiReply = true;
+      showTyping(name + " is typing…");
       fetch(API_ORIGIN + "/api/widget/respond", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -122,6 +133,7 @@
       })
         .then(function (response) { return response.json().then(function (data) { return { ok: response.ok, data: data }; }); })
         .then(function (result) {
+          awaitingAiReply = false;
           hideTyping();
           history.push({ role: "user", content: text });
           if (result.data && result.data.serverTime) lastSeenAt = result.data.serverTime;
@@ -134,6 +146,7 @@
           appendMessage("qpy-ai", answer);
         })
         .catch(function () {
+          awaitingAiReply = false;
           hideTyping();
           appendMessage("qpy-ai", "Sorry, I couldn't reach support chat right now. Please try again shortly.");
         })
@@ -144,6 +157,6 @@
   if (!workspaceId) { render(null); return; }
   fetch(API_ORIGIN + "/api/widget/config?workspaceId=" + encodeURIComponent(workspaceId))
     .then(function (response) { return response.ok ? response.json() : { appearance: null }; })
-    .then(function (data) { render(data && data.appearance); })
+    .then(function (data) { render(data && data.appearance, data && data.assistantName, data && data.welcome); })
     .catch(function () { render(null); });
 })();

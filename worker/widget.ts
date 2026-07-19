@@ -188,7 +188,8 @@ async function getConfig(request: Request, env: WidgetEnv): Promise<Response> {
   const workspace = await env.DB.prepare("SELECT id FROM workspaces WHERE id = ?").bind(workspaceId).first();
   if (!workspace) return widgetJson({ error: "Unknown workspace." }, 404);
   const appearance = await readWorkspaceState(env.DB, workspaceId, "qpy-engage-widget-appearance");
-  return widgetJson({ appearance: appearance || null });
+  const config = await readWorkspaceState<{ name?: string; welcome?: string }>(env.DB, workspaceId, "qpy-engage-assistant-config-v2");
+  return widgetJson({ appearance: appearance || null, assistantName: config?.name || null, welcome: config?.welcome || null });
 }
 
 async function listConversations(request: Request, env: WidgetEnv): Promise<Response> {
@@ -243,6 +244,11 @@ async function setTakeover(request: Request, env: WidgetEnv): Promise<Response> 
   await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, ai_active) VALUES (?, ?, ?)
     ON CONFLICT(workspace_id, session_id) DO UPDATE SET ai_active = excluded.ai_active`)
     .bind(session.workspaceId, sessionId, body.active ? 1 : 0).run();
+
+  const notice = body.active ? "You're now chatting with our AI assistant again." : "You've been connected with a team member.";
+  await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content) VALUES (?, ?, 'system', ?)`)
+    .bind(session.workspaceId, sessionId, notice).run();
+
   return json(request, { ok: true, aiActive: Boolean(body.active) });
 }
 
