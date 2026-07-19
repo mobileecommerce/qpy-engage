@@ -12,13 +12,14 @@ async function respond(request: Request, env: AssistantEnv): Promise<Response> {
   if (session instanceof Response) return session;
   if (!env.ANTHROPIC_API_KEY) return json(request, { error: "The AI assistant isn't configured yet. Add ANTHROPIC_API_KEY as a Cloudflare Worker secret." }, 503);
 
-  const body = await request.json() as { systemPrompt?: string; messages?: unknown; actions?: unknown; channel?: unknown };
+  const body = await request.json() as { systemPrompt?: string; messages?: unknown; actions?: unknown; channel?: unknown; sessionId?: unknown };
   const messages = sanitizeChatMessages(body.messages);
   if (!messages.length) return json(request, { error: "No message to respond to." }, 400);
   if (messages[messages.length - 1].role !== "user") return json(request, { error: "The last message must be from the customer." }, 400);
   const actions = sanitizeActions(body.actions);
   const channel = typeof body.channel === "string" && body.channel.trim() ? body.channel.trim().slice(0, 40) : "assistant_test";
-  const recordSubmission = env.DB ? (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, session.workspaceId, actionName, channel, data) : undefined;
+  const sessionId = typeof body.sessionId === "string" ? body.sessionId.slice(0, 80) : "";
+  const recordSubmission = env.DB ? (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, session.workspaceId, sessionId, actionName, channel, data) : undefined;
 
   const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, body.systemPrompt || "", messages, actions, recordSubmission);
   if (result.error) return json(request, { error: result.error }, result.status || 502);

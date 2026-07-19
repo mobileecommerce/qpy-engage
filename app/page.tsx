@@ -140,12 +140,12 @@ function useWorkspaceMembers(token: string | null) {
   return { members, invite, updateRole, remove };
 }
 
-async function callAssistant(token: string | null, systemPrompt: string, messages: {role:"user"|"assistant";content:string}[], actions?: AssistantAction[], channel?: string): Promise<string> {
+async function callAssistant(token: string | null, systemPrompt: string, messages: {role:"user"|"assistant";content:string}[], actions?: AssistantAction[], channel?: string, sessionId?: string): Promise<string> {
   if (!token) throw new Error("Sign in required.");
   const response = await fetch(metaApi("/api/assistant/respond"), {
     method: "POST",
     headers: { "content-type": "application/json", ...authHeaders(token) },
-    body: JSON.stringify({ systemPrompt, messages, actions: (actions || []).filter((a) => a.enabled), channel }),
+    body: JSON.stringify({ systemPrompt, messages, actions: (actions || []).filter((a) => a.enabled), channel, sessionId }),
   });
   const result = await response.json() as { reply?: string; error?: string };
   if (!response.ok || !result.reply) throw new Error(result.error || "The assistant could not respond.");
@@ -385,6 +385,8 @@ function Assistants({sources,workspaceName,onKnowledge,onChannels,onAnalytics,no
   const token=useAuthToken();
   const callActiveRef=useRef(false);
   const recognitionRef=useRef<SpeechRecognitionLike|null>(null);
+  const chatSessionIdRef=useRef<string>(crypto.randomUUID());
+  const voiceSessionIdRef=useRef<string>(crypto.randomUUID());
   const [knowledgeContent,setKnowledgeContent]=useState<Record<number,string>>({});
   useEffect(()=>{
     if(!token||!selectedSources.length){setKnowledgeContent({});return}
@@ -440,7 +442,7 @@ function Assistants({sources,workspaceName,onKnowledge,onChannels,onAnalytics,no
     const history=[...testMessages,{from:"customer" as const,text:question,time:"Now"}];
     setTestMessages(history);setTestDraft("");setTestSending(true);
     try{
-      const reply=await callAssistant(token,buildSystemPrompt(),toApiMessages(history),actions,"test_studio_chat");
+      const reply=await callAssistant(token,buildSystemPrompt(),toApiMessages(history),actions,"test_studio_chat",chatSessionIdRef.current);
       setTestMessages(current=>[...current,{from:"ai",text:reply,time:"Now"}]);
     }catch(error){notify(error instanceof Error?error.message:"The assistant could not respond.")}
     finally{setTestSending(false)}
@@ -520,7 +522,7 @@ function Assistants({sources,workspaceName,onKnowledge,onChannels,onAnalytics,no
     setVoiceTranscript(history);
     setVoiceStatus("thinking");
     try{
-      const reply=await callAssistant(token,buildSystemPrompt(),toApiMessages(history),actions,"test_studio_voice");
+      const reply=await callAssistant(token,buildSystemPrompt(),toApiMessages(history),actions,"test_studio_voice",voiceSessionIdRef.current);
       setVoiceTranscript(current=>[...current,{from:"ai",text:reply,time:"Now"}]);
       speak(reply,()=>{if(callActiveRef.current)listenOnce()});
     }catch(error){
@@ -530,6 +532,7 @@ function Assistants({sources,workspaceName,onKnowledge,onChannels,onAnalytics,no
   };
   const startCall=()=>{
     callActiveRef.current=true;
+    voiceSessionIdRef.current=crypto.randomUUID();
     setVoiceTranscript([]);
     setCallState("connecting");
     const maxDurationMinutes=parseInt(voice.maxDuration,10)||15;
@@ -738,7 +741,7 @@ function Campaigns({notify}:{notify:(s:string)=>void}){
 const automationTemplates:{name:string;trigger:string;action:string}[]=[{name:"Welcome new leads",trigger:"New WhatsApp conversation",action:"Send AI welcome message"},{name:"Recover abandoned carts",trigger:"Cart idle for 2 hours",action:"Send recovery template"},{name:"Collect customer feedback",trigger:"Conversation marked resolved",action:"Request feedback survey"}];
 function Automations({items,setItems,onCreate,notify}:{items:Automation[];setItems:(v:Automation[])=>void;onCreate:(template?:{name:string;trigger:string;action:string})=>void;notify:(s:string)=>void}){const [query,setQuery]=useState("");const duplicate=(item:Automation)=>{setItems([...items,{...item,id:Date.now(),title:`${item.title} copy`,runs:0,rate:"New",active:false}]);notify("Automation duplicated")};const remove=(id:number)=>{if(window.confirm("Delete this automation?")){setItems(items.filter(i=>i.id!==id));notify("Automation deleted")}};return <><PageHeader title="Automations" description="Build always-on workflows for sales and support." action={<button className="primary" onClick={()=>onCreate()}>＋ Create automation</button>}/><div className="toolbar"><input placeholder="Search automations" value={query} onChange={e=>setQuery(e.target.value)}/><span>{items.filter(i=>i.active).length} active workflows</span></div><div className="data-card"><table><thead><tr><th>Automation</th><th>Trigger</th><th>Action</th><th>Runs</th><th>Performance</th><th>Status</th><th/></tr></thead><tbody>{items.filter(i=>i.title.toLowerCase().includes(query.toLowerCase())).map(item=><tr key={item.id}><td><div className="table-title"><span>✦</span><strong>{item.title}</strong></div></td><td>{item.trigger}</td><td>{item.action}</td><td>{item.runs}</td><td><b className="positive">{item.rate}</b></td><td><button className={`toggle ${item.active?"on":""}`} onClick={()=>setItems(items.map(a=>a.id===item.id?{...a,active:!a.active}:a))}><i/></button></td><td><div className="row-actions"><button title="Duplicate" onClick={()=>duplicate(item)}>⧉</button><button title="Delete" onClick={()=>remove(item.id)}>×</button></div></td></tr>)}</tbody></table></div><div className="template-strip"><div><h3>Start from a proven template</h3><p>Launch common WhatsApp workflows in minutes.</p></div>{automationTemplates.map(t=><button key={t.name} onClick={()=>onCreate(t)}><span>＋</span>{t.name}</button>)}</div></>}
 
-type Submission={id:number;actionName:string;channel:string;data:Record<string,unknown>;createdAt:string};
+type Submission={id:number;actionName:string;channel:string;data:Record<string,unknown>;createdAt:string;updatedAt:string};
 const channelLabel=(channel:string)=>({test_studio_chat:"Test Studio (chat)",test_studio_voice:"Test Studio (voice)",widget:"Web chat widget"} as Record<string,string>)[channel]||channel;
 
 function Leads({notify}:{notify:(s:string)=>void}){
@@ -777,7 +780,7 @@ function Leads({notify}:{notify:(s:string)=>void}){
   };
   return <><PageHeader title="Captured leads" description="Data your AI actions have collected from real conversations, saved automatically." action={<div className="header-buttons"><button className="secondary-btn" onClick={load}>↻ Refresh</button><button className="primary" disabled={!submissions.length} onClick={exportCsv}>↓ Export CSV</button></div>}/>
   {loading?<p className="empty-hint">Loading…</p>:!submissions.length?<div className="empty-state"><span>⚑</span><h3>No captured leads yet</h3><p>When a customer gives details to an AI action (like a callback request), it's saved here automatically — from Test Studio and your public web chat widget. This is a local copy kept even if the action's own webhook fails.</p></div>:
-  <div className="data-card"><table><thead><tr><th>Captured</th><th>Action</th><th>Channel</th><th>Details</th><th/></tr></thead><tbody>{submissions.map(s=><tr key={s.id}><td>{new Date(s.createdAt).toLocaleString()}</td><td><strong>{s.actionName}</strong></td><td>{channelLabel(s.channel)}</td><td>{Object.entries(s.data).map(([k,v])=><div key={k}><small>{k}:</small> {String(v)}</div>)}</td><td><button className="dots" onClick={()=>remove(s.id)}>Delete</button></td></tr>)}</tbody></table></div>}
+  <div className="data-card"><table><thead><tr><th>Captured</th><th>Action</th><th>Channel</th><th>Details</th><th/></tr></thead><tbody>{submissions.map(s=><tr key={s.id}><td>{new Date(s.createdAt).toLocaleString()}{s.updatedAt&&s.updatedAt!==s.createdAt&&<small><br/>Updated {new Date(s.updatedAt).toLocaleString()}</small>}</td><td><strong>{s.actionName}</strong></td><td>{channelLabel(s.channel)}</td><td>{Object.entries(s.data).map(([k,v])=><div key={k}><small>{k}:</small> {String(v)}</div>)}</td><td><button className="dots" onClick={()=>remove(s.id)}>Delete</button></td></tr>)}</tbody></table></div>}
   </>;
 }
 

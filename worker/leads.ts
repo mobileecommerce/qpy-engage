@@ -12,30 +12,53 @@ async function ensureLeadsSchema(db: D1Database): Promise<void> {
   await db.prepare(`CREATE TABLE IF NOT EXISTS action_submissions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     workspace_id TEXT NOT NULL,
+    session_id TEXT NOT NULL DEFAULT '',
     action_name TEXT NOT NULL,
     channel TEXT NOT NULL,
     data TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`).run();
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_action_submissions_workspace ON action_submissions (workspace_id, created_at DESC)`).run();
+  // Idempotent migration for tables created before session_id/updated_at existed.
+  try { await db.prepare(`ALTER TABLE action_submissions ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
+  try { await db.prepare(`ALTER TABLE action_submissions ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP`).run(); } catch { /* already exists */ }
 }
 
-export async function saveSubmission(db: D1Database, workspaceId: string, actionName: string, channel: string, data: Record<string, unknown>): Promise<void> {
+export async function saveSubmission(db: D1Database, workspaceId: string, sessionId: string, actionName: string, channel: string, data: Record<string, unknown>): Promise<void> {
   await ensureLeadsSchema(db);
-  await db.prepare(`INSERT INTO action_submissions (workspace_id, action_name, channel, data) VALUES (?, ?, ?, ?)`)
-    .bind(workspaceId, actionName.slice(0, 80), channel.slice(0, 40), JSON.stringify(data).slice(0, MAX_DATA_LENGTH)).run();
+  const trimmedSession = (sessionId || "").slice(0, 80);
+  const trimmedAction = actionName.slice(0, 80);
+
+  // Within the same conversation, later captures merge into the same lead instead of
+  // creating a duplicate row — a customer sharing their name after already sharing a phone
+  // number should update one record, not create a second, partial one.
+  if (trimmedSession) {
+    const existing = await db.prepare(`SELECT id, data FROM action_submissions WHERE workspace_id = ? AND session_id = ? AND action_name = ?`)
+      .bind(workspaceId, trimmedSession, trimmedAction).first<{ id: number; data: string }>();
+    if (existing) {
+      let merged = data;
+      try { merged = { ...JSON.parse(existing.data), ...data }; } catch { /* keep just the new data */ }
+      await db.prepare(`UPDATE action_submissions SET data = ?, channel = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+        .bind(JSON.stringify(merged).slice(0, MAX_DATA_LENGTH), channel.slice(0, 40), existing.id).run();
+      return;
+    }
+  }
+
+  await db.prepare(`INSERT INTO action_submissions (workspace_id, session_id, action_name, channel, data) VALUES (?, ?, ?, ?, ?)`)
+    .bind(workspaceId, trimmedSession, trimmedAction, channel.slice(0, 40), JSON.stringify(data).slice(0, MAX_DATA_LENGTH)).run();
 }
 
 async function listSubmissions(request: Request, env: LeadsEnv): Promise<Response> {
   const session = await requireSession(request, env);
   if (session instanceof Response) return session;
   await ensureLeadsSchema(env.DB);
-  const result = await env.DB.prepare(`SELECT id, action_name, channel, data, created_at FROM action_submissions WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?`)
-    .bind(session.workspaceId, LIST_LIMIT).all<{ id: number; action_name: string; channel: string; data: string; created_at: string }>();
+  const result = await env.DB.prepare(`SELECT id, action_name, channel, data, created_at, updated_at FROM action_submissions WHERE workspace_id = ? ORDER BY updated_at DESC LIMIT ?`)
+    .bind(session.workspaceId, LIST_LIMIT).all<{ id: number; action_name: string; channel: string; data: string; created_at: string; updated_at: string }>();
   const submissions = (result.results || []).map((row) => {
     let data: Record<string, unknown> = {};
     try { data = JSON.parse(row.data); } catch { /* leave empty */ }
-    return { id: row.id, actionName: row.action_name, channel: row.channel, data, createdAt: row.created_at };
+    return { id: row.id, actionName: row.action_name, channel: row.channel, data, createdAt: row.created_at, updatedAt: row.updated_at };
   });
   return json(request, { submissions });
 }

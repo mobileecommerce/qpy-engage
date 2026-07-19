@@ -75,8 +75,9 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   if (!env.DB) return widgetJson({ error: "Workspace database is unavailable." }, 503);
   if (!env.ANTHROPIC_API_KEY) return widgetJson({ error: "This chat isn't configured yet." }, 503);
 
-  const body = await request.json() as { workspaceId?: string; message?: string; history?: unknown };
+  const body = await request.json() as { workspaceId?: string; message?: string; history?: unknown; sessionId?: string };
   const workspaceId = (body.workspaceId || "").trim();
+  const sessionId = (body.sessionId || "").trim().slice(0, 80);
   if (!workspaceId) return widgetJson({ error: "Missing workspace id." }, 400);
 
   const workspace = await env.DB.prepare("SELECT id FROM workspaces WHERE id = ?").bind(workspaceId).first();
@@ -93,7 +94,7 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   const systemPrompt = await buildSystemPrompt(env.DB, workspaceId);
   const storedActions = await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions");
   const actions = sanitizeActions(storedActions || []);
-  const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, actionName, "widget", data);
+  const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
   const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, messages, actions, recordSubmission);
   if (result.error) return widgetJson({ error: result.error }, result.status || 502);
   return widgetJson({ reply: result.reply });
