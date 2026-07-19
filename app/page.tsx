@@ -713,6 +713,7 @@ function EmptyInbox({onConnect}:{onConnect:()=>void}){
 
 type WidgetConversationSummary={sessionId:string;messageCount:number;lastMessage:string;lastRole:string;firstAt:string;lastAt:string;aiActive:boolean;customerName?:string|null};
 type WidgetMessage={role:string;content:string;createdAt:string};
+type WidgetNote={authorName:string;note:string;createdAt:string};
 
 function WebChatInbox({notify}:{notify:(s:string)=>void}){
   const token=useAuthToken();
@@ -724,6 +725,9 @@ function WebChatInbox({notify}:{notify:(s:string)=>void}){
   const [loadingMessages,setLoadingMessages]=useState(false);
   const [reply,setReply]=useState("");
   const [sendingReply,setSendingReply]=useState(false);
+  const [notes,setNotes]=useState<WidgetNote[]>([]);
+  const [noteDraft,setNoteDraft]=useState("");
+  const [savingNote,setSavingNote]=useState(false);
   const lastTypingPingRef=useRef(0);
   const pingTyping=()=>{
     if(!selectedSessionId||!token)return;
@@ -754,6 +758,25 @@ function WebChatInbox({notify}:{notify:(s:string)=>void}){
       .finally(()=>{if(!silent)setLoadingMessages(false)});
   };
   useEffect(()=>loadMessages(),[selectedSessionId,token]);
+  const loadNotes=()=>{
+    if(!selectedSessionId||!token){setNotes([]);return}
+    fetch(metaApi(`/api/widget/notes?sessionId=${encodeURIComponent(selectedSessionId)}`),{headers:authHeaders(token)})
+      .then(r=>r.json())
+      .then((data:{notes?:WidgetNote[]})=>setNotes(data.notes||[]))
+      .catch(()=>{});
+  };
+  useEffect(()=>loadNotes(),[selectedSessionId,token]);
+  const addNote=async()=>{
+    if(!noteDraft.trim()||!selectedSessionId||savingNote)return;
+    setSavingNote(true);
+    try{
+      const response=await fetch(metaApi("/api/widget/notes"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({sessionId:selectedSessionId,note:noteDraft.trim()})});
+      if(!response.ok)throw new Error();
+      setNoteDraft("");
+      loadNotes();
+    }catch{notify("Could not save that note.")}
+    finally{setSavingNote(false)}
+  };
   // Poll for new visitor/agent messages and new conversations while this page is open,
   // so replies show up automatically instead of needing a manual refresh.
   useEffect(()=>{
@@ -789,7 +812,7 @@ function WebChatInbox({notify}:{notify:(s:string)=>void}){
   };
   return <><PageHeader title="Web chat conversations" description="Real visitor conversations from your website chat widget. Take over any conversation to reply as a human instead of the AI." action={<button className="secondary-btn" onClick={()=>load()}>↻ Refresh</button>}/>
   {loading?<p className="empty-hint">Loading…</p>:!conversations.length?<div className="empty-state"><span>◌</span><h3>No web chat conversations yet</h3><p>When a visitor uses your website's chat widget, the conversation will appear here automatically.</p></div>:
-  <div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><strong>{conversations.length} conversation{conversations.length===1?"":"s"}</strong></div><div className="conversation-list">{conversations.map(c=><button key={c.sessionId} className={c.sessionId===selectedSessionId?"selected":""} onClick={()=>setSelectedSessionId(c.sessionId)}><span className="contact-avatar blue">◌<i/></span><div><strong>{c.customerName||"Website visitor"}</strong><small>{c.lastMessage.slice(0,60)}</small></div><span className="conv-meta"><small>{new Date(c.lastAt).toLocaleString()}</small>{!c.aiActive&&<b>You</b>}</span></button>)}</div></aside><section className="chat-panel">{selected?<><div className="chat-head"><div className="chat-person"><span className="contact-avatar blue">◌<i/></span><div><strong>{selected.customerName||"Website visitor"}</strong><small>{selected.messageCount} messages</small></div></div><div className="ai-state"><span className={aiActive?"pulse":"pulse off"}>✦</span><div><strong>{aiActive?"AI is handling":"You're handling"}</strong><small>{aiActive?"Take over to reply yourself":"AI is paused for this visitor"}</small></div><button onClick={toggleTakeover}>{aiActive?"Take over":"Hand to AI"}</button></div></div><div className="chat-body tall"><div className="today">{new Date(selected.firstAt).toLocaleDateString()}</div>{loadingMessages?<p className="empty-hint">Loading…</p>:messages.map((m,i)=>m.role==="system"?<div key={i} className="today">{m.content}</div>:<div key={i} className={`message ${m.role==="user"?"customer":"ai"}`}><p>{m.content}</p><small>{m.role==="user"?"Visitor":m.role==="agent"?"You":"✦ Assistant"} • {new Date(m.createdAt).toLocaleTimeString()}</small></div>)}</div>{!aiActive&&<div className="composer"><div className="input-row"><input value={reply} onChange={e=>{setReply(e.target.value);pingTyping()}} onKeyDown={e=>e.key==="Enter"&&sendReply()} placeholder="Reply as yourself…" disabled={sendingReply}/><button className="send" disabled={sendingReply||!reply.trim()} onClick={sendReply}>➤</button></div></div>}</>:<div className="live-chat-placeholder">Select a conversation</div>}</section></div>}
+  <div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><strong>{conversations.length} conversation{conversations.length===1?"":"s"}</strong></div><div className="conversation-list">{conversations.map(c=><button key={c.sessionId} className={c.sessionId===selectedSessionId?"selected":""} onClick={()=>setSelectedSessionId(c.sessionId)}><span className="contact-avatar blue">◌<i/></span><div><strong>{c.customerName||"Website visitor"}</strong><small>{c.lastMessage.slice(0,60)}</small></div><span className="conv-meta"><small>{new Date(c.lastAt).toLocaleString()}</small>{!c.aiActive&&<b>You</b>}</span></button>)}</div></aside><section className="chat-panel">{selected?<><div className="chat-head"><div className="chat-person"><span className="contact-avatar blue">◌<i/></span><div><strong>{selected.customerName||"Website visitor"}</strong><small>{selected.messageCount} messages</small></div></div><div className="ai-state"><span className={aiActive?"pulse":"pulse off"}>✦</span><div><strong>{aiActive?"AI is handling":"You're handling"}</strong><small>{aiActive?"Take over to reply yourself":"AI is paused for this visitor"}</small></div><button onClick={toggleTakeover}>{aiActive?"Take over":"Hand to AI"}</button></div></div><div className="chat-body tall"><div className="today">{new Date(selected.firstAt).toLocaleDateString()}</div>{loadingMessages?<p className="empty-hint">Loading…</p>:messages.map((m,i)=>m.role==="system"?<div key={i} className="today">{m.content}</div>:<div key={i} className={`message ${m.role==="user"?"customer":"ai"}`}><p>{m.content}</p><small>{m.role==="user"?"Visitor":m.role==="agent"?"You":"✦ Assistant"} • {new Date(m.createdAt).toLocaleTimeString()}</small></div>)}</div>{!aiActive&&<div className="composer"><div className="input-row"><input value={reply} onChange={e=>{setReply(e.target.value);pingTyping()}} onKeyDown={e=>e.key==="Enter"&&sendReply()} placeholder="Reply as yourself…" disabled={sendingReply}/><button className="send" disabled={sendingReply||!reply.trim()} onClick={sendReply}>➤</button></div></div>}</>:<div className="live-chat-placeholder">Select a conversation</div>}</section>{selected&&<aside className="notes-panel"><h3>Internal notes</h3><small>Only your team can see these — the visitor never does.</small><div className="notes-list">{!notes.length?<p className="empty-hint">No notes yet</p>:notes.map((n,i)=><div key={i} className="note"><p>{n.note}</p><small>{n.authorName} • {new Date(n.createdAt).toLocaleString()}</small></div>)}</div><div className="note-composer"><textarea value={noteDraft} onChange={e=>setNoteDraft(e.target.value)} placeholder="Add a note for your team…" disabled={savingNote}/><button className="secondary-btn" disabled={savingNote||!noteDraft.trim()} onClick={addNote}>{savingNote?"Saving…":"Add note"}</button></div></aside>}</div>}
   </>;
 }
 

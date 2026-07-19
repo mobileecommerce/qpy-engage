@@ -73,6 +73,15 @@ async function ensureWidgetSchema(db: D1Database): Promise<void> {
     typing_until TEXT NOT NULL,
     PRIMARY KEY (workspace_id, session_id)
   )`).run();
+  await db.prepare(`CREATE TABLE IF NOT EXISTS widget_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    author_name TEXT NOT NULL,
+    note TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_widget_notes_session ON widget_notes (workspace_id, session_id, created_at)`).run();
 }
 
 async function isAgentTyping(db: D1Database, workspaceId: string, sessionId: string): Promise<boolean> {
@@ -412,6 +421,35 @@ async function sendAgentReply(request: Request, env: WidgetEnv): Promise<Respons
   return json(request, { ok: true });
 }
 
+const MAX_NOTE_LENGTH = 2000;
+
+async function listNotes(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const url = new URL(request.url);
+  const sessionId = (url.searchParams.get("sessionId") || "").trim();
+  if (!sessionId) return json(request, { error: "Missing sessionId." }, 400);
+  await ensureWidgetSchema(env.DB);
+  const result = await env.DB.prepare(`SELECT author_name, note, created_at FROM widget_notes WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC`)
+    .bind(session.workspaceId, sessionId).all<{ author_name: string; note: string; created_at: string }>();
+  return json(request, { notes: (result.results || []).map((r) => ({ authorName: r.author_name, note: r.note, createdAt: r.created_at })) });
+}
+
+async function addNote(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const body = await request.json() as { sessionId?: string; note?: string };
+  const sessionId = (body.sessionId || "").trim();
+  const note = (body.note || "").trim().slice(0, MAX_NOTE_LENGTH);
+  if (!sessionId) return json(request, { error: "Missing sessionId." }, 400);
+  if (!note) return json(request, { error: "Write a note before saving." }, 400);
+  await ensureWidgetSchema(env.DB);
+  const authorName = session.name || session.email;
+  await env.DB.prepare(`INSERT INTO widget_notes (workspace_id, session_id, author_name, note) VALUES (?, ?, ?, ?)`)
+    .bind(session.workspaceId, sessionId, authorName, note).run();
+  return json(request, { ok: true, authorName });
+}
+
 export async function handleWidgetRequest(request: Request, env: WidgetEnv): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/widget/")) return null;
@@ -435,5 +473,7 @@ export async function handleWidgetRequest(request: Request, env: WidgetEnv): Pro
   if (url.pathname === "/api/widget/takeover" && request.method === "POST") return setTakeover(request, env);
   if (url.pathname === "/api/widget/reply" && request.method === "POST") return sendAgentReply(request, env);
   if (url.pathname === "/api/widget/typing" && request.method === "POST") return setAgentTyping(request, env);
+  if (url.pathname === "/api/widget/notes" && request.method === "GET") return listNotes(request, env);
+  if (url.pathname === "/api/widget/notes" && request.method === "POST") return addNote(request, env);
   return json(request, { error: "Not found" }, 404);
 }

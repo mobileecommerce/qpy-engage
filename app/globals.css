@@ -85,4 +85,13 @@
 .widget-placement{margin-left:0}
 .conv-meta em{font-style:normal;font-size:7px;color:#9aa1af;background:#eceef2;border-radius:6px;padding:2px 6px}
 .all-conversation-list button{height:auto;padding:10px 14px}
+.notes-panel{border-left:1px solid var(--line);padding:16px;display:flex;flex-direction:column;min-height:0}
+.notes-panel h3{font-size:11px;margin:0 0 3px}
+.notes-panel>small{font-size:8px;color:#9097a4;margin-bottom:12px}
+.notes-list{flex:1;overflow:auto;display:flex;flex-direction:column;gap:8px;margin-bottom:10px}
+.note{background:#fdf6e3;border:1px solid #f0e4b8;border-radius:7px;padding:8px 9px}
+.note p{margin:0 0 5px;font-size:9px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.note small{font-size:7px;color:#9a8f66}
+.note-composer{display:flex;flex-direction:column;gap:6px}
+.note-composer textarea{resize:vertical;min-height:52px;border:1px solid #dfe2e8;border-radius:7px;padding:7px 8px;font:inherit;font-size:9px}
 .auth-loading{min-height:100vh;display:grid;place-items:center;color:var(--muted);font-size:12px}
