@@ -3,10 +3,14 @@ import { json, corsPreflight, allowedOrigin } from "./shared";
 
 export interface KnowledgeEnv extends AuthEnv {
   DB: D1Database;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  CLOUDFLARE_BROWSER_RENDERING_TOKEN?: string;
 }
 
 const MAX_CONTENT_LENGTH = 20000;
 const FETCH_TIMEOUT_MS = 10000;
+const RENDER_TIMEOUT_MS = 20000;
+const MIN_RAW_BODY_LENGTH = 300;
 
 async function ensureKnowledgeSchema(db: D1Database): Promise<void> {
   await db.prepare(`CREATE TABLE IF NOT EXISTS knowledge_content (
@@ -20,15 +24,7 @@ async function ensureKnowledgeSchema(db: D1Database): Promise<void> {
   )`).run();
 }
 
-async function fetchWebsiteText(url: string): Promise<string> {
-  const response = await fetch(url, {
-    headers: { "user-agent": "Mozilla/5.0 (compatible; QpyEngageBot/1.0; +https://mobileecommerce.github.io/qpy-engage/)" },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (!response.ok || !response.body) throw new Error(`Could not fetch that URL (HTTP ${response.status}).`);
-  const contentType = response.headers.get("content-type") || "";
-  if (!contentType.includes("html")) throw new Error("That URL did not return an HTML page.");
-
+async function extractTextFromHtml(html: string): Promise<{ bodyText: string; metaText: string }> {
   const bodyChunks: string[] = [];
   const metaParts: string[] = [];
   let skipDepth = 0;
@@ -54,15 +50,58 @@ async function fetchWebsiteText(url: string): Promise<string> {
       },
     });
 
-  const transformed = rewriter.transform(response);
+  const transformed = rewriter.transform(new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } }));
   const reader = transformed.body?.getReader();
   if (reader) { while (true) { const { done } = await reader.read(); if (done) break; } }
 
-  const bodyText = bodyChunks.join(" ").replace(/\s+/g, " ").trim();
-  const metaText = metaParts.join(" — ").replace(/\s+/g, " ").trim();
+  return {
+    bodyText: bodyChunks.join(" ").replace(/\s+/g, " ").trim(),
+    metaText: metaParts.join(" — ").replace(/\s+/g, " ").trim(),
+  };
+}
 
-  // Client-rendered pages often have little or no text in the raw HTML body;
-  // fall back to title/meta description so there's at least something real to ground on.
+async function fetchRenderedHtml(url: string, accountId: string, apiToken: string): Promise<string | null> {
+  try {
+    const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/browser-rendering/content`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${apiToken}` },
+      body: JSON.stringify({ url }),
+      signal: AbortSignal.timeout(RENDER_TIMEOUT_MS),
+    });
+    if (!response.ok) return null;
+    const payload = await response.json() as { success?: boolean; result?: string };
+    return payload.success && payload.result ? payload.result : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchWebsiteText(url: string, env: KnowledgeEnv): Promise<string> {
+  const response = await fetch(url, {
+    headers: { "user-agent": "Mozilla/5.0 (compatible; QpyEngageBot/1.0; +https://mobileecommerce.github.io/qpy-engage/)" },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (!response.ok || !response.body) throw new Error(`Could not fetch that URL (HTTP ${response.status}).`);
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("html")) throw new Error("That URL did not return an HTML page.");
+
+  let { bodyText, metaText } = await extractTextFromHtml(await response.text());
+
+  // Client-rendered pages (SPAs) often have little or no text in the raw HTML body — the real
+  // content only exists after JavaScript runs. If Browser Rendering is configured, retry against
+  // the JS-executed page instead of settling for just the title/meta description.
+  if (bodyText.length < MIN_RAW_BODY_LENGTH && env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_BROWSER_RENDERING_TOKEN) {
+    const renderedHtml = await fetchRenderedHtml(url, env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_BROWSER_RENDERING_TOKEN);
+    if (renderedHtml) {
+      const rendered = await extractTextFromHtml(renderedHtml);
+      if (rendered.bodyText.length > bodyText.length) {
+        bodyText = rendered.bodyText;
+        if (rendered.metaText) metaText = rendered.metaText;
+      }
+    }
+  }
+
+  // Fall back to title/meta description so there's at least something real to ground on.
   const text = bodyText.length > metaText.length ? bodyText : [metaText, bodyText].filter(Boolean).join(" — ");
   return text.slice(0, MAX_CONTENT_LENGTH);
 }
@@ -79,7 +118,7 @@ async function fetchWebsite(request: Request, env: KnowledgeEnv): Promise<Respon
   await ensureKnowledgeSchema(env.DB);
   let content: string;
   try {
-    content = await fetchWebsiteText(url);
+    content = await fetchWebsiteText(url, env);
   } catch (error) {
     return json(request, { error: error instanceof Error ? error.message : "Could not fetch that website." }, 400);
   }
