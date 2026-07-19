@@ -92,6 +92,23 @@ async function fetchWebsite(request: Request, env: KnowledgeEnv): Promise<Respon
   return json(request, { fetched: true, charCount: content.length, excerpt: content.slice(0, 300) });
 }
 
+async function saveContent(request: Request, env: KnowledgeEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const body = await request.json() as { sourceId?: number; content?: string };
+  const sourceId = Number(body.sourceId);
+  const content = (body.content || "").trim().slice(0, MAX_CONTENT_LENGTH);
+  if (!Number.isFinite(sourceId)) return json(request, { error: "Missing source id." }, 400);
+  if (!content) return json(request, { error: "Paste some content before saving." }, 400);
+
+  await ensureKnowledgeSchema(env.DB);
+  await env.DB.prepare(`INSERT INTO knowledge_content (workspace_id, source_id, url, content, char_count) VALUES (?, ?, NULL, ?, ?)
+    ON CONFLICT(workspace_id, source_id) DO UPDATE SET content=excluded.content, char_count=excluded.char_count, fetched_at=CURRENT_TIMESTAMP`)
+    .bind(session.workspaceId, sourceId, content, content.length).run();
+
+  return json(request, { saved: true, charCount: content.length });
+}
+
 async function getContent(request: Request, env: KnowledgeEnv): Promise<Response> {
   const session = await requireSession(request, env);
   if (session instanceof Response) return session;
@@ -122,6 +139,7 @@ export async function handleKnowledgeRequest(request: Request, env: KnowledgeEnv
   if (!env.DB) return json(request, { error: "Workspace database is unavailable." }, 503);
 
   if (url.pathname === "/api/knowledge/fetch-website" && request.method === "POST") return fetchWebsite(request, env);
+  if (url.pathname === "/api/knowledge/save-content" && request.method === "POST") return saveContent(request, env);
   if (url.pathname === "/api/knowledge/content" && request.method === "GET") return getContent(request, env);
   return json(request, { error: "Not found" }, 404);
 }
