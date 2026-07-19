@@ -161,6 +161,12 @@ Done: real authentication, per-workspace data isolation, role-based access for t
 
 **Widget chat-window customization status:** icon (built-in or custom upload), launcher placement, launcher effect, accent color, assistant name, and greeting message are all real and configurable today (Channels > Web chat, plus Assistants > Profile for name/greeting). Not yet customizable: panel dimensions, fonts, header background color (separate from the accent color), or the "AI assistant"/"Type a message…" static label text — flagged as open follow-up, not yet built since scope wasn't confirmed.
 
+**Widget session persistence:** `public/widget.js` keeps its `sessionId` in `sessionStorage` (per workspace), and a public `GET /api/widget/history` endpoint rebuilds the visible transcript on load — so a visitor refreshing the page (same tab) resumes their conversation instead of starting a new one. The session still resets if the visitor closes the tab or opens a new one (sessionStorage, not localStorage) — that's intentional, matching what was asked.
+
+**Customer naming in Web chat inbox:** once an AI Action captures a name field (`name`/`full_name`/`customer_name`/`first_name`, any casing) for a session via the existing lead-capture (`action_submissions`), `GET /api/widget/conversations` returns it as `customerName`, and the Web chat inbox list/detail header show it instead of "Website visitor". Falls back to "Website visitor" until a name is captured.
+
+**Unified Inbox tabs:** `InboxHub` now shows a dynamic tab set instead of a fixed WhatsApp/Web chat switcher — a channel's tab (WhatsApp, Instagram, Web chat) only appears once it has at least one real conversation, and an "All" tab (a merged, recency-sorted list across channels, each row tagged by channel) only appears once 2+ channels have conversations. Instagram has no real messaging backend yet, so its count is always 0 and its tab stays hidden until that's built — deliberately not faked.
+
 1. Add `ANTHROPIC_API_KEY` as a Cloudflare secret if it isn't set yet — without it the assistant endpoint returns a clear "not configured" error.
 1a. **To fully fix knowledge ingestion for JavaScript-rendered websites (e.g. qpy.ai itself — a Vite/React SPA)**, set `CLOUDFLARE_BROWSER_RENDERING_TOKEN` as a Cloudflare Worker secret:
    - Create a Cloudflare API Token at https://dash.cloudflare.com/profile/api-tokens with **Account > Browser Rendering > Edit** permission (scoped to account `e8c99985a9f6a0ea4388241d964db68d`, already set as `CLOUDFLARE_ACCOUNT_ID` in `wrangler.jsonc`).
