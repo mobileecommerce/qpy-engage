@@ -85,9 +85,16 @@
 .widget-placement{margin-left:0}
 .conv-meta em{font-style:normal;font-size:7px;color:#9aa1af;background:#eceef2;border-radius:6px;padding:2px 6px}
 .all-conversation-list button{height:auto;padding:10px 14px}
-.notes-panel{border-left:1px solid var(--line);padding:16px;display:flex;flex-direction:column;min-height:0}
+.notes-panel{border-left:1px solid var(--line);padding:16px;display:flex;flex-direction:column;min-height:0;overflow-y:auto}
 .notes-panel h3{font-size:11px;margin:0 0 3px}
+.notes-panel h3.notes-heading{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
 .notes-panel>small{font-size:8px;color:#9097a4;margin-bottom:12px}
+.lead-panel-data{margin-bottom:10px;display:flex;flex-direction:column;gap:4px}
+.lead-panel-data div{font-size:9px;color:#4a5160}
+.lead-panel-data small{color:#9097a4}
+.lead-panel-tags{display:flex;flex-direction:column;gap:9px}
+.lead-panel-tags label{display:flex;flex-direction:column;gap:4px;font-size:9px;color:#7d8493;font-weight:700}
+.lead-panel-tags select{border:1px solid #dfe2e8;border-radius:6px;padding:6px 8px;font-size:9px;background:#fff}
 .notes-list{flex:1;overflow:auto;display:flex;flex-direction:column;gap:8px;margin-bottom:10px}
 .note{background:#fdf6e3;border:1px solid #f0e4b8;border-radius:7px;padding:8px 9px}
 .note p{margin:0 0 5px;font-size:9px;line-height:1.5;white-space:pre-wrap;word-break:break-word}

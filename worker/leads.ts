@@ -69,8 +69,12 @@ async function listSubmissions(request: Request, env: LeadsEnv): Promise<Respons
   const session = await requireSession(request, env);
   if (session instanceof Response) return session;
   await ensureLeadsSchema(env.DB);
-  const result = await env.DB.prepare(`SELECT id, action_name, channel, data, created_at, updated_at, source, status, priority, segment FROM action_submissions WHERE workspace_id = ? ORDER BY updated_at DESC LIMIT ?`)
-    .bind(session.workspaceId, LIST_LIMIT).all<{ id: number; action_name: string; channel: string; data: string; created_at: string; updated_at: string; source: string; status: string; priority: string; segment: string }>();
+  const sessionId = new URL(request.url).searchParams.get("sessionId");
+  const result = sessionId
+    ? await env.DB.prepare(`SELECT id, action_name, channel, data, created_at, updated_at, source, status, priority, segment FROM action_submissions WHERE workspace_id = ? AND session_id = ? ORDER BY updated_at DESC LIMIT ?`)
+      .bind(session.workspaceId, sessionId, LIST_LIMIT).all<{ id: number; action_name: string; channel: string; data: string; created_at: string; updated_at: string; source: string; status: string; priority: string; segment: string }>()
+    : await env.DB.prepare(`SELECT id, action_name, channel, data, created_at, updated_at, source, status, priority, segment FROM action_submissions WHERE workspace_id = ? ORDER BY updated_at DESC LIMIT ?`)
+      .bind(session.workspaceId, LIST_LIMIT).all<{ id: number; action_name: string; channel: string; data: string; created_at: string; updated_at: string; source: string; status: string; priority: string; segment: string }>();
   const submissions = (result.results || []).map((row) => {
     let data: Record<string, unknown> = {};
     try { data = JSON.parse(row.data); } catch { /* leave empty */ }

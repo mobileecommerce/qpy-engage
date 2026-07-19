@@ -171,6 +171,22 @@ async function getCustomerNames(db: D1Database, workspaceId: string, sessionIds:
   return names;
 }
 
+// Surfaces the associated lead's status (New/Contacted/etc., see worker/leads.ts) per session,
+// so the conversation list can show the same "New" badge the Leads page does.
+async function getLeadStatuses(db: D1Database, workspaceId: string, sessionIds: string[]): Promise<Map<string, string>> {
+  const statuses = new Map<string, string>();
+  if (!sessionIds.length) return statuses;
+  try {
+    const placeholders = sessionIds.map(() => "?").join(",");
+    const result = await db.prepare(`SELECT session_id, status FROM action_submissions WHERE workspace_id = ? AND session_id IN (${placeholders}) ORDER BY updated_at DESC`)
+      .bind(workspaceId, ...sessionIds).all<{ session_id: string; status: string }>();
+    for (const row of result.results || []) {
+      if (!statuses.has(row.session_id)) statuses.set(row.session_id, row.status || "New");
+    }
+  } catch { /* action_submissions may not exist yet if no action has ever fired */ }
+  return statuses;
+}
+
 // Called when Claude's built-in name-capture tool fires — see NAME_TOOL_NAME in shared.ts.
 async function saveLearnedCustomerName(db: D1Database, workspaceId: string, sessionId: string, rawName: string): Promise<void> {
   const name = rawName.trim().slice(0, 80);
@@ -354,8 +370,9 @@ async function listConversations(request: Request, env: WidgetEnv): Promise<Resp
   const aiActiveBySession = new Map((stateResult.results || []).map((r) => [r.session_id, r.ai_active === 1]));
 
   const names = await getCustomerNames(env.DB, session.workspaceId, [...bySession.keys()]);
+  const leadStatuses = await getLeadStatuses(env.DB, session.workspaceId, [...bySession.keys()]);
   const conversations = [...bySession.values()]
-    .map((c) => ({ ...c, aiActive: aiActiveBySession.get(c.sessionId) ?? true, customerName: names.get(c.sessionId) || null }))
+    .map((c) => ({ ...c, aiActive: aiActiveBySession.get(c.sessionId) ?? true, customerName: names.get(c.sessionId) || null, leadStatus: leadStatuses.get(c.sessionId) || null }))
     .sort((a, b) => b.lastAt.localeCompare(a.lastAt));
   return json(request, { conversations });
 }
