@@ -702,7 +702,7 @@ function EmptyInbox({onConnect}:{onConnect:()=>void}){
   return <><PageHeader title="Unified inbox" description="Manage every customer conversation from one place."/><div className="empty-state"><span>◉</span><h3>No conversations yet</h3><p>Connect a channel like WhatsApp to start receiving real customer messages here.</p><button className="primary" onClick={onConnect}>Connect a channel →</button></div></>;
 }
 
-type WidgetConversationSummary={sessionId:string;messageCount:number;lastMessage:string;lastRole:string;firstAt:string;lastAt:string;aiActive:boolean};
+type WidgetConversationSummary={sessionId:string;messageCount:number;lastMessage:string;lastRole:string;firstAt:string;lastAt:string;aiActive:boolean;customerName?:string|null};
 type WidgetMessage={role:string;content:string;createdAt:string};
 
 function WebChatInbox({notify}:{notify:(s:string)=>void}){
@@ -780,15 +780,100 @@ function WebChatInbox({notify}:{notify:(s:string)=>void}){
   };
   return <><PageHeader title="Web chat conversations" description="Real visitor conversations from your website chat widget. Take over any conversation to reply as a human instead of the AI." action={<button className="secondary-btn" onClick={()=>load()}>↻ Refresh</button>}/>
   {loading?<p className="empty-hint">Loading…</p>:!conversations.length?<div className="empty-state"><span>◌</span><h3>No web chat conversations yet</h3><p>When a visitor uses your website's chat widget, the conversation will appear here automatically.</p></div>:
-  <div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><strong>{conversations.length} conversation{conversations.length===1?"":"s"}</strong></div><div className="conversation-list">{conversations.map(c=><button key={c.sessionId} className={c.sessionId===selectedSessionId?"selected":""} onClick={()=>setSelectedSessionId(c.sessionId)}><span className="contact-avatar blue">◌<i/></span><div><strong>Website visitor</strong><small>{c.lastMessage.slice(0,60)}</small></div><span className="conv-meta"><small>{new Date(c.lastAt).toLocaleString()}</small>{!c.aiActive&&<b>You</b>}</span></button>)}</div></aside><section className="chat-panel">{selected?<><div className="chat-head"><div className="chat-person"><span className="contact-avatar blue">◌<i/></span><div><strong>Website visitor</strong><small>{selected.messageCount} messages</small></div></div><div className="ai-state"><span className={aiActive?"pulse":"pulse off"}>✦</span><div><strong>{aiActive?"AI is handling":"You're handling"}</strong><small>{aiActive?"Take over to reply yourself":"AI is paused for this visitor"}</small></div><button onClick={toggleTakeover}>{aiActive?"Take over":"Hand to AI"}</button></div></div><div className="chat-body tall"><div className="today">{new Date(selected.firstAt).toLocaleDateString()}</div>{loadingMessages?<p className="empty-hint">Loading…</p>:messages.map((m,i)=>m.role==="system"?<div key={i} className="today">{m.content}</div>:<div key={i} className={`message ${m.role==="user"?"customer":"ai"}`}><p>{m.content}</p><small>{m.role==="user"?"Visitor":m.role==="agent"?"You":"✦ Assistant"} • {new Date(m.createdAt).toLocaleTimeString()}</small></div>)}</div>{!aiActive&&<div className="composer"><div className="input-row"><input value={reply} onChange={e=>{setReply(e.target.value);pingTyping()}} onKeyDown={e=>e.key==="Enter"&&sendReply()} placeholder="Reply as yourself…" disabled={sendingReply}/><button className="send" disabled={sendingReply||!reply.trim()} onClick={sendReply}>➤</button></div></div>}</>:<div className="live-chat-placeholder">Select a conversation</div>}</section></div>}
+  <div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><strong>{conversations.length} conversation{conversations.length===1?"":"s"}</strong></div><div className="conversation-list">{conversations.map(c=><button key={c.sessionId} className={c.sessionId===selectedSessionId?"selected":""} onClick={()=>setSelectedSessionId(c.sessionId)}><span className="contact-avatar blue">◌<i/></span><div><strong>{c.customerName||"Website visitor"}</strong><small>{c.lastMessage.slice(0,60)}</small></div><span className="conv-meta"><small>{new Date(c.lastAt).toLocaleString()}</small>{!c.aiActive&&<b>You</b>}</span></button>)}</div></aside><section className="chat-panel">{selected?<><div className="chat-head"><div className="chat-person"><span className="contact-avatar blue">◌<i/></span><div><strong>{selected.customerName||"Website visitor"}</strong><small>{selected.messageCount} messages</small></div></div><div className="ai-state"><span className={aiActive?"pulse":"pulse off"}>✦</span><div><strong>{aiActive?"AI is handling":"You're handling"}</strong><small>{aiActive?"Take over to reply yourself":"AI is paused for this visitor"}</small></div><button onClick={toggleTakeover}>{aiActive?"Take over":"Hand to AI"}</button></div></div><div className="chat-body tall"><div className="today">{new Date(selected.firstAt).toLocaleDateString()}</div>{loadingMessages?<p className="empty-hint">Loading…</p>:messages.map((m,i)=>m.role==="system"?<div key={i} className="today">{m.content}</div>:<div key={i} className={`message ${m.role==="user"?"customer":"ai"}`}><p>{m.content}</p><small>{m.role==="user"?"Visitor":m.role==="agent"?"You":"✦ Assistant"} • {new Date(m.createdAt).toLocaleTimeString()}</small></div>)}</div>{!aiActive&&<div className="composer"><div className="input-row"><input value={reply} onChange={e=>{setReply(e.target.value);pingTyping()}} onKeyDown={e=>e.key==="Enter"&&sendReply()} placeholder="Reply as yourself…" disabled={sendingReply}/><button className="send" disabled={sendingReply||!reply.trim()} onClick={sendReply}>➤</button></div></div>}</>:<div className="live-chat-placeholder">Select a conversation</div>}</section></div>}
   </>;
 }
 
+// Lightweight, decoupled from LiveInbox's own polling — just enough to know how many real
+// WhatsApp conversations exist and what they look like, for the "All" tab and tab visibility.
+function useWhatsappSummaries(connected:boolean,token:string|null):{waId:string;lastText:string;lastAt:number}[]{
+  const [summaries,setSummaries]=useState<{waId:string;lastText:string;lastAt:number}[]>([]);
+  useEffect(()=>{
+    if(!connected||!token){setSummaries([]);return}
+    let cancelled=false;
+    const load=async()=>{
+      try{
+        const response=await fetch(metaApi("/api/meta/inbox"),{headers:authHeaders(token)});
+        const result=await response.json() as {messages?:LiveWhatsAppMessage[]};
+        if(cancelled)return;
+        const byId=new Map<string,{waId:string;lastText:string;lastAt:number}>();
+        for(const m of result.messages||[]){
+          if(!m.waId||!m.text)continue;
+          const at=Number(m.timestamp||0)*1000||new Date(m.createdAt).getTime();
+          const existing=byId.get(m.waId);
+          if(!existing||at>=existing.lastAt)byId.set(m.waId,{waId:m.waId,lastText:m.text,lastAt:at||Date.now()});
+        }
+        setSummaries([...byId.values()]);
+      }catch{/* keep previous summaries on a transient failure */}
+    };
+    load();
+    const timer=window.setInterval(load,8000);
+    return()=>{cancelled=true;window.clearInterval(timer)};
+  },[connected,token]);
+  return summaries;
+}
+
+function useWebchatSummaries(token:string|null):WidgetConversationSummary[]{
+  const [summaries,setSummaries]=useState<WidgetConversationSummary[]>([]);
+  useEffect(()=>{
+    if(!token){setSummaries([]);return}
+    let cancelled=false;
+    const load=async()=>{
+      try{
+        const response=await fetch(metaApi("/api/widget/conversations"),{headers:authHeaders(token)});
+        const result=await response.json() as {conversations?:WidgetConversationSummary[]};
+        if(!cancelled)setSummaries(result.conversations||[]);
+      }catch{/* keep previous summaries on a transient failure */}
+    };
+    load();
+    const timer=window.setInterval(load,4000);
+    return()=>{cancelled=true;window.clearInterval(timer)};
+  },[token]);
+  return summaries;
+}
+
+type InboxChannelKey="all"|"whatsapp"|"instagram"|"webchat";
+
 function InboxHub(props:{connected:boolean;conversations:Conversation[];setConversations:(v:Conversation[])=>void;selected:Conversation;setSelectedId:(s:string)=>void;messages:Message[];draft:string;setDraft:(s:string)=>void;sendMessage:()=>void;aiActive:boolean;setAiActive:(v:boolean)=>void;onConnect:()=>void;notify:(s:string)=>void}){
-  const [tab,setTab]=useState<"whatsapp"|"webchat">("whatsapp");
+  const token=useAuthToken();
+  const waSummaries=useWhatsappSummaries(props.connected,token);
+  const webSummaries=useWebchatSummaries(token);
+  const waCount=props.connected?waSummaries.length:props.conversations.length;
+  const webCount=webSummaries.length;
+  // Instagram messaging isn't wired to any real backend yet (see HANDOFF.md) — it stays at
+  // zero, which naturally keeps its tab hidden until that's built, rather than faking data.
+  const igCount=0;
+  const channels:{key:InboxChannelKey;label:string;count:number}[]=[
+    {key:"whatsapp",label:"◉ WhatsApp",count:waCount},
+    {key:"instagram",label:"◎ Instagram",count:igCount},
+    {key:"webchat",label:"◌ Web chat",count:webCount},
+  ];
+  const activeChannels=channels.filter(c=>c.count>0);
+  const showAll=activeChannels.length>=2;
+  const visibleTabs:{key:InboxChannelKey;label:string}[]=showAll
+    ?[{key:"all",label:"◆ All"},...activeChannels]
+    :(activeChannels.length?activeChannels:channels);
+  const visibleKeys=visibleTabs.map(t=>t.key).join(",");
+  const [tab,setTab]=useState<InboxChannelKey>("whatsapp");
+  useEffect(()=>{
+    const keys=visibleKeys.split(",") as InboxChannelKey[];
+    if(!keys.includes(tab))setTab(keys[0]);
+  },[visibleKeys]);
+
+  const merged=[
+    ...waSummaries.map(s=>({channel:"whatsapp" as const,key:"wa:"+s.waId,name:"+"+s.waId,preview:s.lastText,at:s.lastAt})),
+    ...webSummaries.map(s=>({channel:"webchat" as const,key:"web:"+s.sessionId,name:s.customerName||"Website visitor",preview:s.lastMessage.slice(0,60),at:new Date(s.lastAt).getTime()})),
+  ].sort((a,b)=>b.at-a.at);
+
   return <>
-    <div className="test-mode-tabs"><button className={tab==="whatsapp"?"active":""} onClick={()=>setTab("whatsapp")}>◉ WhatsApp</button><button className={tab==="webchat"?"active":""} onClick={()=>setTab("webchat")}>◌ Web chat</button></div>
-    {tab==="whatsapp"?(props.connected?<LiveInbox notify={props.notify}/>:props.conversations.length?<Inbox conversations={props.conversations} setConversations={props.setConversations} selected={props.selected} setSelectedId={props.setSelectedId} messages={props.messages} draft={props.draft} setDraft={props.setDraft} sendMessage={props.sendMessage} aiActive={props.aiActive} setAiActive={props.setAiActive} notify={props.notify}/>:<EmptyInbox onConnect={props.onConnect}/>):<WebChatInbox notify={props.notify}/>}
+    <div className="test-mode-tabs">{visibleTabs.map(t=><button key={t.key} className={tab===t.key?"active":""} onClick={()=>setTab(t.key)}>{t.label}</button>)}</div>
+    {tab==="all"&&<>
+      <PageHeader title="All conversations" description="Every channel with an active conversation, in one place."/>
+      <div className="conversation-list all-conversation-list">{merged.map(item=><button key={item.key} onClick={()=>setTab(item.channel)}><span className={`contact-avatar ${item.channel==="whatsapp"?"green":"blue"}`}>{item.channel==="whatsapp"?"WA":"◌"}<i/></span><div><strong>{item.name}</strong><small>{item.preview}</small></div><span className="conv-meta"><small>{new Date(item.at).toLocaleString()}</small><em>{item.channel==="whatsapp"?"WhatsApp":"Web chat"}</em></span></button>)}</div>
+    </>}
+    {tab==="whatsapp"&&(props.connected?<LiveInbox notify={props.notify}/>:props.conversations.length?<Inbox conversations={props.conversations} setConversations={props.setConversations} selected={props.selected} setSelectedId={props.setSelectedId} messages={props.messages} draft={props.draft} setDraft={props.setDraft} sendMessage={props.sendMessage} aiActive={props.aiActive} setAiActive={props.setAiActive} notify={props.notify}/>:<EmptyInbox onConnect={props.onConnect}/>)}
+    {tab==="instagram"&&<div className="empty-state"><span>◎</span><h3>No Instagram conversations yet</h3><p>Real Instagram messaging isn't connected yet — this tab will fill in once that channel is wired up.</p></div>}
+    {tab==="webchat"&&<WebChatInbox notify={props.notify}/>}
   </>;
 }
 

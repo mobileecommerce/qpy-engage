@@ -121,6 +121,38 @@ async function buildSystemPrompt(db: D1Database, workspaceId: string): Promise<s
   return prompt;
 }
 
+const NAME_FIELD_KEYS = ["name", "full_name", "fullname", "customer_name", "customername", "first_name", "firstname"];
+
+function extractCustomerName(rawData: string): string | null {
+  try {
+    const data = JSON.parse(rawData) as Record<string, unknown>;
+    for (const key of Object.keys(data)) {
+      if (!NAME_FIELD_KEYS.includes(key.toLowerCase())) continue;
+      const value = data[key];
+      if (typeof value === "string" && value.trim()) return value.trim().slice(0, 80);
+    }
+  } catch { /* not JSON we recognize */ }
+  return null;
+}
+
+// Widget visitors are anonymous until an AI Action captures their name — once one has,
+// the dashboard should address them by name instead of "Website visitor".
+async function getCustomerNames(db: D1Database, workspaceId: string, sessionIds: string[]): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  if (!sessionIds.length) return names;
+  try {
+    const placeholders = sessionIds.map(() => "?").join(",");
+    const result = await db.prepare(`SELECT session_id, data FROM action_submissions WHERE workspace_id = ? AND session_id IN (${placeholders})`)
+      .bind(workspaceId, ...sessionIds).all<{ session_id: string; data: string }>();
+    for (const row of result.results || []) {
+      if (names.has(row.session_id)) continue;
+      const name = extractCustomerName(row.data);
+      if (name) names.set(row.session_id, name);
+    }
+  } catch { /* action_submissions may not exist yet if no action has ever fired */ }
+  return names;
+}
+
 async function getConversationHistory(db: D1Database, workspaceId: string, sessionId: string): Promise<ChatMessage[]> {
   const result = await db.prepare(`SELECT role, content FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC LIMIT 50`)
     .bind(workspaceId, sessionId).all<{ role: string; content: string }>();
@@ -240,6 +272,22 @@ async function pollMessages(request: Request, env: WidgetEnv): Promise<Response>
   return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), typing });
 }
 
+// Lets a returning visitor's widget (same tab, after a page refresh) rebuild its transcript
+// instead of starting a blank conversation — unlike pollMessages, this returns every role
+// (including the visitor's own past messages and system notices) since it's rebuilding the
+// whole view, not just fetching what arrived since the last check.
+async function getHistory(request: Request, env: WidgetEnv): Promise<Response> {
+  if (!env.DB) return widgetJson({ error: "Workspace database is unavailable." }, 503);
+  const url = new URL(request.url);
+  const workspaceId = (url.searchParams.get("workspaceId") || "").trim();
+  const sessionId = (url.searchParams.get("sessionId") || "").trim();
+  if (!workspaceId || !sessionId) return widgetJson({ error: "Missing workspaceId or sessionId." }, 400);
+  await ensureWidgetSchema(env.DB);
+  const result = await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC LIMIT 200`)
+    .bind(workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>();
+  return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })) });
+}
+
 async function getConfig(request: Request, env: WidgetEnv): Promise<Response> {
   if (!env.DB) return widgetJson({ error: "Workspace database is unavailable." }, 503);
   const url = new URL(request.url);
@@ -275,8 +323,9 @@ async function listConversations(request: Request, env: WidgetEnv): Promise<Resp
     .bind(session.workspaceId).all<{ session_id: string; ai_active: number }>();
   const aiActiveBySession = new Map((stateResult.results || []).map((r) => [r.session_id, r.ai_active === 1]));
 
+  const names = await getCustomerNames(env.DB, session.workspaceId, [...bySession.keys()]);
   const conversations = [...bySession.values()]
-    .map((c) => ({ ...c, aiActive: aiActiveBySession.get(c.sessionId) ?? true }))
+    .map((c) => ({ ...c, aiActive: aiActiveBySession.get(c.sessionId) ?? true, customerName: names.get(c.sessionId) || null }))
     .sort((a, b) => b.lastAt.localeCompare(a.lastAt));
   return json(request, { conversations });
 }
@@ -347,11 +396,12 @@ export async function handleWidgetRequest(request: Request, env: WidgetEnv): Pro
   if (!url.pathname.startsWith("/api/widget/")) return null;
 
   // Public, unauthenticated widget endpoints — wildcard CORS, since any customer site embeds these.
-  if (url.pathname === "/api/widget/respond" || url.pathname === "/api/widget/config" || url.pathname === "/api/widget/poll") {
+  if (url.pathname === "/api/widget/respond" || url.pathname === "/api/widget/config" || url.pathname === "/api/widget/poll" || url.pathname === "/api/widget/history") {
     if (request.method === "OPTIONS") return widgetCorsPreflight();
     if (url.pathname === "/api/widget/respond" && request.method === "POST") return respond(request, env);
     if (url.pathname === "/api/widget/config" && request.method === "GET") return getConfig(request, env);
     if (url.pathname === "/api/widget/poll" && request.method === "GET") return pollMessages(request, env);
+    if (url.pathname === "/api/widget/history" && request.method === "GET") return getHistory(request, env);
     return widgetJson({ error: "Not found" }, 404);
   }
 
