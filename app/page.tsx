@@ -963,13 +963,21 @@ function Campaigns({notify}:{notify:(s:string)=>void}){
 const automationTemplates:{name:string;trigger:string;action:string}[]=[{name:"Welcome new leads",trigger:"New WhatsApp conversation",action:"Send AI welcome message"},{name:"Recover abandoned carts",trigger:"Cart idle for 2 hours",action:"Send recovery template"},{name:"Collect customer feedback",trigger:"Conversation marked resolved",action:"Request feedback survey"}];
 function Automations({items,setItems,onCreate,notify}:{items:Automation[];setItems:(v:Automation[])=>void;onCreate:(template?:{name:string;trigger:string;action:string})=>void;notify:(s:string)=>void}){const [query,setQuery]=useState("");const duplicate=(item:Automation)=>{setItems([...items,{...item,id:Date.now(),title:`${item.title} copy`,runs:0,rate:"New",active:false}]);notify("Automation duplicated")};const remove=(id:number)=>{if(window.confirm("Delete this automation?")){setItems(items.filter(i=>i.id!==id));notify("Automation deleted")}};return <><PageHeader title="Automations" description="Build always-on workflows for sales and support." action={<button className="primary" onClick={()=>onCreate()}>＋ Create automation</button>}/><div className="toolbar"><input placeholder="Search automations" value={query} onChange={e=>setQuery(e.target.value)}/><span>{items.filter(i=>i.active).length} active workflows</span></div><div className="data-card"><table><thead><tr><th>Automation</th><th>Trigger</th><th>Action</th><th>Runs</th><th>Performance</th><th>Status</th><th/></tr></thead><tbody>{items.filter(i=>i.title.toLowerCase().includes(query.toLowerCase())).map(item=><tr key={item.id}><td><div className="table-title"><span>✦</span><strong>{item.title}</strong></div></td><td>{item.trigger}</td><td>{item.action}</td><td>{item.runs}</td><td><b className="positive">{item.rate}</b></td><td><button className={`toggle ${item.active?"on":""}`} onClick={()=>setItems(items.map(a=>a.id===item.id?{...a,active:!a.active}:a))}><i/></button></td><td><div className="row-actions"><button title="Duplicate" onClick={()=>duplicate(item)}>⧉</button><button title="Delete" onClick={()=>remove(item.id)}>×</button></div></td></tr>)}</tbody></table></div><div className="template-strip"><div><h3>Start from a proven template</h3><p>Launch common WhatsApp workflows in minutes.</p></div>{automationTemplates.map(t=><button key={t.name} onClick={()=>onCreate(t)}><span>＋</span>{t.name}</button>)}</div></>}
 
-type Submission={id:number;actionName:string;channel:string;data:Record<string,unknown>;createdAt:string;updatedAt:string};
+type Submission={id:number;actionName:string;channel:string;data:Record<string,unknown>;createdAt:string;updatedAt:string;source:string;status:string;priority:string;segment:string};
+const LEAD_SOURCES=["Website","Referral","Event"];
+const LEAD_STATUSES=["New","Contacted","Qualified","Nurture","Closed-Lost"];
+const LEAD_PRIORITIES=["Hot","Warm","Cold"];
+const LEAD_SEGMENTS=["Enterprise","SMB"];
 const channelLabel=(channel:string)=>({test_studio_chat:"Test Studio (chat)",test_studio_voice:"Test Studio (voice)",widget:"Web chat widget"} as Record<string,string>)[channel]||channel;
 
 function Leads({notify}:{notify:(s:string)=>void}){
   const token=useAuthToken();
   const [submissions,setSubmissions]=useState<Submission[]>([]);
   const [loading,setLoading]=useState(true);
+  const [sourceFilter,setSourceFilter]=useState("All");
+  const [statusFilter,setStatusFilter]=useState("All");
+  const [priorityFilter,setPriorityFilter]=useState("All");
+  const [segmentFilter,setSegmentFilter]=useState("All");
   const load=async()=>{
     if(!token){setLoading(false);return}
     setLoading(true);
@@ -991,18 +999,39 @@ function Leads({notify}:{notify:(s:string)=>void}){
       notify("Entry deleted");
     }catch(error){notify(error instanceof Error?error.message:"Could not delete that entry.")}
   };
+  const updateTag=async(id:number,field:"source"|"status"|"priority"|"segment",value:string)=>{
+    const previous=submissions;
+    setSubmissions(current=>current.map(s=>s.id===id?{...s,[field]:value}:s));
+    try{
+      const response=await fetch(metaApi(`/api/leads/${id}`),{method:"PATCH",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({[field]:value})});
+      if(!response.ok)throw new Error();
+    }catch{setSubmissions(previous);notify(`Could not update ${field}.`)}
+  };
   const exportCsv=()=>{
     const fieldNames=[...new Set(submissions.flatMap(s=>Object.keys(s.data)))];
-    const header=["Captured at","Action","Channel",...fieldNames];
-    const rows=submissions.map(s=>[s.createdAt,s.actionName,channelLabel(s.channel),...fieldNames.map(f=>String(s.data[f]??""))]);
+    const header=["Captured at","Action","Channel","Source","Status","Priority","Segment",...fieldNames];
+    const rows=submissions.map(s=>[s.createdAt,s.actionName,channelLabel(s.channel),s.source,s.status,s.priority,s.segment,...fieldNames.map(f=>String(s.data[f]??""))]);
     const csv=[header,...rows].map(row=>row.map(cell=>`"${String(cell).replace(/"/g,'""')}"`).join(",")).join("\n");
     const blob=new Blob([csv],{type:"text/csv"});
     const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="qpy-engage-leads.csv";a.click();
     notify("Leads exported");
   };
+  const visible=submissions.filter(s=>
+    (sourceFilter==="All"||s.source===sourceFilter)&&
+    (statusFilter==="All"||s.status===statusFilter)&&
+    (priorityFilter==="All"||s.priority===priorityFilter)&&
+    (segmentFilter==="All"||s.segment===segmentFilter)
+  );
   return <><PageHeader title="Captured leads" description="Data your AI actions have collected from real conversations, saved automatically." action={<div className="header-buttons"><button className="secondary-btn" onClick={load}>↻ Refresh</button><button className="primary" disabled={!submissions.length} onClick={exportCsv}>↓ Export CSV</button></div>}/>
-  {loading?<p className="empty-hint">Loading…</p>:!submissions.length?<div className="empty-state"><span>⚑</span><h3>No captured leads yet</h3><p>When a customer gives details to an AI action (like a callback request), it's saved here automatically — from Test Studio and your public web chat widget. This is a local copy kept even if the action's own webhook fails.</p></div>:
-  <div className="data-card"><table><thead><tr><th>Captured</th><th>Action</th><th>Channel</th><th>Details</th><th/></tr></thead><tbody>{submissions.map(s=><tr key={s.id}><td>{new Date(s.createdAt).toLocaleString()}{s.updatedAt&&s.updatedAt!==s.createdAt&&<small><br/>Updated {new Date(s.updatedAt).toLocaleString()}</small>}</td><td><strong>{s.actionName}</strong></td><td>{channelLabel(s.channel)}</td><td>{Object.entries(s.data).map(([k,v])=><div key={k}><small>{k}:</small> {String(v)}</div>)}</td><td><button className="dots" onClick={()=>remove(s.id)}>Delete</button></td></tr>)}</tbody></table></div>}
+  {!loading&&submissions.length>0&&<div className="leads-filters">
+    <label>Source<select value={sourceFilter} onChange={e=>setSourceFilter(e.target.value)}><option>All</option>{LEAD_SOURCES.map(o=><option key={o}>{o}</option>)}</select></label>
+    <label>Status<select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}><option>All</option>{LEAD_STATUSES.map(o=><option key={o}>{o}</option>)}</select></label>
+    <label>Priority<select value={priorityFilter} onChange={e=>setPriorityFilter(e.target.value)}><option>All</option>{LEAD_PRIORITIES.map(o=><option key={o}>{o}</option>)}</select></label>
+    <label>Segment<select value={segmentFilter} onChange={e=>setSegmentFilter(e.target.value)}><option>All</option>{LEAD_SEGMENTS.map(o=><option key={o}>{o}</option>)}</select></label>
+    {(sourceFilter!=="All"||statusFilter!=="All"||priorityFilter!=="All"||segmentFilter!=="All")&&<button className="text-action" onClick={()=>{setSourceFilter("All");setStatusFilter("All");setPriorityFilter("All");setSegmentFilter("All")}}>Clear filters</button>}
+  </div>}
+  {loading?<p className="empty-hint">Loading…</p>:!submissions.length?<div className="empty-state"><span>⚑</span><h3>No captured leads yet</h3><p>When a customer gives details to an AI action (like a callback request), it's saved here automatically — from Test Studio and your public web chat widget. This is a local copy kept even if the action's own webhook fails.</p></div>:!visible.length?<div className="empty-state"><span>⚑</span><h3>No leads match these filters</h3><p>Try clearing a filter to see more captured leads.</p></div>:
+  <div className="data-card"><table><thead><tr><th>Captured</th><th>Action</th><th>Channel</th><th>Details</th><th>Source</th><th>Status</th><th>Priority</th><th>Segment</th><th/></tr></thead><tbody>{visible.map(s=><tr key={s.id}><td>{new Date(s.createdAt).toLocaleString()}{s.updatedAt&&s.updatedAt!==s.createdAt&&<small><br/>Updated {new Date(s.updatedAt).toLocaleString()}</small>}</td><td><strong>{s.actionName}</strong>{s.status==="New"&&<span className="new-badge">New</span>}</td><td>{channelLabel(s.channel)}</td><td>{Object.entries(s.data).map(([k,v])=><div key={k}><small>{k}:</small> {String(v)}</div>)}</td><td><select value={s.source} onChange={e=>updateTag(s.id,"source",e.target.value)}><option value="">—</option>{LEAD_SOURCES.map(o=><option key={o}>{o}</option>)}</select></td><td><select className={`status-select status-${s.status.toLowerCase().replace(/[^a-z]/g,"-")}`} value={s.status} onChange={e=>updateTag(s.id,"status",e.target.value)}>{LEAD_STATUSES.map(o=><option key={o}>{o}</option>)}</select></td><td><select className={`priority-select priority-${s.priority.toLowerCase()}`} value={s.priority} onChange={e=>updateTag(s.id,"priority",e.target.value)}><option value="">—</option>{LEAD_PRIORITIES.map(o=><option key={o}>{o}</option>)}</select></td><td><select value={s.segment} onChange={e=>updateTag(s.id,"segment",e.target.value)}><option value="">—</option>{LEAD_SEGMENTS.map(o=><option key={o}>{o}</option>)}</select></td><td><button className="dots" onClick={()=>remove(s.id)}>Delete</button></td></tr>)}</tbody></table></div>}
   </>;
 }
 

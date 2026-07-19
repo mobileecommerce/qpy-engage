@@ -8,6 +8,11 @@ export interface LeadsEnv extends AuthEnv {
 const MAX_DATA_LENGTH = 4000;
 const LIST_LIMIT = 200;
 
+const SOURCES = ["Website", "Referral", "Event"] as const;
+const STATUSES = ["New", "Contacted", "Qualified", "Nurture", "Closed-Lost"] as const;
+const PRIORITIES = ["Hot", "Warm", "Cold"] as const;
+const SEGMENTS = ["Enterprise", "SMB"] as const;
+
 async function ensureLeadsSchema(db: D1Database): Promise<void> {
   await db.prepare(`CREATE TABLE IF NOT EXISTS action_submissions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,6 +33,12 @@ async function ensureLeadsSchema(db: D1Database): Promise<void> {
     await db.prepare(`ALTER TABLE action_submissions ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''`).run();
     await db.prepare(`UPDATE action_submissions SET updated_at = created_at WHERE updated_at = ''`).run();
   } catch { /* already exists */ }
+  // Every new lead defaults to status "New" — that's also what drives the "New" badge in the UI,
+  // so a fresh capture is automatically flagged until someone updates its status.
+  try { await db.prepare(`ALTER TABLE action_submissions ADD COLUMN source TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
+  try { await db.prepare(`ALTER TABLE action_submissions ADD COLUMN status TEXT NOT NULL DEFAULT 'New'`).run(); } catch { /* already exists */ }
+  try { await db.prepare(`ALTER TABLE action_submissions ADD COLUMN priority TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
+  try { await db.prepare(`ALTER TABLE action_submissions ADD COLUMN segment TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
 }
 
 export async function saveSubmission(db: D1Database, workspaceId: string, sessionId: string, actionName: string, channel: string, data: Record<string, unknown>): Promise<void> {
@@ -58,14 +69,44 @@ async function listSubmissions(request: Request, env: LeadsEnv): Promise<Respons
   const session = await requireSession(request, env);
   if (session instanceof Response) return session;
   await ensureLeadsSchema(env.DB);
-  const result = await env.DB.prepare(`SELECT id, action_name, channel, data, created_at, updated_at FROM action_submissions WHERE workspace_id = ? ORDER BY updated_at DESC LIMIT ?`)
-    .bind(session.workspaceId, LIST_LIMIT).all<{ id: number; action_name: string; channel: string; data: string; created_at: string; updated_at: string }>();
+  const result = await env.DB.prepare(`SELECT id, action_name, channel, data, created_at, updated_at, source, status, priority, segment FROM action_submissions WHERE workspace_id = ? ORDER BY updated_at DESC LIMIT ?`)
+    .bind(session.workspaceId, LIST_LIMIT).all<{ id: number; action_name: string; channel: string; data: string; created_at: string; updated_at: string; source: string; status: string; priority: string; segment: string }>();
   const submissions = (result.results || []).map((row) => {
     let data: Record<string, unknown> = {};
     try { data = JSON.parse(row.data); } catch { /* leave empty */ }
-    return { id: row.id, actionName: row.action_name, channel: row.channel, data, createdAt: row.created_at, updatedAt: row.updated_at };
+    return { id: row.id, actionName: row.action_name, channel: row.channel, data, createdAt: row.created_at, updatedAt: row.updated_at, source: row.source || "", status: row.status || "New", priority: row.priority || "", segment: row.segment || "" };
   });
   return json(request, { submissions });
+}
+
+async function updateTags(request: Request, env: LeadsEnv, id: number): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const body = await request.json() as { source?: string; status?: string; priority?: string; segment?: string };
+  await ensureLeadsSchema(env.DB);
+  const updates: string[] = [];
+  const values: string[] = [];
+  if (body.source !== undefined) {
+    if (body.source !== "" && !(SOURCES as readonly string[]).includes(body.source)) return json(request, { error: "Invalid source." }, 400);
+    updates.push("source = ?"); values.push(body.source);
+  }
+  if (body.status !== undefined) {
+    if (!(STATUSES as readonly string[]).includes(body.status)) return json(request, { error: "Invalid status." }, 400);
+    updates.push("status = ?"); values.push(body.status);
+  }
+  if (body.priority !== undefined) {
+    if (body.priority !== "" && !(PRIORITIES as readonly string[]).includes(body.priority)) return json(request, { error: "Invalid priority." }, 400);
+    updates.push("priority = ?"); values.push(body.priority);
+  }
+  if (body.segment !== undefined) {
+    if (body.segment !== "" && !(SEGMENTS as readonly string[]).includes(body.segment)) return json(request, { error: "Invalid segment." }, 400);
+    updates.push("segment = ?"); values.push(body.segment);
+  }
+  if (!updates.length) return json(request, { error: "Nothing to update." }, 400);
+  updates.push("updated_at = CURRENT_TIMESTAMP");
+  await env.DB.prepare(`UPDATE action_submissions SET ${updates.join(", ")} WHERE workspace_id = ? AND id = ?`)
+    .bind(...values, session.workspaceId, id).run();
+  return json(request, { ok: true });
 }
 
 async function deleteSubmission(request: Request, env: LeadsEnv, id: number): Promise<Response> {
@@ -86,5 +127,6 @@ export async function handleLeadsRequest(request: Request, env: LeadsEnv): Promi
   if (url.pathname === "/api/leads" && request.method === "GET") return listSubmissions(request, env);
   const deleteMatch = url.pathname.match(/^\/api\/leads\/(\d+)$/);
   if (deleteMatch && request.method === "DELETE") return deleteSubmission(request, env, Number(deleteMatch[1]));
+  if (deleteMatch && request.method === "PATCH") return updateTags(request, env, Number(deleteMatch[1]));
   return json(request, { error: "Not found" }, 404);
 }
