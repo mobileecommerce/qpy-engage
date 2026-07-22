@@ -117,6 +117,12 @@
 .working-hours-toggle{display:flex;align-items:center;gap:7px;width:100px;flex:none}
 .working-hours-row input[type="time"]{border:1px solid #dfe2e8;border-radius:6px;padding:5px 7px;font-size:9px}
 .working-hours-row span{color:#9097a4}
+.impersonation-banner{position:fixed;top:0;left:0;right:0;z-index:20;background:#171923;color:#fff;font-size:11px;padding:9px 20px;display:flex;align-items:center;justify-content:center;gap:12px}
+.impersonation-banner button{border:1px solid #3a3d47;background:transparent;color:#fff;border-radius:6px;padding:5px 10px;font-size:10px}
+.admin-shell{max-width:1000px;margin:0 auto;padding:40px 30px}
+.admin-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}
+.admin-header strong{font-size:18px;display:block}
+.admin-header small{color:#8b92a0;font-size:11px}
 .status-select,.priority-select{border-radius:6px;border:1px solid #dfe2e8;padding:5px 6px;font-size:8px;font-weight:700;background:#f7f8fb;color:#4a5160}
 .status-select.status-new{background:#eef1ff;color:#4548c9;border-color:#d7dafc}
 .status-select.status-contacted{background:#fff6e0;color:#9a6b00;border-color:#f3e3ad}

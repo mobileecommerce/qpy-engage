@@ -15,7 +15,7 @@ const WEEKDAYS:[WeekdayKey,string][]=[["sun","Sunday"],["mon","Monday"],["tue","
 const DEFAULT_WORKING_HOURS:WorkingHours={enabled:false,timezone:"Asia/Dubai",days:{sun:{open:true,start:"09:00",end:"18:00"},mon:{open:true,start:"09:00",end:"18:00"},tue:{open:true,start:"09:00",end:"18:00"},wed:{open:true,start:"09:00",end:"18:00"},thu:{open:true,start:"09:00",end:"18:00"},fri:{open:false,start:"09:00",end:"18:00"},sat:{open:false,start:"09:00",end:"18:00"}}};
 const TIMEZONE_OPTIONS=["Asia/Dubai","Asia/Riyadh","Asia/Karachi","Asia/Kolkata","Europe/London","Europe/Berlin","America/New_York","America/Chicago","America/Los_Angeles","Australia/Sydney","UTC"];
 type Member = { id: string; userId: string | null; name: string; email: string; role: "Owner" | "Admin" | "Agent" | "Analyst"; status: "Active" | "Invited" };
-type AuthUser = { id: string; email: string; name: string | null };
+type AuthUser = { id: string; email: string; name: string | null; isSuperadmin?: boolean };
 type AuthWorkspace = { id: string; name: string };
 type AuthSession = { token: string; user: AuthUser; workspace: AuthWorkspace; role: Member["role"] };
 type Campaign = { id:number; name:string; channel:"WhatsApp"|"Instagram"; audience:string; recipients:number; status:"Draft"|"Scheduled"|"Sent"; schedule:string; delivered:string; clicks:string };
@@ -167,6 +167,12 @@ function speechLangFor(voiceLanguage: string): string {
 export default function Home() {
   const [session, setSession] = useState<AuthSession | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  // Impersonation: while a superadmin is "managing" a customer, `session` is swapped to a
+  // short-lived impersonation token/workspace and the superadmin's own session is stashed here.
+  // This never touches localStorage (which keeps the real superadmin token throughout), so a
+  // refresh always drops back out of impersonation rather than leaving it stuck open.
+  const [adminSession, setAdminSession] = useState<AuthSession | null>(null);
+  const [adminMode, setAdminMode] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -192,11 +198,24 @@ export default function Home() {
     if (session) { try { await fetch(metaApi("/api/auth/logout"), { method: "POST", headers: authHeaders(session.token) }) } catch {} }
     try { localStorage.removeItem(AUTH_TOKEN_KEY) } catch {}
     setSession(null);
+    setAdminSession(null);
+  };
+  const handleImpersonate = (token: string, workspace: AuthWorkspace) => {
+    if (!session) return;
+    setAdminSession(session);
+    setSession({ ...session, token, workspace, role: "Owner" });
+    setAdminMode(false);
+  };
+  const handleExitImpersonation = () => {
+    if (adminSession) setSession(adminSession);
+    setAdminSession(null);
+    setAdminMode(true);
   };
 
   if (authLoading) return <div className="auth-loading">Loading Qpy Engage…</div>;
   if (!session) return <AuthGate onAuthed={handleAuthed}/>;
-  return <AuthTokenContext.Provider value={session.token}><AuthWorkspaceContext.Provider value={session.workspace.id}><Workspace session={session} onLogout={handleLogout}/></AuthWorkspaceContext.Provider></AuthTokenContext.Provider>;
+  if (adminMode) return <AuthTokenContext.Provider value={session.token}><SuperadminDashboard onImpersonate={handleImpersonate} onBack={()=>setAdminMode(false)}/></AuthTokenContext.Provider>;
+  return <AuthTokenContext.Provider value={session.token}><AuthWorkspaceContext.Provider value={session.workspace.id}><Workspace session={session} onLogout={handleLogout} isSuperadmin={Boolean(session.user.isSuperadmin)} isImpersonating={Boolean(adminSession)} onOpenAdmin={()=>setAdminMode(true)} onExitImpersonation={handleExitImpersonation}/></AuthWorkspaceContext.Provider></AuthTokenContext.Provider>;
 }
 
 function AuthGate({onAuthed}:{onAuthed:(session:AuthSession)=>void}){
@@ -238,9 +257,47 @@ function AuthGate({onAuthed}:{onAuthed:(session:AuthSession)=>void}){
   </div></main>;
 }
 
+type AdminWorkspaceSummary={id:string;name:string;ownerEmail:string|null;createdAt:string;webChatMessageCount:number;webChatConversationCount:number;whatsappConnected:boolean};
+
+function SuperadminDashboard({onImpersonate,onBack}:{onImpersonate:(token:string,workspace:AuthWorkspace)=>void;onBack:()=>void}){
+  const token=useAuthToken();
+  const [workspaces,setWorkspaces]=useState<AdminWorkspaceSummary[]>([]);
+  const [loading,setLoading]=useState(true);
+  const [error,setError]=useState("");
+  const [managingId,setManagingId]=useState<string|null>(null);
+  const load=async()=>{
+    if(!token){setLoading(false);return}
+    setLoading(true);setError("");
+    try{
+      const response=await fetch(metaApi("/api/admin/workspaces"),{headers:authHeaders(token)});
+      const result=await response.json() as {workspaces?:AdminWorkspaceSummary[];error?:string};
+      if(!response.ok)throw new Error(result.error||"Could not load customers.");
+      setWorkspaces(result.workspaces||[]);
+    }catch(err){setError(err instanceof Error?err.message:"Could not load customers.")}
+    finally{setLoading(false)}
+  };
+  useEffect(()=>{load()},[token]);
+  const manage=async(ws:AdminWorkspaceSummary)=>{
+    if(!token)return;
+    setManagingId(ws.id);setError("");
+    try{
+      const response=await fetch(metaApi("/api/admin/impersonate"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({workspaceId:ws.id})});
+      const result=await response.json() as {token?:string;workspace?:AuthWorkspace;error?:string};
+      if(!response.ok||!result.token||!result.workspace)throw new Error(result.error||"Could not open this customer's workspace.");
+      onImpersonate(result.token,result.workspace);
+    }catch(err){setError(err instanceof Error?err.message:"Could not open this customer's workspace.");setManagingId(null)}
+  };
+  return <div className="admin-shell">
+    <header className="admin-header"><div><strong>🛡 Superadmin</strong><small>Manage every customer workspace</small></div><button className="secondary-btn" onClick={onBack}>← Back to my workspace</button></header>
+    {error&&<div className="meta-error">⚠ {error}</div>}
+    {loading?<p className="empty-hint">Loading…</p>:!workspaces.length?<div className="empty-state"><span>🛡</span><h3>No customer workspaces yet</h3></div>:
+    <div className="data-card"><div className="table-scroll"><table><thead><tr><th>Customer</th><th>Owner</th><th>Created</th><th>WhatsApp</th><th>Web chat</th><th/></tr></thead><tbody>{workspaces.map(ws=><tr key={ws.id}><td><strong>{ws.name}</strong></td><td>{ws.ownerEmail||"—"}</td><td>{new Date(ws.createdAt).toLocaleDateString()}</td><td>{ws.whatsappConnected?<span className="status-pill ready">Connected</span>:<span className="status-pill">Not connected</span>}</td><td>{ws.webChatConversationCount} conversation{ws.webChatConversationCount===1?"":"s"}</td><td><button className="primary" disabled={managingId===ws.id} onClick={()=>manage(ws)}>{managingId===ws.id?"Opening…":"Manage"}</button></td></tr>)}</tbody></table></div></div>}
+  </div>;
+}
+
 const SECTIONS: Section[] = ["Overview","Assistants","Channels","Inbox","Campaigns","Automations","Knowledge","Leads","Analytics","Team","Settings"];
 
-function Workspace({session,onLogout}:{session:AuthSession;onLogout:()=>void}) {
+function Workspace({session,onLogout,isSuperadmin,isImpersonating,onOpenAdmin,onExitImpersonation}:{session:AuthSession;onLogout:()=>void;isSuperadmin:boolean;isImpersonating:boolean;onOpenAdmin:()=>void;onExitImpersonation:()=>void}) {
   const sectionStorageKey = `qpy-engage-last-section::ws:${session.workspace.id}`;
   // Always boot into Overview first, then switch to whatever section was last open once
   // `connected` (see below) has resolved its real value — restoring straight into a section
@@ -302,13 +359,14 @@ function Workspace({session,onLogout}:{session:AuthSession;onLogout:()=>void}) {
     section === "Team" ? <Team members={members} role={session.role} onInvite={()=>setModal("invite")} onUpdateRole={updateRole} onRemove={removeMember} notify={notify}/> :
     <Settings activeTab={settingsTab} setActiveTab={setSettingsTab} connected={connected} onChannels={()=>go("Channels")} workspaceName={session.workspace.name} notify={notify}/>;
 
-  return <main className="app-shell">
+  return <main className="app-shell" style={isImpersonating?{marginTop:38}:undefined}>
+    {isImpersonating&&<div className="impersonation-banner">Viewing as <strong>{session.workspace.name}</strong> — actions here affect this customer's real workspace.<button onClick={onExitImpersonation}>Exit to Admin</button></div>}
     <aside className="sidebar">
       <button className="brand" onClick={()=>go("Overview")}><span className="brand-mark">Q</span><span>Qpy Engage</span></button>
       <div className="workspace"><span className="shop-avatar">{session.workspace.name.slice(0,1).toUpperCase()}</span><div><strong>{session.workspace.name}</strong><small>Business workspace</small></div><span className="chev">⌄</span></div>
       <nav className="side-nav" aria-label="Main navigation">{nav.map(([icon,label])=>{const count=label==="Inbox"?unreadInboxCount:0;return <button key={label} onClick={()=>go(label)} className={section===label?"active":""}><span>{icon}</span>{label}{count>0&&<b>{count}</b>}</button>})}</nav>
       <div className="nav-divider"/>
-      <nav className="side-nav secondary"><button className={section==="Team"?"active":""} onClick={()=>go("Team")}><span>♙</span>Team</button><button className={section==="Settings"?"active":""} onClick={()=>go("Settings")}><span>⚙</span>Settings</button></nav>
+      <nav className="side-nav secondary"><button className={section==="Team"?"active":""} onClick={()=>go("Team")}><span>♙</span>Team</button><button className={section==="Settings"?"active":""} onClick={()=>go("Settings")}><span>⚙</span>Settings</button>{isSuperadmin&&!isImpersonating&&<button onClick={onOpenAdmin}><span>🛡</span>Superadmin</button>}</nav>
       <div className="sidebar-card"><span className="spark">✦</span><strong>Grow with Qpy Engage</strong><p>Unlock more conversations and advanced AI.</p><button onClick={()=>{go("Settings");setSettingsTab("Billing")}}>Explore plans</button></div>
       <div className="profile"><span className="profile-avatar">{initials}</span><div><strong>{displayName}</strong><small>{session.user.email}</small></div><button aria-label="Profile menu" onClick={()=>setModal("profile")}>•••</button></div>
     </aside>
