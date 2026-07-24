@@ -241,8 +241,21 @@
 .auto-node-text small{font-size:10.5px;color:#8b93a1;line-height:1.4}
 .auto-conn{width:2px;height:26px;background:oklch(80% 0.005 90)}
 .auto-branches{display:flex;gap:32px;align-items:flex-start;justify-content:center}
-.auto-branch-col{display:flex;flex-direction:column;align-items:center;gap:0}
+.auto-branch-col{display:flex;flex-direction:column;align-items:center;gap:0;width:260px}
 .auto-branch-label{font-size:10px;font-weight:700;padding:4px 10px;border-radius:20px;margin-bottom:10px}
+.auto-fork{position:relative;width:552px;height:52px;max-width:100%}
+.auto-fork-stem{position:absolute;left:276px;top:0;width:2px;height:26px;background:oklch(80% 0.005 90)}
+.auto-fork-bar{position:absolute;left:130px;width:292px;top:26px;height:2px;background:oklch(80% 0.005 90)}
+.auto-fork-drop{position:absolute;top:26px;width:2px;height:26px;background:oklch(80% 0.005 90)}
+.auto-fork-drop-l{left:130px}
+.auto-fork-drop-r{left:422px}
+.auto-add-step{width:260px;max-width:100%;text-align:center;font-size:11px;font-weight:600;padding:8px;border-radius:10px;border:1px dashed oklch(80% 0.005 90);background:transparent;color:#6b7280;cursor:pointer}
+.auto-add-step:hover{border-color:oklch(56% 0.19 265);color:oklch(48% 0.19 265);border-style:solid}
+.blank-automation-btn{width:100%;display:flex;align-items:center;gap:12px;text-align:left;border:1px solid var(--line);border-radius:10px;padding:14px;background:oklch(98% 0.005 265);cursor:pointer}
+.blank-automation-btn:hover{border-color:oklch(56% 0.19 265)}
+.blank-automation-btn span{font-size:18px;width:32px;height:32px;border-radius:8px;background:#fff;border:1px solid var(--line);display:grid;place-items:center;flex:none}
+.blank-automation-btn strong{font-size:12.5px;display:block}
+.blank-automation-btn small{font-size:10.5px;color:#8b93a1}
 .template-gallery{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;max-height:60vh;overflow-y:auto}
 .template-gallery button{text-align:left;border:1px solid var(--line);border-radius:10px;padding:12px;background:#fff;display:flex;flex-direction:column;gap:4px;cursor:pointer}
 .template-gallery button:hover{border-color:oklch(56% 0.19 265)}
@@ -252,4 +265,4 @@
 .drawer-modal{max-width:420px}
 .checkbox-row{display:flex;gap:16px}
 .checkbox-row label{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:500}
-@media(max-width:900px){.auto-branches{flex-direction:column;align-items:center}.template-gallery{grid-template-columns:1fr}}
+@media(max-width:900px){.auto-branches{flex-direction:column;align-items:center}.auto-fork{display:none}.template-gallery{grid-template-columns:1fr}}

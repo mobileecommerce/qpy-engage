@@ -348,6 +348,32 @@ async function listSectors(request: Request, env: AutomationsEnv): Promise<Respo
   return json(request, { sectors });
 }
 
+function blankFlow(): FlowTree {
+  return {
+    trigger: step("💬", "New message received", "Click to choose which channels trigger this automation", "rose", "trigger", { channels: ["webchat"] }),
+    split1: splitStep("Conditional split", "Click to set the keywords that decide the branch", { condition: "" }),
+    branches: [
+      branch("Matches", "green", [step("💬", "Send message", "Click to write what gets sent", "rose", "message", { messageChannel: "webchat", messageText: "" })]),
+      branch("No match", "blue", [step("💬", "Send message", "Click to write what gets sent", "rose", "message", { messageChannel: "webchat", messageText: "" })]),
+    ],
+  };
+}
+
+async function createBlank(request: Request, env: AutomationsEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  await ensureAutomationsSchema(env.DB);
+  const body = await request.json().catch(() => ({})) as { name?: string };
+  const maxPriority = await env.DB.prepare(`SELECT MAX(priority) as m FROM automations2 WHERE workspace_id = ?`).bind(session.workspaceId).first<{ m: number | null }>();
+  const priority = (maxPriority?.m ?? -1) + 1;
+  const id = uid();
+  const name = (body.name || "New automation").trim().slice(0, 120) || "New automation";
+  await env.DB.prepare(`INSERT INTO automations2 (id, workspace_id, name, sector_key, status, priority, needs_config, flow_json) VALUES (?, ?, ?, 'custom', 'draft', ?, 1, ?)`)
+    .bind(id, session.workspaceId, name, priority, JSON.stringify(blankFlow())).run();
+  const row = await env.DB.prepare(`SELECT * FROM automations2 WHERE id = ?`).bind(id).first<AutomationRow>();
+  return json(request, { automation: row ? rowToAutomation(row) : null });
+}
+
 async function createFromTemplate(request: Request, env: AutomationsEnv): Promise<Response> {
   const session = await requireSession(request, env);
   if (session instanceof Response) return session;
@@ -635,6 +661,7 @@ export async function handleAutomationsRequest(request: Request, env: Automation
   if (!env.DB) return json(request, { error: "Workspace database is unavailable." }, 503);
 
   if (url.pathname === "/api/automations" && request.method === "GET") return listAutomations(request, env);
+  if (url.pathname === "/api/automations" && request.method === "POST") return createBlank(request, env);
   if (url.pathname === "/api/automations/sectors" && request.method === "GET") return listSectors(request, env);
   if (url.pathname === "/api/automations/from-template" && request.method === "POST") return createFromTemplate(request, env);
   if (url.pathname === "/api/automations/activity" && request.method === "GET") return listActivity(request, env);

@@ -1358,6 +1358,26 @@ function deleteStepAtPath(flow:AutoFlow, path:StepPath): AutoFlow {
   return flow;
 }
 
+type StepTarget = { branchIdx:0|1; subIdx?:0|1 };
+
+function appendStepAtTarget(flow:AutoFlow, target:StepTarget, newStep:AutoStep): AutoFlow {
+  const branches:[AutoBranch,AutoBranch]=[{...flow.branches[0]},{...flow.branches[1]}];
+  const b=branches[target.branchIdx];
+  if(target.subIdx===undefined){b.steps=[...b.steps,newStep]}
+  else{const subs=[...b.subBranches!] as [AutoSubBranch,AutoSubBranch];subs[target.subIdx]={...subs[target.subIdx],steps:[...subs[target.subIdx].steps,newStep]};b.subBranches=subs}
+  return {...flow,branches};
+}
+
+const NEW_STEP_KINDS:{kind:AutoStepKind;icon:string;title:string;chip:string;config:AutoStepConfig}[]=[
+  {kind:"message",icon:"💬",title:"Send message",chip:"rose",config:{messageChannel:"webchat",messageText:""}},
+  {kind:"aiReply",icon:"✨",title:"Send AI reply",chip:"indigo",config:{}},
+  {kind:"aiAction",icon:"📅",title:"AI Action",chip:"indigo",config:{aiActionName:""}},
+  {kind:"wait",icon:"⏱",title:"Wait",chip:"neutral",config:{waitAmount:1,waitUnit:"hours"}},
+  {kind:"tag",icon:"🏷️",title:"Add tag",chip:"neutral",config:{tagName:""}},
+  {kind:"notify",icon:"🔔",title:"Notify team",chip:"purple",config:{notifyChannels:["slack"],notifyRecipient:""}},
+  {kind:"escalate",icon:"🧑‍💼",title:"Escalate to human",chip:"human",config:{escalateQueue:"",escalatePriority:"Normal"}},
+];
+
 const AUTO_CHIP_CLASS:Record<string,string>={rose:"chip-rose",green:"chip-green",blue:"chip-blue",purple:"chip-purple",indigo:"chip-indigo",human:"chip-human",neutral:"chip-neutral",teal:"chip-teal"};
 
 function AutomationBuilder({notify}:{notify:(s:string)=>void}){
@@ -1369,6 +1389,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
   const [sectors,setSectors]=useState<SectorInfo[]>([]);
   const [showTemplates,setShowTemplates]=useState(false);
   const [editing,setEditing]=useState<{path:StepPath;step:AutoStep}|null>(null);
+  const [addingStepTo,setAddingStepTo]=useState<StepTarget|null>(null);
   const [activity,setActivity]=useState<ActivityRow[]>([]);
   const [activityLoading,setActivityLoading]=useState(false);
 
@@ -1403,6 +1424,18 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
       const data=await response.json() as {sectors?:SectorInfo[]};
       setSectors(data.sectors||[]);
     }catch{}
+  };
+
+  const createBlank=async()=>{
+    if(!token)return;
+    const response=await fetch(metaApi("/api/automations"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({name:"New automation"})});
+    const result=await response.json() as {automation?:AutomationDef;error?:string};
+    if(!response.ok||!result.automation){notify(result.error||"Could not create automation.");return}
+    setList([...list,result.automation]);
+    setShowTemplates(false);
+    setSelected(result.automation);
+    setView("canvas");
+    notify("Blank automation created — click each step to configure it");
   };
 
   const createFromTemplate=async(sectorKey:string,name:string)=>{
@@ -1461,6 +1494,15 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
     if(saved){setEditing(null);notify("Step deleted")}
   };
 
+  const appendStep=async(target:StepTarget,option:typeof NEW_STEP_KINDS[number])=>{
+    if(!selected)return;
+    const newStep:AutoStep={id:crypto.randomUUID(),icon:option.icon,title:option.title,subtitle:"Click to configure this step",chip:option.chip,kind:option.kind,config:option.config};
+    const flow=appendStepAtTarget(selected.flow,target,newStep);
+    const saved=await patchAutomation(selected.id,{flow});
+    setAddingStepTo(null);
+    if(saved){notify("Step added");setEditing({path:target.subIdx===undefined?{kind:"branchStep",branchIdx:target.branchIdx,stepIdx:saved.flow.branches[target.branchIdx].steps.length-1}:{kind:"subStep",branchIdx:target.branchIdx,subIdx:target.subIdx,stepIdx:saved.flow.branches[target.branchIdx].subBranches![target.subIdx].steps.length-1},step:newStep})}
+  };
+
   const runCounts=useMemo(()=>{
     const counts:Record<string,number>={};
     activity.forEach(row=>{counts[row.automationId]=(counts[row.automationId]||0)+1});
@@ -1489,7 +1531,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
         <AutoNode step={flow.trigger} onClick={()=>setEditing({path:{kind:"trigger"},step:flow.trigger})}/>
         <div className="auto-conn"/>
         <AutoNode step={flow.split1} onClick={()=>setEditing({path:{kind:"split1"},step:flow.split1})}/>
-        <div className="auto-conn"/>
+        <AutoFork/>
         <div className="auto-branches">
           {flow.branches.map((branch,branchIdx)=>{
             const bi=branchIdx as 0|1;
@@ -1497,12 +1539,13 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
               <span className={`auto-branch-label ${AUTO_CHIP_CLASS[branch.color]||"chip-neutral"}`}>{branch.label}</span>
               {branch.steps.map((step,stepIdx)=><Fragment key={step.id}>
                 <AutoNode step={step} onClick={()=>setEditing({path:{kind:"branchStep",branchIdx:bi,stepIdx},step})}/>
-                {stepIdx<branch.steps.length-1&&<div className="auto-conn"/>}
+                <div className="auto-conn"/>
               </Fragment>)}
+              <button className="auto-add-step" onClick={()=>setAddingStepTo({branchIdx:bi})}>＋ Add step</button>
               {branch.split2&&branch.subBranches&&<>
                 <div className="auto-conn"/>
                 <AutoNode step={branch.split2} onClick={()=>setEditing({path:{kind:"split2",branchIdx:bi},step:branch.split2!})}/>
-                <div className="auto-conn"/>
+                <AutoFork/>
                 <div className="auto-branches">
                   {branch.subBranches.map((sub,subIdx)=>{
                     const si=subIdx as 0|1;
@@ -1510,8 +1553,9 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
                       <span className={`auto-branch-label ${AUTO_CHIP_CLASS[sub.color]||"chip-neutral"}`}>{sub.label}</span>
                       {sub.steps.map((step,stepIdx)=><Fragment key={step.id}>
                         <AutoNode step={step} onClick={()=>setEditing({path:{kind:"subStep",branchIdx:bi,subIdx:si,stepIdx},step})}/>
-                        {stepIdx<sub.steps.length-1&&<div className="auto-conn"/>}
+                        <div className="auto-conn"/>
                       </Fragment>)}
+                      <button className="auto-add-step" onClick={()=>setAddingStepTo({branchIdx:bi,subIdx:si})}>＋ Add step</button>
                     </div>;
                   })}
                 </div>
@@ -1521,6 +1565,13 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
         </div>
       </div>
       {editing&&<StepDrawer path={editing.path} step={editing.step} onClose={()=>setEditing(null)} onSave={saveStep} onDelete={editing.path.kind==="branchStep"||editing.path.kind==="subStep"?()=>deleteStep(editing.path):undefined}/>}
+      {addingStepTo&&<SimpleModal title="Add a step" onClose={()=>setAddingStepTo(null)}>
+        <p>Choose what this step does — you can configure the details afterward.</p>
+        <div className="template-gallery">{NEW_STEP_KINDS.map(option=><button key={option.kind} onClick={()=>appendStep(addingStepTo,option)}>
+          <span className={`auto-node-icon ${AUTO_CHIP_CLASS[option.chip]||"chip-neutral"}`} style={{display:"inline-grid",placeItems:"center",width:28,height:28,borderRadius:8}}>{option.icon}</span>
+          <strong>{option.title}</strong>
+        </button>)}</div>
+      </SimpleModal>}
     </>;
   }
 
@@ -1542,8 +1593,11 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
           </div></td>
         </tr>)}</tbody></table>
       </div>}
-    {showTemplates&&<SimpleModal title="Start from a template" onClose={()=>setShowTemplates(false)}>
-      <p>Pick an industry starter flow — you can edit every step afterward.</p>
+    {showTemplates&&<SimpleModal title="New automation" onClose={()=>setShowTemplates(false)}>
+      <button className="blank-automation-btn" onClick={createBlank}>
+        <span>✎</span><div><strong>Start from scratch</strong><small>A minimal trigger + one split + two branches — build it your own way.</small></div>
+      </button>
+      <p style={{margin:"14px 0 8px"}}>Or pick an industry starter flow — you can edit every step afterward.</p>
       <div className="template-gallery">{sectors.map(s=><button key={s.key} onClick={()=>createFromTemplate(s.key,`${s.name} automation`)}>
         <span>{s.icon}</span><strong>{s.name}</strong><small>{s.desc}</small>
       </button>)}</div>
@@ -1556,6 +1610,10 @@ function AutoNode({step,onClick}:{step:AutoStep;onClick:()=>void}){
     <span className={`auto-node-icon ${AUTO_CHIP_CLASS[step.chip]||"chip-neutral"}`}>{step.icon}</span>
     <span className="auto-node-text"><strong>{step.title}</strong><small>{step.subtitle}</small></span>
   </button>;
+}
+
+function AutoFork(){
+  return <div className="auto-fork"><div className="auto-fork-stem"/><div className="auto-fork-bar"/><div className="auto-fork-drop auto-fork-drop-l"/><div className="auto-fork-drop auto-fork-drop-r"/></div>;
 }
 
 function StepDrawer({path,step,onClose,onSave,onDelete}:{path:StepPath;step:AutoStep;onClose:()=>void;onSave:(path:StepPath,next:AutoStep)=>void;onDelete?:()=>void}){
