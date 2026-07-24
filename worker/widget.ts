@@ -3,6 +3,7 @@ import { getStoredKnowledgeContent } from "./knowledge";
 import { saveSubmission } from "./leads";
 import { requireSession, type AuthEnv } from "./auth";
 import { runFlowForWidgetMessage, type FlowOutMessage } from "./flows";
+import { runAutomationsForWidgetMessage } from "./automations";
 
 export interface WidgetEnv extends AuthEnv {
   DB: D1Database;
@@ -422,6 +423,18 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
 
   const history = sanitizeChatMessages(body.history).slice(-6);
   const messages = [...history, { role: "user" as const, content: message }];
+
+  // Automations (see worker/automations.ts) run next: event-reactive, tree-shaped rules that
+  // fire once per triggering message (Zapier/n8n-style), distinct from the interactive Flows
+  // engine above. First active automation whose trigger matches wins; falls through to the bare
+  // AI assistant reply below if none match.
+  if (sessionId) {
+    const automationResult = await runAutomationsForWidgetMessage(env, workspaceId, sessionId, message, messages);
+    if (automationResult.handled) {
+      const repliedAt = sqliteNow();
+      return widgetJson({ messages: automationResult.messages, serverTime: repliedAt });
+    }
+  }
 
   const systemPrompt = await buildSystemPrompt(env.DB, workspaceId);
   const storedActions = await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions");

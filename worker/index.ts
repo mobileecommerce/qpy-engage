@@ -14,9 +14,10 @@ import { handleCampaignsRequest, type CampaignsEnv } from "./campaigns";
 import { handleOtpRequest, type OtpEnv } from "./otp";
 import { handleItemsRequest, type ItemsEnv } from "./items";
 import { handleFlowsRequest, type FlowsEnv } from "./flows";
+import { handleAutomationsRequest, type AutomationsEnv } from "./automations";
 import { json, corsPreflight, allowedOrigin } from "./shared";
 
-interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv, LeadsEnv, AdminEnv, CreditsEnv, ContactsEnv, CampaignsEnv, OtpEnv, ItemsEnv, FlowsEnv {
+interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv, LeadsEnv, AdminEnv, CreditsEnv, ContactsEnv, CampaignsEnv, OtpEnv, ItemsEnv, FlowsEnv, AutomationsEnv {
   ASSETS: Fetcher;
   DB: D1Database;
   ANTHROPIC_API_KEY?: string;
@@ -79,6 +80,9 @@ const worker = {
 
     const flowsResponse = await handleFlowsRequest(request, env);
     if (flowsResponse) return flowsResponse;
+
+    const automationsResponse = await handleAutomationsRequest(request, env);
+    if (automationsResponse) return automationsResponse;
 
     const metaResponse = await handleMetaRequest(request, env);
     if (metaResponse) return metaResponse;
