@@ -223,3 +223,33 @@
 .flow-card:hover .flow-card-delete{opacity:1}
 .flow-card-delete:hover{color:oklch(48% 0.15 25)}
 @media(max-width:900px){.flow-card-grid{grid-template-columns:1fr}}
+
+.chip-rose{background:oklch(93% 0.06 15);color:oklch(45% 0.16 15)}
+.chip-green{background:oklch(93% 0.06 145);color:oklch(38% 0.13 145)}
+.chip-blue{background:oklch(93% 0.05 230);color:oklch(45% 0.13 230)}
+.chip-purple{background:oklch(93% 0.06 295);color:oklch(46% 0.15 295)}
+.chip-indigo{background:oklch(94% 0.05 265);color:oklch(48% 0.19 265)}
+.chip-human{background:oklch(93% 0.06 60);color:oklch(45% 0.13 60)}
+.chip-neutral{background:oklch(94% 0.003 90);color:oklch(45% 0.005 270)}
+.chip-teal{background:oklch(93% 0.05 190);color:oklch(45% 0.1 190)}
+.automation-canvas{display:flex;flex-direction:column;align-items:center;padding:28px 16px 40px;border:1px solid var(--line);border-radius:9px;background-color:oklch(99% 0.002 90);background-image:radial-gradient(oklch(90% 0.005 90) 1.5px,transparent 1.5px);background-size:22px 22px;overflow-x:auto}
+.auto-node{display:flex;align-items:flex-start;gap:10px;width:260px;max-width:100%;text-align:left;background:#fff;border:1px solid oklch(90% 0.005 90);border-radius:12px;padding:12px 14px;cursor:pointer;flex:none}
+.auto-node:hover{border-color:oklch(56% 0.19 265)}
+.auto-node-icon{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;font-size:13px;flex:none}
+.auto-node-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.auto-node-text strong{font-size:12px}
+.auto-node-text small{font-size:10.5px;color:#8b93a1;line-height:1.4}
+.auto-conn{width:2px;height:26px;background:oklch(80% 0.005 90)}
+.auto-branches{display:flex;gap:32px;align-items:flex-start;justify-content:center}
+.auto-branch-col{display:flex;flex-direction:column;align-items:center;gap:0}
+.auto-branch-label{font-size:10px;font-weight:700;padding:4px 10px;border-radius:20px;margin-bottom:10px}
+.template-gallery{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;max-height:60vh;overflow-y:auto}
+.template-gallery button{text-align:left;border:1px solid var(--line);border-radius:10px;padding:12px;background:#fff;display:flex;flex-direction:column;gap:4px;cursor:pointer}
+.template-gallery button:hover{border-color:oklch(56% 0.19 265)}
+.template-gallery button span{font-size:18px}
+.template-gallery button strong{font-size:12px}
+.template-gallery button small{font-size:10.5px;color:#8b93a1;line-height:1.4}
+.drawer-modal{max-width:420px}
+.checkbox-row{display:flex;gap:16px}
+.checkbox-row label{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:500}
+@media(max-width:900px){.auto-branches{flex-direction:column;align-items:center}.template-gallery{grid-template-columns:1fr}}

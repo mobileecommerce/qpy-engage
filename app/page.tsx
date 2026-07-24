@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState } from "react";
 import "./live-inbox.css";
 
 type Section = "Overview" | "Assistants" | "Channels" | "Inbox" | "Campaigns" | "Audiences" | "Automations" | "Flows" | "Knowledge" | "Leads" | "Analytics" | "Team" | "Settings";
@@ -323,7 +323,7 @@ function Workspace({session,onLogout,isSuperadmin,isImpersonating,onExitImperson
     section === "Inbox" ? <InboxHub connected={connected} conversations={conversations} setConversations={setConversations} selected={selected} setSelectedId={setSelectedId} messages={messages[selected.id]??[]} draft={draft} setDraft={setDraft} sendMessage={sendMessage} aiActive={aiActive} setAiActive={setAiActive} onConnect={()=>go("Channels")} notify={notify}/> :
     section === "Campaigns" ? <Campaigns notify={notify} onManageAudiences={()=>go("Audiences")}/> :
     section === "Audiences" ? <Audiences notify={notify}/> :
-    section === "Automations" ? <Automations items={automations} setItems={setAutomations} onCreate={openAutomation} notify={notify}/> :
+    section === "Automations" ? <AutomationBuilder notify={notify}/> :
     section === "Flows" ? <Flows notify={notify}/> :
     section === "Knowledge" ? <Knowledge sources={sources} setSources={setSources} onAdd={()=>setModal("source")} notify={notify}/> :
     section === "Leads" ? <Leads notify={notify}/> :
@@ -1303,7 +1303,313 @@ function Audiences({notify}:{notify:(s:string)=>void}){
 }
 
 const automationTemplates:{name:string;trigger:string;action:string}[]=[{name:"Welcome new leads",trigger:"New WhatsApp conversation",action:"Send AI welcome message"},{name:"Recover abandoned carts",trigger:"Cart idle for 2 hours",action:"Send recovery template"},{name:"Collect customer feedback",trigger:"Conversation marked resolved",action:"Request feedback survey"}];
-function Automations({items,setItems,onCreate,notify}:{items:Automation[];setItems:(v:Automation[])=>void;onCreate:(template?:{name:string;trigger:string;action:string})=>void;notify:(s:string)=>void}){const [query,setQuery]=useState("");const duplicate=(item:Automation)=>{setItems([...items,{...item,id:Date.now(),title:`${item.title} copy`,runs:0,rate:"New",active:false}]);notify("Automation duplicated")};const remove=(id:number)=>{if(window.confirm("Delete this automation?")){setItems(items.filter(i=>i.id!==id));notify("Automation deleted")}};return <><PageHeader title="Automations" description="Build always-on workflows for sales and support." action={<button className="primary" onClick={()=>onCreate()}>＋ Create automation</button>}/><div className="toolbar"><input placeholder="Search automations" value={query} onChange={e=>setQuery(e.target.value)}/><span>{items.filter(i=>i.active).length} active workflows</span></div><div className="data-card"><table><thead><tr><th>Automation</th><th>Trigger</th><th>Action</th><th>Runs</th><th>Performance</th><th>Status</th><th/></tr></thead><tbody>{items.filter(i=>i.title.toLowerCase().includes(query.toLowerCase())).map(item=><tr key={item.id}><td><div className="table-title"><span>✦</span><strong>{item.title}</strong></div></td><td>{item.trigger}</td><td>{item.action}</td><td>{item.runs}</td><td><b className="positive">{item.rate}</b></td><td><button className={`toggle ${item.active?"on":""}`} onClick={()=>setItems(items.map(a=>a.id===item.id?{...a,active:!a.active}:a))}><i/></button></td><td><div className="row-actions"><button title="Duplicate" onClick={()=>duplicate(item)}>⧉</button><button title="Delete" onClick={()=>remove(item.id)}>×</button></div></td></tr>)}</tbody></table></div><div className="template-strip"><div><h3>Start from a proven template</h3><p>Launch common WhatsApp workflows in minutes.</p></div>{automationTemplates.map(t=><button key={t.name} onClick={()=>onCreate(t)}><span>＋</span>{t.name}</button>)}</div></>}
+
+// ── Automation Builder: real tree-based automation engine (see worker/automations.ts) ──
+
+type AutoStepKind = "trigger"|"split"|"aiReply"|"message"|"wait"|"tag"|"notify"|"aiAction"|"escalate"|"generic";
+type AutoStepConfig = {
+  channels?:string[];
+  ruleType?:"conditional"|"ab"|"time"|"freq"; condition?:string;
+  abWeightA?:number;
+  activeDays?:string[]; startTime?:string; endTime?:string;
+  freqMax?:number; freqPeriod?:"hour"|"day"|"week";
+  messageChannel?:string; messageText?:string;
+  waitAmount?:number; waitUnit?:"minutes"|"hours"|"days";
+  tagName?:string;
+  notifyChannels?:string[]; notifyRecipient?:string;
+  aiActionName?:string;
+  escalateQueue?:string; escalatePriority?:"Normal"|"Urgent";
+};
+type AutoStep = { id:string; icon:string; title:string; subtitle:string; chip:string; kind:AutoStepKind; config?:AutoStepConfig };
+type AutoSubBranch = { id:string; label:string; color:string; steps:AutoStep[] };
+type AutoBranch = { id:string; label:string; color:string; steps:AutoStep[]; split2?:AutoStep; subBranches?:[AutoSubBranch,AutoSubBranch] };
+type AutoFlow = { trigger:AutoStep; split1:AutoStep; branches:[AutoBranch,AutoBranch] };
+type AutomationDef = { id:string; name:string; sectorKey:string; status:"active"|"draft"|"inactive"; priority:number; needsConfig:boolean; flow:AutoFlow; createdAt?:string; updatedAt?:string };
+type SectorInfo = { key:string; name:string; icon:string; desc:string };
+type ActivityRow = { id:number; automationId:string; automationName:string; contact:string; channel:string; branch:string; outcome:string; outcomeType:string; createdAt:string };
+
+type StepPath =
+  | { kind:"trigger" }
+  | { kind:"split1" }
+  | { kind:"branchStep"; branchIdx:0|1; stepIdx:number }
+  | { kind:"split2"; branchIdx:0|1 }
+  | { kind:"subStep"; branchIdx:0|1; subIdx:0|1; stepIdx:number };
+
+function getStepAtPath(flow:AutoFlow, path:StepPath): AutoStep {
+  if(path.kind==="trigger")return flow.trigger;
+  if(path.kind==="split1")return flow.split1;
+  if(path.kind==="branchStep")return flow.branches[path.branchIdx].steps[path.stepIdx];
+  if(path.kind==="split2")return flow.branches[path.branchIdx].split2!;
+  return flow.branches[path.branchIdx].subBranches![path.subIdx].steps[path.stepIdx];
+}
+function setStepAtPath(flow:AutoFlow, path:StepPath, next:AutoStep): AutoFlow {
+  const branches:[AutoBranch,AutoBranch]=[{...flow.branches[0]},{...flow.branches[1]}];
+  if(path.kind==="trigger")return {...flow,trigger:next};
+  if(path.kind==="split1")return {...flow,split1:next};
+  if(path.kind==="branchStep"){const b=branches[path.branchIdx];b.steps=b.steps.map((s,i)=>i===path.stepIdx?next:s);return {...flow,branches};}
+  if(path.kind==="split2"){branches[path.branchIdx].split2=next;return {...flow,branches};}
+  const b=branches[path.branchIdx];const subs=[...b.subBranches!] as [AutoSubBranch,AutoSubBranch];subs[path.subIdx]={...subs[path.subIdx],steps:subs[path.subIdx].steps.map((s,i)=>i===path.stepIdx?next:s)};b.subBranches=subs;
+  return {...flow,branches};
+}
+function deleteStepAtPath(flow:AutoFlow, path:StepPath): AutoFlow {
+  const branches:[AutoBranch,AutoBranch]=[{...flow.branches[0]},{...flow.branches[1]}];
+  if(path.kind==="branchStep"){const b=branches[path.branchIdx];b.steps=b.steps.filter((_,i)=>i!==path.stepIdx);return {...flow,branches};}
+  if(path.kind==="subStep"){const b=branches[path.branchIdx];const subs=[...b.subBranches!] as [AutoSubBranch,AutoSubBranch];subs[path.subIdx]={...subs[path.subIdx],steps:subs[path.subIdx].steps.filter((_,i)=>i!==path.stepIdx)};b.subBranches=subs;return {...flow,branches};}
+  return flow;
+}
+
+const AUTO_CHIP_CLASS:Record<string,string>={rose:"chip-rose",green:"chip-green",blue:"chip-blue",purple:"chip-purple",indigo:"chip-indigo",human:"chip-human",neutral:"chip-neutral",teal:"chip-teal"};
+
+function AutomationBuilder({notify}:{notify:(s:string)=>void}){
+  const token=useAuthToken();
+  const [list,setList]=useState<AutomationDef[]>([]);
+  const [loading,setLoading]=useState(true);
+  const [view,setView]=useState<"list"|"canvas"|"activity">("list");
+  const [selected,setSelected]=useState<AutomationDef|null>(null);
+  const [sectors,setSectors]=useState<SectorInfo[]>([]);
+  const [showTemplates,setShowTemplates]=useState(false);
+  const [editing,setEditing]=useState<{path:StepPath;step:AutoStep}|null>(null);
+  const [activity,setActivity]=useState<ActivityRow[]>([]);
+  const [activityLoading,setActivityLoading]=useState(false);
+
+  const load=async()=>{
+    if(!token){setLoading(false);return}
+    setLoading(true);
+    try{
+      const response=await fetch(metaApi("/api/automations"),{headers:authHeaders(token)});
+      const data=await response.json() as {automations?:AutomationDef[]};
+      setList(data.automations||[]);
+    }catch{}
+    finally{setLoading(false)}
+  };
+  useEffect(()=>{load()},[token]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const loadActivity=async()=>{
+    if(!token)return;
+    setActivityLoading(true);
+    try{
+      const response=await fetch(metaApi("/api/automations/activity"),{headers:authHeaders(token)});
+      const data=await response.json() as {rows?:ActivityRow[]};
+      setActivity(data.rows||[]);
+    }catch{}
+    finally{setActivityLoading(false)}
+  };
+
+  const openTemplates=async()=>{
+    setShowTemplates(true);
+    if(sectors.length||!token)return;
+    try{
+      const response=await fetch(metaApi("/api/automations/sectors"),{headers:authHeaders(token)});
+      const data=await response.json() as {sectors?:SectorInfo[]};
+      setSectors(data.sectors||[]);
+    }catch{}
+  };
+
+  const createFromTemplate=async(sectorKey:string,name:string)=>{
+    if(!token)return;
+    const response=await fetch(metaApi("/api/automations/from-template"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({sectorKey,name})});
+    const result=await response.json() as {automation?:AutomationDef;error?:string};
+    if(!response.ok||!result.automation){notify(result.error||"Could not create automation.");return}
+    setList([...list,result.automation]);
+    setShowTemplates(false);
+    setSelected(result.automation);
+    setView("canvas");
+    notify("Automation created from template");
+  };
+
+  const patchAutomation=async(id:string,patch:Partial<{name:string;status:string;flow:AutoFlow;needsConfig:boolean}>)=>{
+    if(!token)return null;
+    const response=await fetch(metaApi(`/api/automations/${id}`),{method:"PATCH",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify(patch)});
+    const result=await response.json() as {automation?:AutomationDef;error?:string};
+    if(!response.ok||!result.automation){notify(result.error||"Could not save automation.");return null}
+    setList(list.map(a=>a.id===id?result.automation!:a));
+    if(selected?.id===id)setSelected(result.automation);
+    return result.automation;
+  };
+
+  const toggleStatus=async(automation:AutomationDef)=>{
+    const status=automation.status==="active"?"inactive":"active";
+    await patchAutomation(automation.id,{status});
+    notify(status==="active"?"Automation activated":"Automation deactivated");
+  };
+
+  const reorder=async(automation:AutomationDef,direction:"up"|"down")=>{
+    if(!token)return;
+    await fetch(metaApi(`/api/automations/${automation.id}/reorder`),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({direction})});
+    load();
+  };
+
+  const remove=async(automation:AutomationDef)=>{
+    if(!token)return;
+    if(!window.confirm(`Delete "${automation.name}"?`))return;
+    await fetch(metaApi(`/api/automations/${automation.id}`),{method:"DELETE",headers:authHeaders(token)});
+    setList(list.filter(a=>a.id!==automation.id));
+    notify("Automation deleted");
+  };
+
+  const saveStep=async(path:StepPath,next:AutoStep)=>{
+    if(!selected)return;
+    const flow=setStepAtPath(selected.flow,path,next);
+    const saved=await patchAutomation(selected.id,{flow});
+    if(saved){setEditing(null);notify("Step saved")}
+  };
+  const deleteStep=async(path:StepPath)=>{
+    if(!selected)return;
+    if(!window.confirm("Delete this step?"))return;
+    const flow=deleteStepAtPath(selected.flow,path);
+    const saved=await patchAutomation(selected.id,{flow});
+    if(saved){setEditing(null);notify("Step deleted")}
+  };
+
+  const runCounts=useMemo(()=>{
+    const counts:Record<string,number>={};
+    activity.forEach(row=>{counts[row.automationId]=(counts[row.automationId]||0)+1});
+    return counts;
+  },[activity]);
+
+  if(view==="activity"){
+    return <>
+      <PageHeader title="Automation activity" description="Real executions of your automations, most recent first." action={<button className="secondary-btn" onClick={()=>setView("list")}>← Back to automations</button>}/>
+      <div className="data-card">
+        {activityLoading?<p className="empty-hint">Loading…</p>:!activity.length?<div className="empty-state"><span>⌁</span><h3>No activity yet</h3><p>Once a customer message matches an active automation's trigger, it'll show up here.</p></div>:
+        <table><thead><tr><th>Contact</th><th>Channel</th><th>Automation</th><th>Branch</th><th>Outcome</th><th>When</th></tr></thead>
+        <tbody>{activity.map(row=><tr key={row.id}><td>{row.contact}</td><td>{row.channel}</td><td><strong>{row.automationName}</strong></td><td>{row.branch}</td><td><b className={row.outcomeType==="warn"?"":"positive"} style={row.outcomeType==="warn"?{color:"#b66b26"}:undefined}>{row.outcome}</b></td><td>{row.createdAt}</td></tr>)}</tbody></table>}
+      </div>
+    </>;
+  }
+
+  if(view==="canvas"&&selected){
+    const flow=selected.flow;
+    return <>
+      <PageHeader title={selected.name} description={selected.needsConfig?"⚠ This automation needs configuration before it can run reliably.":"Click any step to view or edit its configuration."} action={<div className="header-buttons">
+        <button className="secondary-btn" onClick={()=>setView("list")}>← Back to list</button>
+        <button className={`toggle ${selected.status==="active"?"on":""}`} onClick={()=>toggleStatus(selected)} title={selected.status==="active"?"Active — click to deactivate":"Inactive — click to activate"}><i/></button>
+      </div>}/>
+      <div className="automation-canvas">
+        <AutoNode step={flow.trigger} onClick={()=>setEditing({path:{kind:"trigger"},step:flow.trigger})}/>
+        <div className="auto-conn"/>
+        <AutoNode step={flow.split1} onClick={()=>setEditing({path:{kind:"split1"},step:flow.split1})}/>
+        <div className="auto-conn"/>
+        <div className="auto-branches">
+          {flow.branches.map((branch,branchIdx)=>{
+            const bi=branchIdx as 0|1;
+            return <div className="auto-branch-col" key={branch.id}>
+              <span className={`auto-branch-label ${AUTO_CHIP_CLASS[branch.color]||"chip-neutral"}`}>{branch.label}</span>
+              {branch.steps.map((step,stepIdx)=><Fragment key={step.id}>
+                <AutoNode step={step} onClick={()=>setEditing({path:{kind:"branchStep",branchIdx:bi,stepIdx},step})}/>
+                {stepIdx<branch.steps.length-1&&<div className="auto-conn"/>}
+              </Fragment>)}
+              {branch.split2&&branch.subBranches&&<>
+                <div className="auto-conn"/>
+                <AutoNode step={branch.split2} onClick={()=>setEditing({path:{kind:"split2",branchIdx:bi},step:branch.split2!})}/>
+                <div className="auto-conn"/>
+                <div className="auto-branches">
+                  {branch.subBranches.map((sub,subIdx)=>{
+                    const si=subIdx as 0|1;
+                    return <div className="auto-branch-col" key={sub.id}>
+                      <span className={`auto-branch-label ${AUTO_CHIP_CLASS[sub.color]||"chip-neutral"}`}>{sub.label}</span>
+                      {sub.steps.map((step,stepIdx)=><Fragment key={step.id}>
+                        <AutoNode step={step} onClick={()=>setEditing({path:{kind:"subStep",branchIdx:bi,subIdx:si,stepIdx},step})}/>
+                        {stepIdx<sub.steps.length-1&&<div className="auto-conn"/>}
+                      </Fragment>)}
+                    </div>;
+                  })}
+                </div>
+              </>}
+            </div>;
+          })}
+        </div>
+      </div>
+      {editing&&<StepDrawer path={editing.path} step={editing.step} onClose={()=>setEditing(null)} onSave={saveStep} onDelete={editing.path.kind==="branchStep"||editing.path.kind==="subStep"?()=>deleteStep(editing.path):undefined}/>}
+    </>;
+  }
+
+  return <>
+    <PageHeader title="Automations" description="Always-on rules that react to a trigger and run a full branch — AI replies, system actions, tags, escalation — in one shot." action={<div className="header-buttons"><button className="secondary-btn" onClick={()=>{setView("activity");loadActivity()}}>Activity log</button><button className="primary" onClick={openTemplates}>＋ New automation</button></div>}/>
+    {loading?<p className="empty-hint">Loading…</p>:!list.length?
+      <div className="empty-state"><span>⌁</span><h3>No automations yet</h3><p>Start from one of 8 ready-made industry flows — reservation booking, order tracking, emergency escalation, and more.</p><button className="primary" onClick={openTemplates}>＋ New automation</button></div>:
+      <div className="data-card">
+        <table><thead><tr><th/><th>Automation</th><th>Trigger</th><th>Status</th><th>Runs</th><th/></tr></thead>
+        <tbody>{[...list].sort((a,b)=>a.priority-b.priority).map((automation,idx)=><tr key={automation.id}>
+          <td><div className="row-actions"><button title="Move up" disabled={idx===0} onClick={()=>reorder(automation,"up")}>▲</button><button title="Move down" disabled={idx===list.length-1} onClick={()=>reorder(automation,"down")}>▼</button></div></td>
+          <td><div className="table-title"><span>⌁</span><div><strong>{automation.name}</strong>{automation.needsConfig&&<small style={{color:"#b66b26",display:"block"}}>⚠ Needs configuration</small>}</div></div></td>
+          <td>{automation.flow.trigger.subtitle}</td>
+          <td><span className={`flow-status-pill ${automation.status==="active"?"is-active":"is-draft"}`}>{automation.status==="active"?"Active":automation.status==="draft"?"Draft":"Inactive"}</span></td>
+          <td>{runCounts[automation.id]||0}</td>
+          <td><div className="row-actions">
+            <button className="secondary-btn" onClick={()=>{setSelected(automation);setView("canvas")}}>Open →</button>
+            <button title="Delete" onClick={()=>remove(automation)}>×</button>
+          </div></td>
+        </tr>)}</tbody></table>
+      </div>}
+    {showTemplates&&<SimpleModal title="Start from a template" onClose={()=>setShowTemplates(false)}>
+      <p>Pick an industry starter flow — you can edit every step afterward.</p>
+      <div className="template-gallery">{sectors.map(s=><button key={s.key} onClick={()=>createFromTemplate(s.key,`${s.name} automation`)}>
+        <span>{s.icon}</span><strong>{s.name}</strong><small>{s.desc}</small>
+      </button>)}</div>
+    </SimpleModal>}
+  </>;
+}
+
+function AutoNode({step,onClick}:{step:AutoStep;onClick:()=>void}){
+  return <button className="auto-node" onClick={onClick}>
+    <span className={`auto-node-icon ${AUTO_CHIP_CLASS[step.chip]||"chip-neutral"}`}>{step.icon}</span>
+    <span className="auto-node-text"><strong>{step.title}</strong><small>{step.subtitle}</small></span>
+  </button>;
+}
+
+function StepDrawer({path,step,onClose,onSave,onDelete}:{path:StepPath;step:AutoStep;onClose:()=>void;onSave:(path:StepPath,next:AutoStep)=>void;onDelete?:()=>void}){
+  const [config,setConfig]=useState<AutoStepConfig>(step.config||{});
+  const update=(patch:Partial<AutoStepConfig>)=>setConfig({...config,...patch});
+  const toggleIn=(key:"channels"|"notifyChannels",value:string)=>{
+    const current=config[key]||[];
+    update({[key]:current.includes(value)?current.filter(v=>v!==value):[...current,value]} as Partial<AutoStepConfig>);
+  };
+  const save=()=>onSave(path,{...step,config});
+
+  return <div className="modal-backdrop" onMouseDown={onClose}><div className="modal drawer-modal" onMouseDown={e=>e.stopPropagation()}>
+    <div className="modal-head"><h2>{step.title}</h2><button onClick={onClose}>×</button></div>
+    <div className="modal-form">
+      <p className="empty-hint" style={{margin:"0 0 8px"}}>{step.subtitle}</p>
+
+      {step.kind==="trigger"&&<label>Channels
+        <div className="checkbox-row"><label><input type="checkbox" checked={(config.channels||[]).includes("whatsapp")} onChange={()=>toggleIn("channels","whatsapp")}/> WhatsApp</label><label><input type="checkbox" checked={(config.channels||[]).includes("webchat")} onChange={()=>toggleIn("channels","webchat")}/> Web chat</label></div>
+      </label>}
+
+      {step.kind==="split"&&<>
+        <label>Rule type<select value={config.ruleType||"conditional"} onChange={e=>update({ruleType:e.target.value as AutoStepConfig["ruleType"]})}>
+          <option value="conditional">Conditional (keyword match)</option>
+          <option value="ab">A/B split</option>
+          <option value="time">Time window</option>
+          <option value="freq">Frequency cap</option>
+        </select></label>
+        {config.ruleType==="conditional"&&<label>Match if message contains (comma-separated)<input value={config.condition||""} onChange={e=>update({condition:e.target.value})}/></label>}
+        {config.ruleType==="ab"&&<label>Branch A weight: {config.abWeightA??50}%<input type="range" min={0} max={100} value={config.abWeightA??50} onChange={e=>update({abWeightA:Number(e.target.value)})}/></label>}
+        {config.ruleType==="time"&&<><label>Start time<input type="time" value={config.startTime||"09:00"} onChange={e=>update({startTime:e.target.value})}/></label><label>End time<input type="time" value={config.endTime||"18:00"} onChange={e=>update({endTime:e.target.value})}/></label></>}
+        {config.ruleType==="freq"&&<><label>Max sends<input type="number" min={1} value={config.freqMax??3} onChange={e=>update({freqMax:Number(e.target.value)})}/></label><label>Per<select value={config.freqPeriod||"day"} onChange={e=>update({freqPeriod:e.target.value as AutoStepConfig["freqPeriod"]})}><option value="hour">Hour</option><option value="day">Day</option><option value="week">Week</option></select></label></>}
+      </>}
+
+      {step.kind==="message"&&<label>Message text<textarea rows={3} value={config.messageText||""} onChange={e=>update({messageText:e.target.value})}/></label>}
+
+      {step.kind==="wait"&&<><label>Duration<input type="number" min={1} value={config.waitAmount??1} onChange={e=>update({waitAmount:Number(e.target.value)})}/></label><label>Unit<select value={config.waitUnit||"hours"} onChange={e=>update({waitUnit:e.target.value as AutoStepConfig["waitUnit"]})}><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option></select></label></>}
+
+      {step.kind==="tag"&&<label>Tag name<input value={config.tagName||""} onChange={e=>update({tagName:e.target.value})}/></label>}
+
+      {step.kind==="notify"&&<><label>Notify via<div className="checkbox-row"><label><input type="checkbox" checked={(config.notifyChannels||[]).includes("email")} onChange={()=>toggleIn("notifyChannels","email")}/> Email</label><label><input type="checkbox" checked={(config.notifyChannels||[]).includes("slack")} onChange={()=>toggleIn("notifyChannels","slack")}/> Slack</label></div></label><label>Recipient<input value={config.notifyRecipient||""} onChange={e=>update({notifyRecipient:e.target.value})} placeholder="email or leave blank for the workspace Slack webhook"/></label></>}
+
+      {step.kind==="aiAction"&&<label>AI Action name (must match one configured in Assistants → AI Actions)<input value={config.aiActionName||""} onChange={e=>update({aiActionName:e.target.value})}/></label>}
+
+      {step.kind==="escalate"&&<><label>Assign to queue<input value={config.escalateQueue||""} onChange={e=>update({escalateQueue:e.target.value})}/></label><label>Priority<select value={config.escalatePriority||"Normal"} onChange={e=>update({escalatePriority:e.target.value as AutoStepConfig["escalatePriority"]})}><option value="Normal">Normal</option><option value="Urgent">Urgent</option></select></label></>}
+
+      {(step.kind==="aiReply"||step.kind==="generic")&&<p className="empty-hint">{step.kind==="aiReply"?"This step calls your real AI assistant (its own prompt, role, and knowledge sources) — it doesn't send scripted text.":"No configurable fields for this step."}</p>}
+    </div>
+    <div className="modal-actions">
+      {onDelete&&<button className="danger-link" onClick={onDelete}>Delete step</button>}
+      <button className="secondary-btn" onClick={onClose}>Cancel</button>
+      <button className="primary" onClick={save}>Save changes</button>
+    </div>
+  </div></div>;
+}
 
 // ── Flows: reusable Items catalog + predefined (non-AI) step-by-step conversation builder ──
 
