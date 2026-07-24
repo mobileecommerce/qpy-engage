@@ -1,4 +1,5 @@
 import { encoder, arrayBuffer, sha256, safeEqual, bytesToBase64, base64ToBytes, json, corsPreflight, allowedOrigin } from "./shared";
+import { grantPlanMessages } from "./messageBalance";
 
 export interface AuthEnv {
   DB: D1Database;
@@ -15,6 +16,8 @@ export interface SessionContext {
   name: string | null;
   isSuperadmin: boolean;
   isImpersonating: boolean;
+  workspaceStatus: "active" | "disabled";
+  workspacePlan: string;
 }
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -63,6 +66,8 @@ async function ensureAuthSchema(db: D1Database): Promise<void> {
   // Idempotent migrations for tables created before these columns existed.
   try { await db.prepare(`ALTER TABLE users ADD COLUMN is_superadmin INTEGER NOT NULL DEFAULT 0`).run(); } catch { /* already exists */ }
   try { await db.prepare(`ALTER TABLE sessions ADD COLUMN via_admin INTEGER NOT NULL DEFAULT 0`).run(); } catch { /* already exists */ }
+  try { await db.prepare(`ALTER TABLE workspaces ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`).run(); } catch { /* already exists */ }
+  try { await db.prepare(`ALTER TABLE workspaces ADD COLUMN plan TEXT NOT NULL DEFAULT 'Free'`).run(); } catch { /* already exists */ }
 }
 
 async function hashPassword(password: string): Promise<{ hash: string; salt: string }> {
@@ -100,12 +105,12 @@ async function loadSession(request: Request, env: AuthEnv): Promise<SessionConte
   if (!token) return null;
   const hash = await tokenHash(token);
   const row = await env.DB.prepare(`SELECT s.workspace_id as workspaceId, s.expires_at as expiresAt, s.via_admin as viaAdmin,
-      u.id as userId, u.email as email, u.name as name, u.is_superadmin as isSuperadmin, w.name as workspaceName, m.role as role
+      u.id as userId, u.email as email, u.name as name, u.is_superadmin as isSuperadmin, w.name as workspaceName, w.status as workspaceStatus, w.plan as workspacePlan, m.role as role
     FROM sessions s
     JOIN users u ON u.id = s.user_id
     JOIN workspaces w ON w.id = s.workspace_id
     LEFT JOIN workspace_members m ON m.workspace_id = s.workspace_id AND m.user_id = u.id
-    WHERE s.token_hash = ?`).bind(hash).first<{ userId: string; workspaceId: string; expiresAt: string; email: string; name: string | null; isSuperadmin: number; workspaceName: string; role: Role | null; viaAdmin: number }>();
+    WHERE s.token_hash = ?`).bind(hash).first<{ userId: string; workspaceId: string; expiresAt: string; email: string; name: string | null; isSuperadmin: number; workspaceName: string; workspaceStatus: string | null; workspacePlan: string | null; role: Role | null; viaAdmin: number }>();
   if (!row) return null;
   if (new Date(row.expiresAt).getTime() < Date.now()) {
     await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(hash).run();
@@ -115,12 +120,17 @@ async function loadSession(request: Request, env: AuthEnv): Promise<SessionConte
   // A superadmin gets Owner-equivalent rights on any workspace they impersonate into, without
   // needing a real workspace_members row for every customer — the impersonate endpoint is the
   // actual access gate (worker/admin.ts), this just avoids being blocked by role checks once there.
-  return { userId: row.userId, workspaceId: row.workspaceId, workspaceName: row.workspaceName, role: isSuperadmin ? "Owner" : (row.role || "Agent"), email: row.email, name: row.name, isSuperadmin, isImpersonating: row.viaAdmin === 1 };
+  return { userId: row.userId, workspaceId: row.workspaceId, workspaceName: row.workspaceName, role: isSuperadmin ? "Owner" : (row.role || "Agent"), email: row.email, name: row.name, isSuperadmin, isImpersonating: row.viaAdmin === 1, workspaceStatus: row.workspaceStatus === "disabled" ? "disabled" : "active", workspacePlan: row.workspacePlan || "Free" };
 }
 
 export async function requireSession(request: Request, env: AuthEnv): Promise<SessionContext | Response> {
   const session = await loadSession(request, env);
   if (!session) return json(request, { error: "Sign in required." }, 401);
+  // A superadmin can still access a disabled workspace (to review/re-enable it via
+  // impersonation) — the block only applies to the customer's own normal login.
+  if (session.workspaceStatus === "disabled" && !session.isSuperadmin) {
+    return json(request, { error: "This workspace has been disabled. Contact support if you believe this is a mistake." }, 403);
+  }
   return session;
 }
 
@@ -167,7 +177,8 @@ async function signup(request: Request, env: AuthEnv): Promise<Response> {
   await env.DB.prepare("UPDATE workspace_members SET user_id = ?, status = 'Active' WHERE email = ? AND status = 'Invited'").bind(userId, email).run();
 
   const token = await createSession(env.DB, userId, workspaceId);
-  return json(request, { token, user: { id: userId, email, name, isSuperadmin: false }, workspace: { id: workspaceId, name: workspaceName }, role: "Owner" });
+  await grantPlanMessages(env.DB, workspaceId, "Free");
+  return json(request, { token, user: { id: userId, email, name, isSuperadmin: false }, workspace: { id: workspaceId, name: workspaceName, plan: "Free" }, role: "Owner" });
 }
 
 async function login(request: Request, env: AuthEnv): Promise<Response> {
@@ -184,10 +195,10 @@ async function login(request: Request, env: AuthEnv): Promise<Response> {
     WHERE user_id = ? AND status = 'Active' ORDER BY CASE role WHEN 'Owner' THEN 0 ELSE 1 END LIMIT 1`).bind(user.id)
     .first<{ workspaceId: string; role: Role }>();
   if (!membership) return json(request, { error: "This account isn't attached to a workspace yet." }, 409);
-  const workspace = await env.DB.prepare("SELECT name FROM workspaces WHERE id = ?").bind(membership.workspaceId).first<{ name: string }>();
+  const workspace = await env.DB.prepare("SELECT name, plan FROM workspaces WHERE id = ?").bind(membership.workspaceId).first<{ name: string; plan: string | null }>();
 
   const token = await createSession(env.DB, user.id, membership.workspaceId);
-  return json(request, { token, user: { id: user.id, email: user.email, name: user.name, isSuperadmin: user.is_superadmin === 1 }, workspace: { id: membership.workspaceId, name: workspace?.name || "Workspace" }, role: user.is_superadmin === 1 ? "Owner" : membership.role });
+  return json(request, { token, user: { id: user.id, email: user.email, name: user.name, isSuperadmin: user.is_superadmin === 1 }, workspace: { id: membership.workspaceId, name: workspace?.name || "Workspace", plan: workspace?.plan || "Free" }, role: user.is_superadmin === 1 ? "Owner" : membership.role });
 }
 
 async function logout(request: Request, env: AuthEnv): Promise<Response> {
@@ -200,7 +211,7 @@ async function logout(request: Request, env: AuthEnv): Promise<Response> {
 async function sessionInfo(request: Request, env: AuthEnv): Promise<Response> {
   const session = await requireSession(request, env);
   if (session instanceof Response) return session;
-  return json(request, { user: { id: session.userId, email: session.email, name: session.name, isSuperadmin: session.isSuperadmin }, workspace: { id: session.workspaceId, name: session.workspaceName }, role: session.role, isImpersonating: session.isImpersonating });
+  return json(request, { user: { id: session.userId, email: session.email, name: session.name, isSuperadmin: session.isSuperadmin }, workspace: { id: session.workspaceId, name: session.workspaceName, plan: session.workspacePlan }, role: session.role, isImpersonating: session.isImpersonating });
 }
 
 async function listMembers(request: Request, env: AuthEnv): Promise<Response> {

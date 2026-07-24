@@ -2,6 +2,7 @@ import { callClaude, callClaudeWithActions, sanitizeChatMessages, sanitizeAction
 import { getStoredKnowledgeContent } from "./knowledge";
 import { saveSubmission } from "./leads";
 import { requireSession, type AuthEnv } from "./auth";
+import { runFlowForWidgetMessage, type FlowOutMessage } from "./flows";
 
 export interface WidgetEnv extends AuthEnv {
   DB: D1Database;
@@ -37,6 +38,16 @@ function sqliteNow(): string {
   return new Date().toISOString().slice(0, 19).replace("T", " ");
 }
 
+// Flow turns can include interactive buttons/item carousels, but widget_messages.content is
+// plain text (used for history/poll reconstruction) — this collapses a structured flow message
+// into a readable plain-text fallback for that stored history.
+function flowMessageToStorageText(m: FlowOutMessage): string {
+  if (m.type === "text") return m.text;
+  if (m.type === "buttons") return `${m.text}\n${m.options.map((o) => `[${o.label}]`).join("  ")}`;
+  const heading = m.text ? `${m.text}\n` : "";
+  return heading + m.items.map((i) => `${i.title || i.name} — ${i.price ? `${i.currency} ${i.price}` : ""}`).join("\n");
+}
+
 function sqliteNowPlusSeconds(seconds: number): string {
   return new Date(Date.now() + seconds * 1000).toISOString().slice(0, 19).replace("T", " ");
 }
@@ -61,48 +72,61 @@ function widgetCorsPreflight(): Response {
   } });
 }
 
+// The widget schema is global (not per-workspace), so once it's been created/migrated in this
+// Worker isolate there's no reason to re-run ~11 DDL round-trips (including 3 always-throwing
+// ALTERs) on every request. This flag amortizes that cost: the first call in an isolate does the
+// work, every later call (including the 4s dashboard polls) returns immediately. Isolates are
+// reused across many requests, so this removed the multi-second latency on /api/widget/conversations.
+let widgetSchemaEnsured = false;
+
 async function ensureWidgetSchema(db: D1Database): Promise<void> {
-  await db.prepare(`CREATE TABLE IF NOT EXISTS widget_rate_limits (
-    workspace_id TEXT NOT NULL,
-    window_start INTEGER NOT NULL,
-    count INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (workspace_id, window_start)
-  )`).run();
-  await db.prepare(`CREATE TABLE IF NOT EXISTS widget_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    workspace_id TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  )`).run();
-  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_widget_messages_workspace ON widget_messages (workspace_id, created_at)`).run();
-  await db.prepare(`CREATE TABLE IF NOT EXISTS widget_conversation_state (
-    workspace_id TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    ai_active INTEGER NOT NULL DEFAULT 1,
-    PRIMARY KEY (workspace_id, session_id)
-  )`).run();
-  // Idempotent migration for a table created before customer_name existed — SQLite disallows
-  // adding a column and reading it in the same statement batch, so this must stay a no-op once applied.
+  if (widgetSchemaEnsured) return;
+  await db.batch([
+    db.prepare(`CREATE TABLE IF NOT EXISTS widget_rate_limits (
+      workspace_id TEXT NOT NULL,
+      window_start INTEGER NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (workspace_id, window_start)
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS widget_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_widget_messages_workspace ON widget_messages (workspace_id, created_at)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS widget_conversation_state (
+      workspace_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      ai_active INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (workspace_id, session_id)
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS widget_typing_state (
+      workspace_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      typing_until TEXT NOT NULL,
+      PRIMARY KEY (workspace_id, session_id)
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS widget_notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      author_name TEXT NOT NULL,
+      note TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_widget_notes_session ON widget_notes (workspace_id, session_id, created_at)`),
+  ]);
+  // Idempotent migrations for a table created before these columns existed. SQLite disallows
+  // adding a column and reading it in the same statement batch, so these stay separate no-ops
+  // once applied. Only ever runs once per isolate thanks to the flag above.
   try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN customer_name TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
   try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN needs_attention INTEGER NOT NULL DEFAULT 0`).run(); } catch { /* already exists */ }
   try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN attention_reason TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
-  await db.prepare(`CREATE TABLE IF NOT EXISTS widget_typing_state (
-    workspace_id TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    typing_until TEXT NOT NULL,
-    PRIMARY KEY (workspace_id, session_id)
-  )`).run();
-  await db.prepare(`CREATE TABLE IF NOT EXISTS widget_notes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    workspace_id TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    author_name TEXT NOT NULL,
-    note TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  )`).run();
-  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_widget_notes_session ON widget_notes (workspace_id, session_id, created_at)`).run();
+  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN handoff_summary TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
+  widgetSchemaEnsured = true;
 }
 
 async function isAgentTyping(db: D1Database, workspaceId: string, sessionId: string): Promise<boolean> {
@@ -124,7 +148,7 @@ async function withinRateLimit(db: D1Database, workspaceId: string): Promise<boo
   return (row?.count || 0) <= RATE_LIMIT_PER_MINUTE;
 }
 
-async function readWorkspaceState<T>(db: D1Database, workspaceId: string, key: string): Promise<T | null> {
+export async function readWorkspaceState<T>(db: D1Database, workspaceId: string, key: string): Promise<T | null> {
   const row = await db.prepare("SELECT value FROM workspace_state WHERE key = ?").bind(`${workspaceId}::${key}`).first<{ value: string }>();
   if (!row) return null;
   try { return JSON.parse(row.value) as T; } catch { return null; }
@@ -158,7 +182,7 @@ function computeBusinessHoursStatus(hours: WorkingHours | null, now: Date): stri
   } catch { return null; }
 }
 
-async function buildSystemPrompt(db: D1Database, workspaceId: string): Promise<string> {
+export async function buildSystemPrompt(db: D1Database, workspaceId: string): Promise<string> {
   const config = await readWorkspaceState<{ role?: string; tone?: string; language?: string; fallback?: string }>(db, workspaceId, "qpy-engage-assistant-config-v2");
   const policies = await readWorkspaceState<{ restricted?: string }>(db, workspaceId, "qpy-engage-assistant-policies");
   const selectedSources = (await readWorkspaceState<number[]>(db, workspaceId, "qpy-engage-assistant-sources")) || [];
@@ -216,19 +240,20 @@ async function getCustomerNames(db: D1Database, workspaceId: string, sessionIds:
   const names = new Map<string, string>();
   if (!sessionIds.length) return names;
   const placeholders = sessionIds.map(() => "?").join(",");
-  try {
-    const result = await db.prepare(`SELECT session_id, customer_name FROM widget_conversation_state WHERE workspace_id = ? AND session_id IN (${placeholders}) AND customer_name != ''`)
-      .bind(workspaceId, ...sessionIds).all<{ session_id: string; customer_name: string }>();
-    for (const row of result.results || []) names.set(row.session_id, row.customer_name);
-  } catch { /* widget_conversation_state may not exist yet */ }
-  try {
-    const result = await db.prepare(`SELECT session_id, data FROM action_submissions WHERE workspace_id = ? AND session_id IN (${placeholders})`)
-      .bind(workspaceId, ...sessionIds).all<{ session_id: string; data: string }>();
-    for (const row of result.results || []) {
-      const name = extractCustomerName(row.data);
-      if (name) names.set(row.session_id, name);
-    }
-  } catch { /* action_submissions may not exist yet if no action has ever fired */ }
+  // Both lookups are independent — run them in parallel rather than sequentially (D1 round-trips
+  // dominate latency here). The action_submissions capture (deliberate business field) is applied
+  // second so it wins over a passively-overheard name when both exist.
+  const [stateRes, submissionRes] = await Promise.all([
+    db.prepare(`SELECT session_id, customer_name FROM widget_conversation_state WHERE workspace_id = ? AND session_id IN (${placeholders}) AND customer_name != ''`)
+      .bind(workspaceId, ...sessionIds).all<{ session_id: string; customer_name: string }>().catch(() => null),
+    db.prepare(`SELECT session_id, data FROM action_submissions WHERE workspace_id = ? AND session_id IN (${placeholders})`)
+      .bind(workspaceId, ...sessionIds).all<{ session_id: string; data: string }>().catch(() => null),
+  ]);
+  for (const row of stateRes?.results || []) names.set(row.session_id, row.customer_name);
+  for (const row of submissionRes?.results || []) {
+    const name = extractCustomerName(row.data);
+    if (name) names.set(row.session_id, name);
+  }
   return names;
 }
 
@@ -259,12 +284,13 @@ async function saveLearnedCustomerName(db: D1Database, workspaceId: string, sess
 }
 
 // Called when Claude's built-in flag_for_human tool fires — see NEEDS_HUMAN_TOOL_NAME in shared.ts.
-async function flagConversationForHuman(db: D1Database, workspaceId: string, sessionId: string, reason: string): Promise<void> {
+async function flagConversationForHuman(env: WidgetEnv, workspaceId: string, sessionId: string, reason: string): Promise<void> {
   if (!sessionId) return;
-  await ensureWidgetSchema(db);
-  await db.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, needs_attention, attention_reason) VALUES (?, ?, 1, ?)
+  await ensureWidgetSchema(env.DB);
+  await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, needs_attention, attention_reason) VALUES (?, ?, 1, ?)
     ON CONFLICT(workspace_id, session_id) DO UPDATE SET needs_attention = 1, attention_reason = excluded.attention_reason`)
     .bind(workspaceId, sessionId, reason.trim().slice(0, 200)).run();
+  await generateHandoffSummary(env, workspaceId, sessionId);
 }
 
 async function getConversationHistory(db: D1Database, workspaceId: string, sessionId: string): Promise<ChatMessage[]> {
@@ -273,6 +299,30 @@ async function getConversationHistory(db: D1Database, workspaceId: string, sessi
   return (result.results || [])
     .filter((r) => r.role === "user" || r.role === "assistant" || r.role === "agent")
     .map((r) => ({ role: r.role === "user" ? "user" as const : "assistant" as const, content: r.content }));
+}
+
+// When a conversation hands off to a human (either the AI's own flag_for_human tool firing, or
+// a teammate manually taking over), this generates a short handoff brief — what's been discussed
+// so far, what the agent should focus on, and anything worth knowing about this customer — so the
+// person picking it up doesn't have to re-read the whole transcript cold. Best-effort: a failure
+// here should never block the actual handoff (the take-over itself already happened).
+async function generateHandoffSummary(env: WidgetEnv, workspaceId: string, sessionId: string): Promise<void> {
+  if (!sessionId || !env.ANTHROPIC_API_KEY) return;
+  try {
+    const history = await getConversationHistory(env.DB, workspaceId, sessionId);
+    if (!history.length) return;
+    const transcript = history.map((m) => `${m.role === "user" ? "Customer" : "Assistant"}: ${m.content}`).join("\n");
+    const prompt = `Here is a customer support conversation so far:\n\n${transcript}\n\nA human agent is now taking over this conversation. Write a brief handoff note for them. Respond with ONLY a JSON object, no markdown fences, in exactly this shape:\n{"summary": "1-2 sentences on what this conversation is about and where it left off", "focusOn": "1-2 sentences on what the agent should do or resolve next", "customerNotes": "1-2 sentences on anything worth knowing about this customer — tone, patience level, prior requests, anything already established (name, order, etc.) — or empty string if nothing notable"}`;
+    const result = await callClaude(env.ANTHROPIC_API_KEY, "You write extremely concise, practical handoff notes for customer support agents. Respond with strict JSON only.", [{ role: "user", content: prompt }]);
+    if (result.error || !result.reply) return;
+    const cleaned = result.reply.trim().replace(/^```(json)?/i, "").replace(/```$/, "").trim();
+    const parsed = JSON.parse(cleaned) as { summary?: string; focusOn?: string; customerNotes?: string };
+    const summary = { summary: (parsed.summary || "").slice(0, 400), focusOn: (parsed.focusOn || "").slice(0, 400), customerNotes: (parsed.customerNotes || "").slice(0, 400) };
+    await ensureWidgetSchema(env.DB);
+    await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, handoff_summary) VALUES (?, ?, ?)
+      ON CONFLICT(workspace_id, session_id) DO UPDATE SET handoff_summary = excluded.handoff_summary`)
+      .bind(workspaceId, sessionId, JSON.stringify(summary)).run();
+  } catch { /* handoff already happened — a missing summary just means the agent reads the transcript themselves */ }
 }
 
 // When a human hands a conversation back to the AI, the customer's most recent message may
@@ -291,7 +341,7 @@ async function answerIfUnanswered(env: WidgetEnv, workspaceId: string, sessionId
   const actions = sanitizeActions(storedActions || []);
   const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
   const onCustomerName = (name: string) => saveLearnedCustomerName(env.DB, workspaceId, sessionId, name);
-  const onNeedsHuman = (reason: string) => flagConversationForHuman(env.DB, workspaceId, sessionId, reason);
+  const onNeedsHuman = (reason: string) => flagConversationForHuman(env, workspaceId, sessionId, reason);
   const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions, recordSubmission, onCustomerName, onNeedsHuman);
   if (result.reply) {
     await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`)
@@ -332,8 +382,9 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   const sessionId = (body.sessionId || "").trim().slice(0, 80);
   if (!workspaceId) return widgetJson({ error: "Missing workspace id." }, 400);
 
-  const workspace = await env.DB.prepare("SELECT id FROM workspaces WHERE id = ?").bind(workspaceId).first();
+  const workspace = await env.DB.prepare("SELECT id, status FROM workspaces WHERE id = ?").bind(workspaceId).first<{ id: string; status: string | null }>();
   if (!workspace) return widgetJson({ error: "Unknown workspace." }, 404);
+  if (workspace.status === "disabled") return widgetJson({ error: "This chat is temporarily unavailable." }, 503);
 
   await ensureWidgetSchema(env.DB);
   if (!(await withinRateLimit(env.DB, workspaceId))) return widgetJson({ error: "This chat is receiving too many messages right now. Please try again shortly." }, 429);
@@ -352,6 +403,23 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
     return widgetJson({ reply: null, humanHandling: true, serverTime: receivedAt });
   }
 
+  // A predefined Flow (see worker/flows.ts) takes priority over the AI assistant: if this
+  // visitor is mid-flow, or their message matches an active flow's trigger phrase, the flow
+  // engine drives the reply instead of Claude — this is the "without AI" step-by-step
+  // conversation type (fixed questions, button choices, an items carousel), as opposed to the
+  // AI assistant's free-form replies.
+  if (sessionId) {
+    const flowResult = await runFlowForWidgetMessage(env.DB, workspaceId, sessionId, message);
+    if (flowResult.handled) {
+      const repliedAt = sqliteNow();
+      for (const m of flowResult.messages) {
+        await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`)
+          .bind(workspaceId, sessionId, flowMessageToStorageText(m), repliedAt).run();
+      }
+      return widgetJson({ messages: flowResult.messages, serverTime: repliedAt });
+    }
+  }
+
   const history = sanitizeChatMessages(body.history).slice(-6);
   const messages = [...history, { role: "user" as const, content: message }];
 
@@ -360,7 +428,7 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   const actions = sanitizeActions(storedActions || []);
   const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
   const onCustomerName = (name: string) => saveLearnedCustomerName(env.DB, workspaceId, sessionId, name);
-  const onNeedsHuman = (reason: string) => flagConversationForHuman(env.DB, workspaceId, sessionId, reason);
+  const onNeedsHuman = (reason: string) => flagConversationForHuman(env, workspaceId, sessionId, reason);
   const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, messages, actions, recordSubmission, onCustomerName, onNeedsHuman);
   if (result.error) return widgetJson({ error: result.error }, result.status || 502);
 
@@ -440,14 +508,18 @@ async function listConversations(request: Request, env: WidgetEnv): Promise<Resp
       bySession.set(row.session_id, { sessionId: row.session_id, messageCount: 1, lastMessage: row.content, lastRole: row.role, firstAt: row.created_at, lastAt: row.created_at });
     }
   }
-  const stateResult = await env.DB.prepare(`SELECT session_id, ai_active, needs_attention, attention_reason FROM widget_conversation_state WHERE workspace_id = ?`)
-    .bind(session.workspaceId).all<{ session_id: string; ai_active: number; needs_attention: number; attention_reason: string }>();
+  // These three lookups only depend on the session list (already known), not on each other —
+  // run them concurrently so it's ~1 round-trip of latency instead of ~4 sequential ones.
+  const sessionKeys = [...bySession.keys()];
+  const [stateResult, names, leadStatuses] = await Promise.all([
+    env.DB.prepare(`SELECT session_id, ai_active, needs_attention, attention_reason FROM widget_conversation_state WHERE workspace_id = ?`)
+      .bind(session.workspaceId).all<{ session_id: string; ai_active: number; needs_attention: number; attention_reason: string }>(),
+    getCustomerNames(env.DB, session.workspaceId, sessionKeys),
+    getLeadStatuses(env.DB, session.workspaceId, sessionKeys),
+  ]);
   const aiActiveBySession = new Map((stateResult.results || []).map((r) => [r.session_id, r.ai_active === 1]));
   const needsAttentionBySession = new Map((stateResult.results || []).map((r) => [r.session_id, r.needs_attention === 1]));
   const attentionReasonBySession = new Map((stateResult.results || []).map((r) => [r.session_id, r.attention_reason]));
-
-  const names = await getCustomerNames(env.DB, session.workspaceId, [...bySession.keys()]);
-  const leadStatuses = await getLeadStatuses(env.DB, session.workspaceId, [...bySession.keys()]);
   const conversations = [...bySession.values()]
     .map((c) => ({
       ...c,
@@ -469,10 +541,16 @@ async function getMessages(request: Request, env: WidgetEnv): Promise<Response> 
   if (!sessionId) return json(request, { error: "Missing sessionId." }, 400);
   await ensureWidgetSchema(env.DB);
   await maybeSendHoldingMessage(env, session.workspaceId, sessionId);
-  const result = await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC LIMIT 500`)
-    .bind(session.workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>();
-  const aiActive = await isAiActive(env.DB, session.workspaceId, sessionId);
-  return json(request, { messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), aiActive });
+  const [result, aiActive, stateRow] = await Promise.all([
+    env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC LIMIT 500`)
+      .bind(session.workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>(),
+    isAiActive(env.DB, session.workspaceId, sessionId),
+    env.DB.prepare(`SELECT handoff_summary FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`)
+      .bind(session.workspaceId, sessionId).first<{ handoff_summary: string }>(),
+  ]);
+  let handoffSummary = null;
+  try { handoffSummary = stateRow?.handoff_summary ? JSON.parse(stateRow.handoff_summary) : null; } catch { /* leave null if malformed */ }
+  return json(request, { messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), aiActive, handoffSummary });
 }
 
 // Acknowledges (clears) a conversation's "needs a human" flag — called when an agent takes
@@ -498,7 +576,12 @@ async function setTakeover(request: Request, env: WidgetEnv): Promise<Response> 
     .bind(session.workspaceId, sessionId, notice).run();
 
   if (body.active) await answerIfUnanswered(env, session.workspaceId, sessionId);
-  else await clearNeedsAttention(env.DB, session.workspaceId, sessionId);
+  else {
+    await clearNeedsAttention(env.DB, session.workspaceId, sessionId);
+    // Taking over is exactly the moment the agent needs a handoff brief — generate (or
+    // regenerate, since more may have been said since any earlier AI-triggered flag) one now.
+    await generateHandoffSummary(env, session.workspaceId, sessionId);
+  }
 
   return json(request, { ok: true, aiActive: Boolean(body.active) });
 }

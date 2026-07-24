@@ -8,9 +8,15 @@ import { handleKnowledgeRequest, type KnowledgeEnv } from "./knowledge";
 import { handleWidgetRequest, type WidgetEnv } from "./widget";
 import { handleLeadsRequest, type LeadsEnv } from "./leads";
 import { handleAdminRequest, type AdminEnv } from "./admin";
+import { handleCreditsRequest, type CreditsEnv } from "./credits";
+import { handleContactsRequest, type ContactsEnv } from "./contacts";
+import { handleCampaignsRequest, type CampaignsEnv } from "./campaigns";
+import { handleOtpRequest, type OtpEnv } from "./otp";
+import { handleItemsRequest, type ItemsEnv } from "./items";
+import { handleFlowsRequest, type FlowsEnv } from "./flows";
 import { json, corsPreflight, allowedOrigin } from "./shared";
 
-interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv, LeadsEnv, AdminEnv {
+interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv, LeadsEnv, AdminEnv, CreditsEnv, ContactsEnv, CampaignsEnv, OtpEnv, ItemsEnv, FlowsEnv {
   ASSETS: Fetcher;
   DB: D1Database;
   ANTHROPIC_API_KEY?: string;
@@ -55,6 +61,24 @@ const worker = {
 
     const adminResponse = await handleAdminRequest(request, env);
     if (adminResponse) return adminResponse;
+
+    const creditsResponse = await handleCreditsRequest(request, env);
+    if (creditsResponse) return creditsResponse;
+
+    const contactsResponse = await handleContactsRequest(request, env);
+    if (contactsResponse) return contactsResponse;
+
+    const campaignsResponse = await handleCampaignsRequest(request, env);
+    if (campaignsResponse) return campaignsResponse;
+
+    const otpResponse = await handleOtpRequest(request, env);
+    if (otpResponse) return otpResponse;
+
+    const itemsResponse = await handleItemsRequest(request, env);
+    if (itemsResponse) return itemsResponse;
+
+    const flowsResponse = await handleFlowsRequest(request, env);
+    if (flowsResponse) return flowsResponse;
 
     const metaResponse = await handleMetaRequest(request, env);
     if (metaResponse) return metaResponse;

@@ -1,5 +1,6 @@
 import { requireSession, requireRole, type AuthEnv } from "./auth";
 import { encoder, arrayBuffer, allowedOrigin, json, corsPreflight, sha256, safeEqual, bytesToBase64, base64ToBytes } from "./shared";
+import { meterMessageBalance, incrementSentCount } from "./messageBalance";
 
 const DEFAULT_GRAPH_VERSION = "v25.0";
 
@@ -13,7 +14,7 @@ export interface MetaEnv extends AuthEnv {
   META_GRAPH_VERSION?: string;
 }
 
-type ConnectionRow = {
+export type ConnectionRow = {
   workspace_id: string;
   business_id: string | null;
   waba_id: string;
@@ -72,7 +73,7 @@ async function ensureMetaSchema(db: D1Database): Promise<void> {
   try { await db.prepare("CREATE INDEX IF NOT EXISTS whatsapp_messages_workspace_idx ON whatsapp_messages (workspace_id)").run(); } catch { /* already exists */ }
 }
 
-async function hmacHex(secret: string, value: string | Uint8Array): Promise<string> {
+export async function hmacHex(secret: string, value: string | Uint8Array): Promise<string> {
   const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const signature = await crypto.subtle.sign("HMAC", key, arrayBuffer(typeof value === "string" ? encoder.encode(value) : value));
   return [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -89,12 +90,12 @@ async function encryptToken(token: string, secret: string): Promise<{ ciphertext
   return { ciphertext: bytesToBase64(new Uint8Array(encrypted)), iv: bytesToBase64(iv) };
 }
 
-async function decryptToken(ciphertext: string, iv: string, secret: string): Promise<string> {
+export async function decryptToken(ciphertext: string, iv: string, secret: string): Promise<string> {
   const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: arrayBuffer(base64ToBytes(iv)) }, await encryptionKey(secret), arrayBuffer(base64ToBytes(ciphertext)));
   return new TextDecoder().decode(decrypted);
 }
 
-function graphVersion(env: MetaEnv): string {
+export function graphVersion(env: MetaEnv): string {
   return /^v\d+\.\d+$/.test(env.META_GRAPH_VERSION || "") ? env.META_GRAPH_VERSION! : DEFAULT_GRAPH_VERSION;
 }
 
@@ -114,7 +115,7 @@ function publicConnection(row: ConnectionRow | null) {
   };
 }
 
-async function metaError(response: Response): Promise<string> {
+export async function metaError(response: Response): Promise<string> {
   try {
     const payload = await response.json() as { error?: { message?: string; error_user_msg?: string; code?: number; error_subcode?: number } };
     const message = payload.error?.error_user_msg || payload.error?.message || `Meta returned HTTP ${response.status}`;
@@ -276,6 +277,12 @@ async function sendInboxMessage(request: Request, env: MetaEnv): Promise<Respons
     VALUES (?, 'outbound', ?, ?, ?, 'text', ?, 'accepted', ?, ?)
     ON CONFLICT(id) DO UPDATE SET message_text=excluded.message_text, status=excluded.status, payload=excluded.payload`)
     .bind(id, to, connection.phone_number_id, session.workspaceId, text, String(Math.floor(Date.now() / 1000)), JSON.stringify(payload)).run();
+  // A free-form agent reply within the 24h window is a WhatsApp "Service" message — meter one
+  // Service credit. Soft meter (best-effort, floors at 0, never blocks): refusing to let an agent
+  // reply to a live customer over a credit balance would be worse than the metering being slightly
+  // approximate, and Meta itself doesn't gate service-window replies the way it gates templates.
+  await meterMessageBalance(env.DB, session.workspaceId, "Service", 1).catch(() => {});
+  await incrementSentCount(env.DB, session.workspaceId, "Service", 1).catch(() => {});
   return json(request, { sent: true, message: { id, direction: "outbound", waId: to, type: "text", text, status: "accepted", timestamp: String(Math.floor(Date.now() / 1000)), createdAt: new Date().toISOString() } });
 }
 

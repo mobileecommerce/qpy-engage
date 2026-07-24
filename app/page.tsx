@@ -3,7 +3,7 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import "./live-inbox.css";
 
-type Section = "Overview" | "Assistants" | "Channels" | "Inbox" | "Campaigns" | "Automations" | "Knowledge" | "Leads" | "Analytics" | "Team" | "Settings";
+type Section = "Overview" | "Assistants" | "Channels" | "Inbox" | "Campaigns" | "Audiences" | "Automations" | "Flows" | "Knowledge" | "Leads" | "Analytics" | "Team" | "Settings";
 type Message = { from: "customer" | "ai" | "agent"; text: string; time: string };
 type Conversation = { id: string; initials: string; name: string; preview: string; time: string; unread: number; tone: string; status: "open" | "resolved"; email: string; phone: string; tags: string[]; notes?: string[] };
 type Automation = { id: number; title: string; trigger: string; action: string; runs: number; rate: string; active: boolean };
@@ -18,7 +18,7 @@ type Member = { id: string; userId: string | null; name: string; email: string; 
 type AuthUser = { id: string; email: string; name: string | null; isSuperadmin?: boolean };
 type AuthWorkspace = { id: string; name: string };
 type AuthSession = { token: string; user: AuthUser; workspace: AuthWorkspace; role: Member["role"] };
-type Campaign = { id:number; name:string; channel:"WhatsApp"|"Instagram"; audience:string; recipients:number; status:"Draft"|"Scheduled"|"Sent"; schedule:string; delivered:string; clicks:string };
+type Campaign = { id:number; name:string; channel:"WhatsApp"|"Instagram"; audience:string; audienceId:string; recipients:number; status:"Draft"|"Scheduled"|"Sent"; schedule:string; delivered:string; clicks:string; objective:string; message:string; mediaUrl:string; mediaName:string; cta:string; url:string; templateName:string; templateLanguage:string; scheduleType:string; date:string; time:string; recurrence:string; excludeRecent:boolean; messageCategory:"Marketing"|"Utility"; estimatedCost:number; sendErrors?:string[] };
 type ActionParameter = { id:number; name:string; type:"text"|"number"|"email"|"phone"|"boolean"; required:boolean; description:string };
 type AssistantAction = { id:number; name:string; description:string; type:"submit"|"request"; parameters:ActionParameter[]; endpoint:string; method:"POST"|"GET"; defaultResponse:string; confirmation:boolean; continueConversation:boolean; enabled:boolean; runs:number; success:string; lastTest:string };
 type MetaConfig = { appId:string|null; configId:string|null; graphVersion:string; ready:boolean; webhookUrl:string; missing:string[] };
@@ -60,6 +60,11 @@ function loadMetaSdk(config:MetaConfig):Promise<void>{
 // New workspaces start with none of this — it's only ever seen if a workspace's own saved
 // state doesn't have a value yet, which no longer happens for real accounts once they add data.
 const initialConversations: Conversation[] = [];
+// A brand-new workspace has zero simulated WhatsApp conversations (real accounts get clean
+// defaults, not seeded demo data) — `selected` must never be undefined even then, since
+// Workspace reads `selected.id` unconditionally on every render whenever Inbox is the active
+// section, regardless of whether any conversation actually exists yet.
+const EMPTY_CONVERSATION: Conversation = { id: "", initials: "", name: "", preview: "", time: "", unread: 0, tone: "blue", status: "open", email: "", phone: "", tags: [] };
 
 const initialMessages: Record<string, Message[]> = {};
 
@@ -69,12 +74,12 @@ const initialSources: Source[] = [];
 
 
 const initialCampaigns: Campaign[] = [
-  {id:1,name:"Summer collection launch",channel:"WhatsApp",audience:"VIP customers",recipients:1248,status:"Sent",schedule:"Jul 12, 10:00",delivered:"97.8%",clicks:"18.4%"},
-  {id:2,name:"Weekend showroom event",channel:"Instagram",audience:"Dubai customers",recipients:862,status:"Scheduled",schedule:"Jul 19, 09:30",delivered:"—",clicks:"—"},
-  {id:3,name:"Win-back offer",channel:"WhatsApp",audience:"Inactive 90 days",recipients:436,status:"Draft",schedule:"Not scheduled",delivered:"—",clicks:"—"},
+  {id:1,name:"Summer collection launch",channel:"WhatsApp",audience:"VIP customers",audienceId:"",recipients:1248,status:"Sent",schedule:"Jul 12, 10:00",delivered:"97.8%",clicks:"18.4%",objective:"Promote products",message:"Hi {{first_name}} 👋\n\nDiscover Atelier Home’s newest collection, created for effortless summer living. Shop now and enjoy complimentary UAE delivery.",mediaUrl:"",mediaName:"",cta:"Shop collection",url:"https://atelierhome.com/collections/summer",templateName:"",templateLanguage:"en_US",scheduleType:"Now",date:"2026-07-12",time:"10:00",recurrence:"One-time",excludeRecent:false,messageCategory:"Marketing",estimatedCost:62.4},
+  {id:2,name:"Weekend showroom event",channel:"Instagram",audience:"Dubai customers",audienceId:"",recipients:862,status:"Scheduled",schedule:"Jul 19, 09:30",delivered:"—",clicks:"—",objective:"Announce an event",message:"Join us this weekend for an exclusive showroom preview — refreshments, styling advice, and early access to new arrivals.",mediaUrl:"",mediaName:"",cta:"RSVP now",url:"https://atelierhome.com/events/showroom",templateName:"",templateLanguage:"en_US",scheduleType:"Schedule",date:"2026-07-19",time:"09:30",recurrence:"One-time",excludeRecent:false,messageCategory:"Marketing",estimatedCost:43.1},
+  {id:3,name:"Win-back offer",channel:"WhatsApp",audience:"Inactive 90 days",audienceId:"",recipients:436,status:"Draft",schedule:"Not scheduled",delivered:"—",clicks:"—",objective:"Recover customers",message:"We miss you, {{first_name}}! Here’s 15% off your next order to welcome you back.",mediaUrl:"",mediaName:"",cta:"Shop now",url:"https://atelierhome.com",templateName:"",templateLanguage:"en_US",scheduleType:"Now",date:"2026-07-19",time:"10:00",recurrence:"One-time",excludeRecent:false,messageCategory:"Marketing",estimatedCost:21.8},
 ];
 
-const nav: [string, Section][] = [["⌂","Overview"],["✦","Assistants"],["◫","Channels"],["◉","Inbox"],["◈","Campaigns"],["⌁","Automations"],["◇","Knowledge"],["⚑","Leads"],["▥","Analytics"]];
+const nav: [string, Section][] = [["⌂","Overview"],["✦","Assistants"],["◫","Channels"],["◉","Inbox"],["◈","Campaigns"],["♟","Audiences"],["⌁","Automations"],["⑃","Flows"],["◇","Knowledge"],["⚑","Leads"],["▥","Analytics"]];
 
 const AUTH_TOKEN_KEY = "qpy-engage-auth-token";
 const AuthTokenContext = createContext<string | null>(null);
@@ -164,6 +169,11 @@ function speechLangFor(voiceLanguage: string): string {
   return "en-US";
 }
 
+// One-time handoff written by the standalone /admin console's "Impersonate" action: it can't
+// share React state across a real page navigation, so it drops {token, workspace, adminToken}
+// here, navigates to the main app, and this reads + deletes it on mount.
+const IMPERSONATION_HANDOFF_KEY = "qpy-engage-impersonation-handoff";
+
 export default function Home() {
   const [session, setSession] = useState<AuthSession | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -172,18 +182,24 @@ export default function Home() {
   // This never touches localStorage (which keeps the real superadmin token throughout), so a
   // refresh always drops back out of impersonation rather than leaving it stuck open.
   const [adminSession, setAdminSession] = useState<AuthSession | null>(null);
-  const [adminMode, setAdminMode] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    const token = (() => { try { return localStorage.getItem(AUTH_TOKEN_KEY) } catch { return null } })();
+    const handoffRaw = (() => { try { return localStorage.getItem(IMPERSONATION_HANDOFF_KEY) } catch { return null } })();
+    if (handoffRaw) { try { localStorage.removeItem(IMPERSONATION_HANDOFF_KEY) } catch {} }
+    const handoff = handoffRaw ? (() => { try { return JSON.parse(handoffRaw) as { token: string; workspace: AuthWorkspace; adminToken: string; adminUser: AuthUser } } catch { return null } })() : null;
+    const token = handoff?.adminToken || (() => { try { return localStorage.getItem(AUTH_TOKEN_KEY) } catch { return null } })();
     if (!token) { setAuthLoading(false); return }
     (async () => {
       try {
         const response = await fetch(metaApi("/api/auth/session"), { headers: authHeaders(token) });
         if (response.ok) {
           const data = await response.json() as { user: AuthUser; workspace: AuthWorkspace; role: Member["role"] };
-          if (!cancelled) setSession({ token, user: data.user, workspace: data.workspace, role: data.role });
+          const ownSession = { token, user: data.user, workspace: data.workspace, role: data.role };
+          if (!cancelled) {
+            if (handoff) { setAdminSession(ownSession); setSession({ token: handoff.token, user: data.user, workspace: handoff.workspace, role: "Owner" }); }
+            else setSession(ownSession);
+          }
         } else {
           localStorage.removeItem(AUTH_TOKEN_KEY);
         }
@@ -200,22 +216,14 @@ export default function Home() {
     setSession(null);
     setAdminSession(null);
   };
-  const handleImpersonate = (token: string, workspace: AuthWorkspace) => {
-    if (!session) return;
-    setAdminSession(session);
-    setSession({ ...session, token, workspace, role: "Owner" });
-    setAdminMode(false);
-  };
   const handleExitImpersonation = () => {
     if (adminSession) setSession(adminSession);
     setAdminSession(null);
-    setAdminMode(true);
   };
 
   if (authLoading) return <div className="auth-loading">Loading Qpy Engage…</div>;
   if (!session) return <AuthGate onAuthed={handleAuthed}/>;
-  if (adminMode) return <AuthTokenContext.Provider value={session.token}><SuperadminDashboard onImpersonate={handleImpersonate} onBack={()=>setAdminMode(false)}/></AuthTokenContext.Provider>;
-  return <AuthTokenContext.Provider value={session.token}><AuthWorkspaceContext.Provider value={session.workspace.id}><Workspace session={session} onLogout={handleLogout} isSuperadmin={Boolean(session.user.isSuperadmin)} isImpersonating={Boolean(adminSession)} onOpenAdmin={()=>setAdminMode(true)} onExitImpersonation={handleExitImpersonation}/></AuthWorkspaceContext.Provider></AuthTokenContext.Provider>;
+  return <AuthTokenContext.Provider value={session.token}><AuthWorkspaceContext.Provider value={session.workspace.id}><Workspace session={session} onLogout={handleLogout} isSuperadmin={Boolean(session.user.isSuperadmin)} isImpersonating={Boolean(adminSession)} onExitImpersonation={handleExitImpersonation}/></AuthWorkspaceContext.Provider></AuthTokenContext.Provider>;
 }
 
 function AuthGate({onAuthed}:{onAuthed:(session:AuthSession)=>void}){
@@ -257,47 +265,9 @@ function AuthGate({onAuthed}:{onAuthed:(session:AuthSession)=>void}){
   </div></main>;
 }
 
-type AdminWorkspaceSummary={id:string;name:string;ownerEmail:string|null;createdAt:string;webChatMessageCount:number;webChatConversationCount:number;whatsappConnected:boolean};
+const SECTIONS: Section[] = ["Overview","Assistants","Channels","Inbox","Campaigns","Audiences","Automations","Flows","Knowledge","Leads","Analytics","Team","Settings"];
 
-function SuperadminDashboard({onImpersonate,onBack}:{onImpersonate:(token:string,workspace:AuthWorkspace)=>void;onBack:()=>void}){
-  const token=useAuthToken();
-  const [workspaces,setWorkspaces]=useState<AdminWorkspaceSummary[]>([]);
-  const [loading,setLoading]=useState(true);
-  const [error,setError]=useState("");
-  const [managingId,setManagingId]=useState<string|null>(null);
-  const load=async()=>{
-    if(!token){setLoading(false);return}
-    setLoading(true);setError("");
-    try{
-      const response=await fetch(metaApi("/api/admin/workspaces"),{headers:authHeaders(token)});
-      const result=await response.json() as {workspaces?:AdminWorkspaceSummary[];error?:string};
-      if(!response.ok)throw new Error(result.error||"Could not load customers.");
-      setWorkspaces(result.workspaces||[]);
-    }catch(err){setError(err instanceof Error?err.message:"Could not load customers.")}
-    finally{setLoading(false)}
-  };
-  useEffect(()=>{load()},[token]);
-  const manage=async(ws:AdminWorkspaceSummary)=>{
-    if(!token)return;
-    setManagingId(ws.id);setError("");
-    try{
-      const response=await fetch(metaApi("/api/admin/impersonate"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({workspaceId:ws.id})});
-      const result=await response.json() as {token?:string;workspace?:AuthWorkspace;error?:string};
-      if(!response.ok||!result.token||!result.workspace)throw new Error(result.error||"Could not open this customer's workspace.");
-      onImpersonate(result.token,result.workspace);
-    }catch(err){setError(err instanceof Error?err.message:"Could not open this customer's workspace.");setManagingId(null)}
-  };
-  return <div className="admin-shell">
-    <header className="admin-header"><div><strong>🛡 Superadmin</strong><small>Manage every customer workspace</small></div><button className="secondary-btn" onClick={onBack}>← Back to my workspace</button></header>
-    {error&&<div className="meta-error">⚠ {error}</div>}
-    {loading?<p className="empty-hint">Loading…</p>:!workspaces.length?<div className="empty-state"><span>🛡</span><h3>No customer workspaces yet</h3></div>:
-    <div className="data-card"><div className="table-scroll"><table><thead><tr><th>Customer</th><th>Owner</th><th>Created</th><th>WhatsApp</th><th>Web chat</th><th/></tr></thead><tbody>{workspaces.map(ws=><tr key={ws.id}><td><strong>{ws.name}</strong></td><td>{ws.ownerEmail||"—"}</td><td>{new Date(ws.createdAt).toLocaleDateString()}</td><td>{ws.whatsappConnected?<span className="status-pill ready">Connected</span>:<span className="status-pill">Not connected</span>}</td><td>{ws.webChatConversationCount} conversation{ws.webChatConversationCount===1?"":"s"}</td><td><button className="primary" disabled={managingId===ws.id} onClick={()=>manage(ws)}>{managingId===ws.id?"Opening…":"Manage"}</button></td></tr>)}</tbody></table></div></div>}
-  </div>;
-}
-
-const SECTIONS: Section[] = ["Overview","Assistants","Channels","Inbox","Campaigns","Automations","Knowledge","Leads","Analytics","Team","Settings"];
-
-function Workspace({session,onLogout,isSuperadmin,isImpersonating,onOpenAdmin,onExitImpersonation}:{session:AuthSession;onLogout:()=>void;isSuperadmin:boolean;isImpersonating:boolean;onOpenAdmin:()=>void;onExitImpersonation:()=>void}) {
+function Workspace({session,onLogout,isSuperadmin,isImpersonating,onExitImpersonation}:{session:AuthSession;onLogout:()=>void;isSuperadmin:boolean;isImpersonating:boolean;onExitImpersonation:()=>void}) {
   const sectionStorageKey = `qpy-engage-last-section::ws:${session.workspace.id}`;
   // Always boot into Overview first, then switch to whatever section was last open once
   // `connected` (see below) has resolved its real value — restoring straight into a section
@@ -336,7 +306,7 @@ function Workspace({session,onLogout,isSuperadmin,isImpersonating,onOpenAdmin,on
   const unreadInboxCount = sidebarWaSummaries.filter((s) => s.lastDirection === "inbound").length
     + sidebarWebSummaries.filter((s) => s.lastRole === "user").length;
 
-  const selected = conversations.find(c => c.id === selectedId) ?? conversations[0];
+  const selected = conversations.find(c => c.id === selectedId) ?? conversations[0] ?? EMPTY_CONVERSATION;
   const displayName = session.user.name || session.user.email.split("@")[0];
   const initials = displayName.split(/\s+/).map(w=>w[0]).join("").slice(0,2).toUpperCase() || "U";
   const notify = (text: string) => { setToast(text); window.setTimeout(() => setToast(""), 2200); };
@@ -351,8 +321,10 @@ function Workspace({session,onLogout,isSuperadmin,isImpersonating,onOpenAdmin,on
     section === "Assistants" ? <Assistants sources={sources} workspaceName={session.workspace.name} onKnowledge={()=>go("Knowledge")} onChannels={()=>go("Channels")} onAnalytics={()=>go("Analytics")} notify={notify}/> :
     section === "Channels" ? <Channels step={channelStep} setStep={setChannelStep} connected={connected} setConnected={setConnected} workspaceId={session.workspace.id} workspaceName={session.workspace.name} notify={notify}/> :
     section === "Inbox" ? <InboxHub connected={connected} conversations={conversations} setConversations={setConversations} selected={selected} setSelectedId={setSelectedId} messages={messages[selected.id]??[]} draft={draft} setDraft={setDraft} sendMessage={sendMessage} aiActive={aiActive} setAiActive={setAiActive} onConnect={()=>go("Channels")} notify={notify}/> :
-    section === "Campaigns" ? <Campaigns notify={notify}/> :
+    section === "Campaigns" ? <Campaigns notify={notify} onManageAudiences={()=>go("Audiences")}/> :
+    section === "Audiences" ? <Audiences notify={notify}/> :
     section === "Automations" ? <Automations items={automations} setItems={setAutomations} onCreate={openAutomation} notify={notify}/> :
+    section === "Flows" ? <Flows notify={notify}/> :
     section === "Knowledge" ? <Knowledge sources={sources} setSources={setSources} onAdd={()=>setModal("source")} notify={notify}/> :
     section === "Leads" ? <Leads notify={notify}/> :
     section === "Analytics" ? <Analytics automations={automations} conversationCount={conversations.length} notify={notify}/> :
@@ -366,7 +338,7 @@ function Workspace({session,onLogout,isSuperadmin,isImpersonating,onOpenAdmin,on
       <div className="workspace"><span className="shop-avatar">{session.workspace.name.slice(0,1).toUpperCase()}</span><div><strong>{session.workspace.name}</strong><small>Business workspace</small></div><span className="chev">⌄</span></div>
       <nav className="side-nav" aria-label="Main navigation">{nav.map(([icon,label])=>{const count=label==="Inbox"?unreadInboxCount:0;return <button key={label} onClick={()=>go(label)} className={section===label?"active":""}><span>{icon}</span>{label}{count>0&&<b>{count}</b>}</button>})}</nav>
       <div className="nav-divider"/>
-      <nav className="side-nav secondary"><button className={section==="Team"?"active":""} onClick={()=>go("Team")}><span>♙</span>Team</button><button className={section==="Settings"?"active":""} onClick={()=>go("Settings")}><span>⚙</span>Settings</button>{isSuperadmin&&!isImpersonating&&<button onClick={onOpenAdmin}><span>🛡</span>Superadmin</button>}</nav>
+      <nav className="side-nav secondary"><button className={section==="Team"?"active":""} onClick={()=>go("Team")}><span>♙</span>Team</button><button className={section==="Settings"?"active":""} onClick={()=>go("Settings")}><span>⚙</span>Settings</button>{isSuperadmin&&!isImpersonating&&<a href="admin/" className="side-nav-link"><span>🛡</span>Superadmin</a>}</nav>
       <div className="sidebar-card"><span className="spark">✦</span><strong>Grow with Qpy Engage</strong><p>Unlock more conversations and advanced AI.</p><button onClick={()=>{go("Settings");setSettingsTab("Billing")}}>Explore plans</button></div>
       <div className="profile"><span className="profile-avatar">{initials}</span><div><strong>{displayName}</strong><small>{session.user.email}</small></div><button aria-label="Profile menu" onClick={()=>setModal("profile")}>•••</button></div>
     </aside>
@@ -809,6 +781,7 @@ function WebChatInbox({notify}:{notify:(s:string)=>void}){
   const [noteDraft,setNoteDraft]=useState("");
   const [savingNote,setSavingNote]=useState(false);
   const [lead,setLead]=useState<Submission|null>(null);
+  const [handoffSummary,setHandoffSummary]=useState<{summary:string;focusOn:string;customerNotes:string}|null>(null);
   const lastTypingPingRef=useRef(0);
   const pingTyping=()=>{
     if(!selectedSessionId||!token)return;
@@ -834,7 +807,7 @@ function WebChatInbox({notify}:{notify:(s:string)=>void}){
     if(!silent)setLoadingMessages(true);
     fetch(metaApi(`/api/widget/messages?sessionId=${encodeURIComponent(selectedSessionId)}`),{headers:authHeaders(token)})
       .then(r=>r.json())
-      .then((data:{messages?:WidgetMessage[];aiActive?:boolean})=>{setMessages(data.messages||[]);setAiActiveState(data.aiActive??true)})
+      .then((data:{messages?:WidgetMessage[];aiActive?:boolean;handoffSummary?:{summary:string;focusOn:string;customerNotes:string}|null})=>{setMessages(data.messages||[]);setAiActiveState(data.aiActive??true);setHandoffSummary(data.handoffSummary||null)})
       .catch(()=>{if(!silent)notify("Could not load that conversation.")})
       .finally(()=>{if(!silent)setLoadingMessages(false)});
   };
@@ -911,7 +884,7 @@ function WebChatInbox({notify}:{notify:(s:string)=>void}){
   };
   return <><PageHeader title="Web chat conversations" description="Real visitor conversations from your website chat widget. Take over any conversation to reply as a human instead of the AI." action={<button className="secondary-btn" onClick={()=>load()}>↻ Refresh</button>}/>
   {loading?<p className="empty-hint">Loading…</p>:!conversations.length?<div className="empty-state"><span>◌</span><h3>No web chat conversations yet</h3><p>When a visitor uses your website's chat widget, the conversation will appear here automatically.</p></div>:
-  <div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><strong>{conversations.length} conversation{conversations.length===1?"":"s"}</strong></div><div className="conversation-list">{conversations.map(c=><button key={c.sessionId} className={c.sessionId===selectedSessionId?"selected":""} onClick={()=>setSelectedSessionId(c.sessionId)}><span className="contact-avatar blue">◌<i/></span><div><strong>{c.customerName||"Website visitor"}{c.leadStatus==="New"&&<span className="new-badge">New</span>}{c.needsAttention&&<span className="attention-badge">Needs you</span>}</strong><small>{c.lastMessage.slice(0,60)}</small></div><span className="conv-meta"><small>{new Date(c.lastAt).toLocaleString()}</small>{!c.aiActive&&<b>You</b>}</span></button>)}</div></aside><section className="chat-panel">{selected?<><div className="chat-head"><div className="chat-person"><span className="contact-avatar blue">◌<i/></span><div><strong>{selected.customerName||"Website visitor"}</strong><small>{selected.needsAttention?`Needs you — ${selected.attentionReason||"asked for a human"}`:`${selected.messageCount} messages`}</small></div></div><div className="ai-state"><span className={aiActive?"pulse":"pulse off"}>✦</span><div><strong>{aiActive?"AI is handling":"You're handling"}</strong><small>{aiActive?"Take over to reply yourself":"AI is paused for this visitor"}</small></div><button onClick={toggleTakeover}>{aiActive?"Take over":"Hand to AI"}</button></div></div><div className="chat-body tall"><div className="today">{new Date(selected.firstAt).toLocaleDateString()}</div>{loadingMessages?<p className="empty-hint">Loading…</p>:messages.map((m,i)=>m.role==="system"?<div key={i} className="today">{m.content}</div>:<div key={i} className={`message ${m.role==="user"?"customer":"ai"}`}><p>{m.content}</p><small>{m.role==="user"?"Visitor":m.role==="agent"?"You":"✦ Assistant"} • {new Date(m.createdAt).toLocaleTimeString()}</small></div>)}</div>{!aiActive&&<div className="composer"><div className="input-row"><input value={reply} onChange={e=>{setReply(e.target.value);pingTyping()}} onKeyDown={e=>e.key==="Enter"&&sendReply()} placeholder="Reply as yourself…" disabled={sendingReply}/><button className="send" disabled={sendingReply||!reply.trim()} onClick={sendReply}>➤</button></div></div>}</>:<div className="live-chat-placeholder">Select a conversation</div>}</section>{selected&&<aside className="notes-panel"><h3>Lead details</h3>{!lead?<p className="empty-hint">No lead captured yet for this conversation.</p>:<>{Object.keys(lead.data).length>0&&<div className="lead-panel-data">{Object.entries(lead.data).map(([k,v])=><div key={k}><small>{k}:</small> {String(v)}</div>)}</div>}<div className="lead-panel-tags"><label>Source<select value={lead.source} onChange={e=>updateLeadTag("source",e.target.value)}><option value="">—</option>{LEAD_SOURCES.map(o=><option key={o}>{o}</option>)}</select></label><label>Status<select className={`status-select status-${lead.status.toLowerCase().replace(/[^a-z]/g,"-")}`} value={lead.status} onChange={e=>updateLeadTag("status",e.target.value)}>{LEAD_STATUSES.map(o=><option key={o}>{o}</option>)}</select></label><label>Priority<select className={`priority-select priority-${lead.priority.toLowerCase()}`} value={lead.priority} onChange={e=>updateLeadTag("priority",e.target.value)}><option value="">—</option>{LEAD_PRIORITIES.map(o=><option key={o}>{o}</option>)}</select></label><label>Segment<select value={lead.segment} onChange={e=>updateLeadTag("segment",e.target.value)}><option value="">—</option>{LEAD_SEGMENTS.map(o=><option key={o}>{o}</option>)}</select></label></div></>}<h3 className="notes-heading">Internal notes</h3><small>Only your team can see these — the visitor never does.</small><div className="notes-list">{!notes.length?<p className="empty-hint">No notes yet</p>:notes.map((n,i)=><div key={i} className="note"><p>{n.note}</p><small>{n.authorName} • {new Date(n.createdAt).toLocaleString()}</small></div>)}</div><div className="note-composer"><textarea value={noteDraft} onChange={e=>setNoteDraft(e.target.value)} placeholder="Add a note for your team…" disabled={savingNote}/><button className="secondary-btn" disabled={savingNote||!noteDraft.trim()} onClick={addNote}>{savingNote?"Saving…":"Add note"}</button></div></aside>}</div>}
+  <div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><strong>{conversations.length} conversation{conversations.length===1?"":"s"}</strong></div><div className="conversation-list">{conversations.map(c=><button key={c.sessionId} className={c.sessionId===selectedSessionId?"selected":""} onClick={()=>setSelectedSessionId(c.sessionId)}><span className="contact-avatar blue">◌<i/></span><div><strong>{c.customerName||"Website visitor"}{c.leadStatus==="New"&&<span className="new-badge">New</span>}{c.needsAttention&&<span className="attention-badge">Needs you</span>}</strong><small>{c.lastMessage.slice(0,60)}</small></div><span className="conv-meta"><small>{new Date(c.lastAt).toLocaleString()}</small>{!c.aiActive&&<b>You</b>}</span></button>)}</div></aside><section className="chat-panel">{selected?<><div className="chat-head"><div className="chat-person"><span className="contact-avatar blue">◌<i/></span><div><strong>{selected.customerName||"Website visitor"}</strong><small>{selected.needsAttention?`Needs you — ${selected.attentionReason||"asked for a human"}`:`${selected.messageCount} messages`}</small></div></div><div className="ai-state"><span className={aiActive?"pulse":"pulse off"}>✦</span><div><strong>{aiActive?"AI is handling":"You're handling"}</strong><small>{aiActive?"Take over to reply yourself":"AI is paused for this visitor"}</small></div><button onClick={toggleTakeover}>{aiActive?"Take over":"Hand to AI"}</button></div></div><div className="chat-body tall"><div className="today">{new Date(selected.firstAt).toLocaleDateString()}</div>{loadingMessages?<p className="empty-hint">Loading…</p>:messages.map((m,i)=>m.role==="system"?<div key={i} className="today">{m.content}</div>:<div key={i} className={`message ${m.role==="user"?"customer":"ai"}`}><p>{m.content}</p><small>{m.role==="user"?"Visitor":m.role==="agent"?"You":"✦ Assistant"} • {new Date(m.createdAt).toLocaleTimeString()}</small></div>)}</div>{!aiActive&&<div className="composer"><div className="input-row"><input value={reply} onChange={e=>{setReply(e.target.value);pingTyping()}} onKeyDown={e=>e.key==="Enter"&&sendReply()} placeholder="Reply as yourself…" disabled={sendingReply}/><button className="send" disabled={sendingReply||!reply.trim()} onClick={sendReply}>➤</button></div></div>}</>:<div className="live-chat-placeholder">Select a conversation</div>}</section>{selected&&<aside className="notes-panel">{!aiActive&&handoffSummary&&<div className="handoff-summary"><h3>Handoff summary</h3><p><strong>What's happened:</strong> {handoffSummary.summary||"—"}</p><p><strong>Focus on:</strong> {handoffSummary.focusOn||"—"}</p>{handoffSummary.customerNotes&&<p><strong>Keep in mind:</strong> {handoffSummary.customerNotes}</p>}</div>}<h3>Lead details</h3>{!lead?<p className="empty-hint">No lead captured yet for this conversation.</p>:<>{Object.keys(lead.data).length>0&&<div className="lead-panel-data">{Object.entries(lead.data).map(([k,v])=><div key={k}><small>{k}:</small> {String(v)}</div>)}</div>}<div className="lead-panel-tags"><label>Source<select value={lead.source} onChange={e=>updateLeadTag("source",e.target.value)}><option value="">—</option>{LEAD_SOURCES.map(o=><option key={o}>{o}</option>)}</select></label><label>Status<select className={`status-select status-${lead.status.toLowerCase().replace(/[^a-z]/g,"-")}`} value={lead.status} onChange={e=>updateLeadTag("status",e.target.value)}>{LEAD_STATUSES.map(o=><option key={o}>{o}</option>)}</select></label><label>Priority<select className={`priority-select priority-${lead.priority.toLowerCase()}`} value={lead.priority} onChange={e=>updateLeadTag("priority",e.target.value)}><option value="">—</option>{LEAD_PRIORITIES.map(o=><option key={o}>{o}</option>)}</select></label><label>Segment<select value={lead.segment} onChange={e=>updateLeadTag("segment",e.target.value)}><option value="">—</option>{LEAD_SEGMENTS.map(o=><option key={o}>{o}</option>)}</select></label></div></>}<h3 className="notes-heading">Internal notes</h3><small>Only your team can see these — the visitor never does.</small><div className="notes-list">{!notes.length?<p className="empty-hint">No notes yet</p>:notes.map((n,i)=><div key={i} className="note"><p>{n.note}</p><small>{n.authorName} • {new Date(n.createdAt).toLocaleString()}</small></div>)}</div><div className="note-composer"><textarea value={noteDraft} onChange={e=>setNoteDraft(e.target.value)} placeholder="Add a note for your team…" disabled={savingNote}/><button className="secondary-btn" disabled={savingNote||!noteDraft.trim()} onClick={addNote}>{savingNote?"Saving…":"Add note"}</button></div></aside>}</div>}
   </>;
 }
 
@@ -1024,36 +997,604 @@ function Inbox({conversations,setConversations,selected,setSelectedId,messages,d
   return <><PageHeader title="Unified inbox" description="Manage every customer conversation from one place." action={<div className="header-buttons"><button className="secondary-btn" onClick={()=>notify("Inbox refreshed")}>↻ Refresh</button><button className="primary" onClick={resolve}>{selected.status==="open"?"✓ Resolve":"Reopen"}</button></div>}/><div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><input placeholder="Search conversations" value={query} onChange={e=>setQuery(e.target.value)}/><div>{["All","Open","Resolved"].map(x=><button className={filter===x?"active":""} onClick={()=>setFilter(x)} key={x}>{x}</button>)}</div></div><div className="conversation-list">{visible.map(c=><button key={c.id} className={selected.id===c.id?"selected":""} onClick={()=>setSelectedId(c.id)}><span className={`contact-avatar ${c.tone}`}>{c.initials}<i/></span><div><strong>{c.name}</strong><small>{c.preview}</small></div><span className="conv-meta"><small>{c.time}</small>{c.unread>0&&<b>{c.unread}</b>}</span></button>)}</div></aside><section className="chat-panel"><div className="chat-head"><div className="chat-person"><span className={`contact-avatar ${selected.tone}`}>{selected.initials}<i/></span><div><strong>{selected.name}</strong><small>WhatsApp • Online</small></div></div><div className="ai-state"><span className={aiActive?"pulse":"pulse off"}>✦</span><div><strong>{aiActive?"AI is handling":"You’re handling"}</strong><small>{aiActive?"Confident response":"Manual takeover"}</small></div><button onClick={()=>setAiActive(!aiActive)}>{aiActive?"Take over":"Hand to AI"}</button></div></div><div className="chat-body tall"><div className="today">Today</div>{messages.map((m,i)=><div key={i} className={`message ${m.from}`}><p>{m.text}</p><small>{m.from==="ai"&&"✦ AI • "}{m.from==="agent"&&"You • "}{m.time} {m.from!=="customer"&&"✓✓"}</small></div>)}</div><div className="composer"><div className="suggestion"><span>✦</span><p><strong>Suggested reply</strong> Ask if they need anything else</p><button onClick={()=>setDraft("Is there anything else I can help you with today?")}>Use</button></div><div className="input-row"><label className="attach-button" title="Attach file">＋<input type="file" onChange={e=>{const file=e.target.files?.[0];if(file){setDraft(`[Attachment: ${file.name}]`);notify("Attachment added")}}}/></label><input value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>e.key==="Enter"&&sendMessage()} placeholder="Type a message…"/><button title="Add emoji" onClick={()=>setDraft(`${draft} 😊`)}>☺</button><button className="send" onClick={sendMessage}>➤</button></div></div></section><aside className="customer-panel"><span className={`contact-avatar large ${selected.tone}`}>{selected.initials}</span><h3>{selected.name}</h3><small>Customer since March 2026</small><div className="details-list"><label>Phone<strong>{selected.phone}</strong></label><label>Email<strong>{selected.email}</strong></label><label>Status<strong className="status-text">{selected.status}</strong></label><label>Tags<div>{selected.tags.map(t=><span key={t}>{t}</span>)}</div></label></div>{selected.notes?.length?<div className="customer-notes">{selected.notes.map((note,i)=><p key={i}>“{note}”</p>)}</div>:null}<button className="secondary-btn" onClick={addNote}>＋ Add internal note</button></aside></div></>;
 }
 
-function Campaigns({notify}:{notify:(s:string)=>void}){
+function Campaigns({notify,onManageAudiences}:{notify:(s:string)=>void;onManageAudiences:()=>void}){
   const [campaigns,setCampaigns]=useStoredState("qpy-engage-campaigns",initialCampaigns);
   const [creating,setCreating]=useState(false);
   const [step,setStep]=useState(0);
   const [query,setQuery]=useState("");
   const [channelFilter,setChannelFilter]=useState("All channels");
   const [statusFilter,setStatusFilter]=useState("All statuses");
-  const [form,setForm]=useState({name:"",channel:"WhatsApp" as "WhatsApp"|"Instagram",objective:"Promote products",audience:"All opted-in customers",message:"Hi {{first_name}} 👋\n\nDiscover Atelier Home’s newest collection, created for effortless summer living. Shop now and enjoy complimentary UAE delivery.",mediaUrl:"",mediaName:"",cta:"Shop collection",url:"https://atelierhome.com/collections/summer",schedule:"Now",date:"2026-07-19",time:"10:00"});
-  const [imported,setImported]=useState({name:"",count:0});
-  const audienceCounts:Record<string,number>={"All opted-in customers":4280,"VIP customers":1248,"Dubai customers":1862,"Inactive 90 days":436,"Recent purchasers":974};
-  const recipients=imported.count||audienceCounts[form.audience]||0;
-  const reset=()=>{setCreating(true);setStep(0);setImported({name:"",count:0});setForm({...form,name:"",audience:"All opted-in customers",mediaUrl:"",mediaName:""})};
-  const importCsv=(file?:File)=>{if(!file)return;const reader=new FileReader();reader.onload=()=>{const rows=String(reader.result||"").split(/\r?\n/).filter(Boolean);const count=Math.max(0,rows.length-1);setImported({name:file.name,count});setForm({...form,audience:`Imported: ${file.name}`});notify(`${count.toLocaleString()} contacts imported`)};reader.readAsText(file)};
+  const [editingId,setEditingId]=useState<number|null>(null);
+  const token=useAuthToken();
+  const [pricing,setPricing]=useState<Record<string,number>>({Marketing:0.05,Utility:0.02});
+  const [balances,setBalances]=useState<Record<string,number>>({Marketing:0,Utility:0,Authentication:0,Service:0});
+  const [sentCounts,setSentCounts]=useState<Record<string,number>>({Marketing:0,Utility:0,Authentication:0,Service:0});
+  const [realAudiences,setRealAudiences]=useState<AudienceSummary[]>([]);
+  const loadCreditsAndPricing=()=>{
+    if(!token)return;
+    fetch(metaApi("/api/pricing"),{headers:authHeaders(token)}).then(r=>r.json()).then((d:{pricing?:{category:string;priceUsd:number}[]})=>{
+      if(d.pricing){const map:Record<string,number>={};d.pricing.forEach(p=>map[p.category]=p.priceUsd);setPricing(current=>({...current,...map}))}
+    }).catch(()=>{});
+    fetch(metaApi("/api/credits"),{headers:authHeaders(token)}).then(r=>r.json()).then((d:{balances?:Record<string,number>;sent?:Record<string,number>})=>{if(d.balances)setBalances(d.balances);if(d.sent)setSentCounts(d.sent)}).catch(()=>{});
+    fetch(metaApi("/api/audiences"),{headers:authHeaders(token)}).then(r=>r.json()).then((d:{audiences?:AudienceSummary[]})=>{if(d.audiences)setRealAudiences(d.audiences)}).catch(()=>{});
+  };
+  useEffect(loadCreditsAndPricing,[token]);
+  const emptyForm=()=>({name:"",channel:"WhatsApp" as "WhatsApp"|"Instagram",objective:"Promote products",audience:"",audienceId:"",message:"Hi {{first_name}} 👋\n\nDiscover Atelier Home’s newest collection, created for effortless summer living. Shop now and enjoy complimentary UAE delivery.",mediaUrl:"",mediaName:"",cta:"Shop collection",url:"https://atelierhome.com/collections/summer",templateName:"",templateLanguage:"en_US",scheduleType:"Now",date:"2026-07-19",time:"10:00",recurrence:"One-time",excludeRecent:false,messageCategory:"Marketing" as "Marketing"|"Utility"});
+  const [form,setForm]=useState(emptyForm());
+  const selectedAudience=realAudiences.find(a=>a.id===form.audienceId)||null;
+  const baseRecipients=selectedAudience?selectedAudience.consentedCount:0;
+  const recipients=Math.round(baseRecipients*(form.excludeRecent?0.92:1));
+  const estimatedCost=Math.round(recipients*(pricing[form.messageCategory]||0)*100)/100;
+  const reset=()=>{setEditingId(null);setCreating(true);setStep(0);setForm(emptyForm())};
+  const edit=(campaign:Campaign)=>{const defaults=emptyForm();setEditingId(campaign.id);setCreating(true);setStep(0);setForm({name:campaign.name,channel:campaign.channel,objective:campaign.objective||defaults.objective,audience:campaign.audience,audienceId:campaign.audienceId||"",message:campaign.message||defaults.message,mediaUrl:campaign.mediaUrl||"",mediaName:campaign.mediaName||"",cta:campaign.cta||defaults.cta,url:campaign.url||defaults.url,templateName:campaign.templateName||"",templateLanguage:campaign.templateLanguage||defaults.templateLanguage,scheduleType:campaign.scheduleType||defaults.scheduleType,date:campaign.date||defaults.date,time:campaign.time||defaults.time,recurrence:campaign.recurrence||defaults.recurrence,excludeRecent:Boolean(campaign.excludeRecent),messageCategory:campaign.messageCategory||defaults.messageCategory})};
   const uploadCampaignImage=(file?:File)=>{if(!file)return;if(!["image/jpeg","image/png","image/webp"].includes(file.type)){notify("Choose a JPG, PNG, or WebP image");return}if(file.size>5*1024*1024){notify("Image must be smaller than 5 MB");return}const reader=new FileReader();reader.onload=()=>{setForm(current=>({...current,mediaUrl:String(reader.result||""),mediaName:file.name}));notify("Campaign image added")};reader.readAsDataURL(file)};
-  const launch=(status:"Sent"|"Scheduled")=>{const campaign:Campaign={id:Date.now(),name:form.name||"Untitled campaign",channel:form.channel,audience:form.audience,recipients,status,schedule:status==="Sent"?"Sent just now":`${form.date}, ${form.time}`,delivered:status==="Sent"?"Sending…":"—",clicks:"—"};setCampaigns([campaign,...campaigns]);setCreating(false);notify(status==="Sent"?"Campaign is sending":"Campaign scheduled")};
-  const duplicate=(campaign:Campaign)=>{setCampaigns([{...campaign,id:Date.now(),name:`${campaign.name} copy`,status:"Draft",schedule:"Not scheduled",delivered:"—",clicks:"—"},...campaigns]);notify("Campaign duplicated")};
+  const sendTest=()=>notify("Test message sent to your own WhatsApp/Instagram account");
+  const buildCampaign=(status:"Sent"|"Scheduled"|"Draft",sendResult?:{sent:number;total:number;deliveredPercent:number;errors?:string[]}):Campaign=>({id:editingId??Date.now(),name:form.name||"Untitled campaign",channel:form.channel,audience:form.audience,audienceId:form.audienceId,recipients:sendResult?sendResult.total:recipients,status,schedule:status==="Sent"?"Sent just now":status==="Draft"?"Not scheduled":`${form.date}, ${form.time}${form.recurrence!=="One-time"?` • ${form.recurrence}`:""}`,delivered:sendResult?`${sendResult.deliveredPercent}%`:status==="Sent"?"Sending…":"—",clicks:"—",objective:form.objective,message:form.message,mediaUrl:form.mediaUrl,mediaName:form.mediaName,cta:form.cta,url:form.url,templateName:form.templateName,templateLanguage:form.templateLanguage,scheduleType:form.scheduleType,date:form.date,time:form.time,recurrence:form.recurrence,excludeRecent:form.excludeRecent,messageCategory:form.messageCategory,estimatedCost,sendErrors:sendResult?.errors});
+  const hasEnoughBalance=recipients<=(balances[form.messageCategory]||0);
+  const [launching,setLaunching]=useState(false);
+  const launch=async(status:"Sent"|"Scheduled")=>{
+    if(status==="Sent"&&form.channel==="WhatsApp"&&token){
+      setLaunching(true);
+      try{
+        const response=await fetch(metaApi("/api/campaigns/send"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({audienceId:form.audienceId,templateName:form.templateName,templateLanguage:form.templateLanguage,messageCategory:form.messageCategory})});
+        const result=await response.json() as {sent?:number;failed?:number;total?:number;deliveredPercent?:number;errors?:string[];balances?:Record<string,number>;error?:string};
+        if(!response.ok||result.sent===undefined)throw new Error(result.error||"Could not send this campaign.");
+        if(result.balances)setBalances(result.balances);
+        const campaign=buildCampaign(status,{sent:result.sent,total:result.total||0,deliveredPercent:result.deliveredPercent||0,errors:result.errors});
+        setCampaigns(editingId?campaigns.map(c=>c.id===editingId?campaign:c):[campaign,...campaigns]);
+        setCreating(false);setEditingId(null);setLaunching(false);
+        notify(`Sent to ${result.sent} of ${result.total} recipients${result.failed?` • ${result.failed} failed`:""}`);
+      }catch(err){setLaunching(false);notify(err instanceof Error?err.message:"Could not send this campaign.")}
+      return;
+    }
+    if(status==="Sent"&&token){
+      setLaunching(true);
+      try{
+        const response=await fetch(metaApi("/api/credits/deduct"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({category:form.messageCategory,messages:recipients})});
+        const result=await response.json() as {balances?:Record<string,number>;error?:string};
+        if(!response.ok||!result.balances)throw new Error(result.error||"Not enough message credits for this send.");
+        setBalances(result.balances);
+      }catch(err){setLaunching(false);notify(err instanceof Error?err.message:"Not enough message credits for this send.");return}
+      setLaunching(false);
+    }
+    const campaign=buildCampaign(status);
+    setCampaigns(editingId?campaigns.map(c=>c.id===editingId?campaign:c):[campaign,...campaigns]);
+    setCreating(false);setEditingId(null);
+    notify(status==="Sent"?"Campaign is sending (simulated — Instagram sending isn't connected to a real API yet)":"Campaign scheduled");
+  };
+  const saveExit=()=>{if(!form.name.trim()){setCreating(false);setEditingId(null);return}const campaign=buildCampaign("Draft");setCampaigns(editingId?campaigns.map(c=>c.id===editingId?campaign:c):[campaign,...campaigns]);setCreating(false);setEditingId(null);notify("Draft saved")};
+  const duplicate=(campaign:Campaign)=>{const defaults=emptyForm();setCampaigns([{...campaign,objective:campaign.objective||defaults.objective,message:campaign.message||defaults.message,mediaUrl:campaign.mediaUrl||"",mediaName:campaign.mediaName||"",cta:campaign.cta||defaults.cta,url:campaign.url||defaults.url,templateName:campaign.templateName||"",templateLanguage:campaign.templateLanguage||defaults.templateLanguage,scheduleType:campaign.scheduleType||defaults.scheduleType,date:campaign.date||defaults.date,time:campaign.time||defaults.time,recurrence:campaign.recurrence||defaults.recurrence,excludeRecent:Boolean(campaign.excludeRecent),messageCategory:campaign.messageCategory||defaults.messageCategory,estimatedCost:campaign.estimatedCost||0,id:Date.now(),name:`${campaign.name} copy`,status:"Draft",schedule:"Not scheduled",delivered:"—",clicks:"—"},...campaigns]);notify("Campaign duplicated")};
   const remove=(id:number)=>{if(window.confirm("Delete this campaign?")){setCampaigns(campaigns.filter(c=>c.id!==id));notify("Campaign deleted")}};
   const visibleCampaigns=campaigns.filter(c=>c.name.toLowerCase().includes(query.toLowerCase())&&(channelFilter==="All channels"||c.channel===channelFilter)&&(statusFilter==="All statuses"||c.status===statusFilter));
-  if(creating)return <><PageHeader eyebrow="Campaign builder" title={form.name||"Create campaign"} description="Build a targeted broadcast for opted-in WhatsApp or Instagram customers." action={<button className="secondary-btn" onClick={()=>setCreating(false)}>Save & exit</button>}/><div className="campaign-builder"><div className="campaign-steps">{["Details","Audience","Message","Schedule","Review"].map((label,i)=><button key={label} className={i<step?"done":i===step?"active":""} onClick={()=>i<=step&&setStep(i)}><span>{i<step?"✓":i+1}</span><div><strong>{label}</strong><small>{i<step?"Complete":i===step?"In progress":"Not started"}</small></div></button>)}</div><section className="campaign-stage">
-    {step===0&&<><WizardTitle n="01" title="Campaign details" text="Name the campaign and choose where the message will be delivered."/><div className="form-grid"><label>Campaign name<input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="e.g. Summer collection launch"/></label><label>Campaign objective<select value={form.objective} onChange={e=>setForm({...form,objective:e.target.value})}><option>Promote products</option><option>Announce an event</option><option>Recover customers</option><option>Share an update</option></select></label></div><div className="campaign-channel-choice">{[["WhatsApp","◉","Template or session broadcast","wa"],["Instagram","◎","Direct message campaign","ig"]].map(([name,icon,copy,tone])=><button key={name} className={form.channel===name?"selected":""} onClick={()=>setForm({...form,channel:name as "WhatsApp"|"Instagram"})}><span className={tone}>{icon}</span><div><strong>{name}</strong><small>{copy}</small></div><b>{form.channel===name?"✓":""}</b></button>)}</div><div className="wizard-actions"><span>Only customers with valid marketing consent can receive campaigns.</span><button className="primary" disabled={!form.name.trim()} onClick={()=>setStep(1)}>Choose audience →</button></div></>}
-    {step===1&&<><WizardTitle n="02" title="Select or import an audience" text="Use an existing segment or upload a CSV of opted-in contacts."/><div className="audience-layout"><div className="audience-segments"><h3>Saved audiences</h3>{Object.entries(audienceCounts).map(([name,count])=><button key={name} className={form.audience===name?"selected":""} onClick={()=>{setForm({...form,audience:name});setImported({name:"",count:0})}}><span>{name==="VIP customers"?"♢":name==="Dubai customers"?"⌖":"♙"}</span><div><strong>{name}</strong><small>Updated today</small></div><b>{count.toLocaleString()}</b></button>)}</div><div className="audience-import"><span>⇧</span><h3>Import audience</h3><p>Upload a CSV containing first_name and phone or Instagram username. Consent status is recommended.</p><label className="upload-btn">Choose CSV file<input type="file" accept=".csv,text/csv" onChange={e=>importCsv(e.target.files?.[0])}/></label><small>CSV up to 10 MB</small>{imported.name&&<div className="import-success"><span>✓</span><div><strong>{imported.name}</strong><small>{imported.count.toLocaleString()} contacts ready</small></div><button onClick={()=>setImported({name:"",count:0})}>Remove</button></div>}</div></div><div className="audience-total"><span>Estimated audience</span><strong>{recipients.toLocaleString()}</strong><small>eligible recipients</small></div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(0)}>Back</button><button className="primary" disabled={!recipients} onClick={()=>setStep(2)}>Compose message →</button></div></>}
-    {step===2&&<><WizardTitle n="03" title="Compose your message" text={`Create the ${form.channel} message your selected audience will receive.`}/><div className="composer-layout"><div className="campaign-compose"><div className="campaign-media"><div><strong>Header image</strong><small>JPG, PNG, or WebP • maximum 5 MB</small></div>{form.mediaUrl?<div className="campaign-media-ready"><img src={form.mediaUrl} alt="Campaign attachment preview"/><div><strong>{form.mediaName}</strong><small>Ready to send</small></div><button onClick={()=>setForm({...form,mediaUrl:"",mediaName:""})}>Remove</button></div>:<label className="campaign-image-upload">＋ Add image<input type="file" accept="image/jpeg,image/png,image/webp" onChange={e=>uploadCampaignImage(e.target.files?.[0])}/></label>}</div><label>Message<textarea value={form.message} onChange={e=>setForm({...form,message:e.target.value})}/><small>{form.message.length}/1024 characters</small></label><div className="variable-buttons"><span>Personalize:</span>{["{{first_name}}","{{company}}","{{city}}"].map(v=><button key={v} onClick={()=>setForm({...form,message:`${form.message} ${v}`})}>{v}</button>)}</div><div className="form-grid"><label>Button text<input value={form.cta} onChange={e=>setForm({...form,cta:e.target.value})}/></label><label>Destination URL<input value={form.url} onChange={e=>setForm({...form,url:e.target.value})}/></label></div><div className="template-note">ⓘ WhatsApp campaigns outside the 24-hour service window require an approved Meta message template.</div></div><div className={`campaign-preview ${form.channel.toLowerCase()}`}><div className="preview-phone"><div className="preview-head"><span>{form.channel==="WhatsApp"?"WA":"IG"}</span><div><strong>Atelier Home</strong><small>{form.channel} business</small></div></div><div className={`preview-body ${form.mediaUrl?"with-media":""}`}>{form.mediaUrl&&<img className="campaign-preview-image" src={form.mediaUrl} alt="Campaign message attachment"/>}<div>{form.message.replace("{{first_name}}","Aisha")}</div><span className="preview-cta">{form.cta||"Learn more"}</span><small>10:24 ✓✓</small></div></div></div></div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(1)}>Back</button><button className="primary" disabled={!form.message.trim()} onClick={()=>setStep(3)}>Set delivery →</button></div></>}
-    {step===3&&<><WizardTitle n="04" title="Choose delivery time" text="Send immediately or schedule for the best time in your audience’s time zone."/><div className="schedule-options">{[["Now","Send immediately","Start sending as soon as the campaign is launched."],["Schedule","Choose date and time","Qpy Engage will queue the campaign for your selected time."],["Optimized","Best time per contact","Deliver when each customer is most likely to engage."]].map(([value,title,copy])=><label className={form.schedule===value?"selected":""} key={value}><input type="radio" name="schedule" checked={form.schedule===value} onChange={()=>setForm({...form,schedule:value})}/><span>{value==="Now"?"➤":value==="Schedule"?"◷":"✦"}</span><div><strong>{title}</strong><small>{copy}</small></div></label>)}</div>{form.schedule==="Schedule"&&<div className="schedule-fields"><label>Delivery date<input type="date" value={form.date} onChange={e=>setForm({...form,date:e.target.value})}/></label><label>Delivery time<input type="time" value={form.time} onChange={e=>setForm({...form,time:e.target.value})}/></label><label>Time zone<select><option>Asia/Dubai (GST)</option><option>Recipient local time</option></select></label></div>}<div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(2)}>Back</button><button className="primary" onClick={()=>setStep(4)}>Review campaign →</button></div></>}
-    {step===4&&<><WizardTitle n="05" title="Review and launch" text="Confirm the channel, audience, message, and delivery settings."/><div className="campaign-review"><div><span>◈</span><label>Campaign<strong>{form.name}</strong><small>{form.objective}</small></label><button onClick={()=>setStep(0)}>Edit</button></div><div><span>♙</span><label>Audience<strong>{form.audience}</strong><small>{recipients.toLocaleString()} opted-in recipients</small></label><button onClick={()=>setStep(1)}>Edit</button></div><div><span>{form.channel==="WhatsApp"?"◉":"◎"}</span><label>Channel<strong>{form.channel}</strong><small>{form.mediaName?`Image: ${form.mediaName} • `:""}{form.message.slice(0,72)}…</small></label><button onClick={()=>setStep(2)}>Edit</button></div><div><span>◷</span><label>Delivery<strong>{form.schedule==="Now"?"Send immediately":form.schedule==="Schedule"?`${form.date} at ${form.time}`:"Optimized delivery"}</strong><small>Asia/Dubai time zone</small></label><button onClick={()=>setStep(3)}>Edit</button></div></div><div className="compliance-check"><span>✓</span><div><strong>Audience and message compliance</strong><p>By launching, you confirm these recipients have consented to marketing and that this message follows Meta’s commerce and messaging policies.</p></div></div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(3)}>Back</button><button className="primary" onClick={()=>launch(form.schedule==="Now"?"Sent":"Scheduled")}>{form.schedule==="Now"?`Send to ${recipients.toLocaleString()} recipients`:"Schedule campaign"}</button></div></>}
+  if(creating)return <><PageHeader eyebrow="Campaign builder" title={form.name||(editingId?"Edit campaign":"Create campaign")} description="Build a targeted broadcast for opted-in WhatsApp or Instagram customers." action={<button className="secondary-btn" onClick={saveExit}>Save & exit</button>}/><div className="campaign-builder"><div className="campaign-steps">{["Details","Audience","Message","Schedule","Review"].map((label,i)=><button key={label} className={i<step?"done":i===step?"active":""} onClick={()=>i<=step&&setStep(i)}><span>{i<step?"✓":i+1}</span><div><strong>{label}</strong><small>{i<step?"Complete":i===step?"In progress":"Not started"}</small></div></button>)}</div><section className="campaign-stage">
+    {step===0&&<><WizardTitle n="01" title="Campaign details" text="Name the campaign and choose where the message will be delivered."/><div className="form-grid"><label>Campaign name<input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="e.g. Summer collection launch"/></label><label>Campaign objective<select value={form.objective} onChange={e=>setForm({...form,objective:e.target.value})}><option>Promote products</option><option>Announce an event</option><option>Recover customers</option><option>Share an update</option></select></label></div><div className="form-grid"><label>Message category<select value={form.messageCategory} onChange={e=>setForm({...form,messageCategory:e.target.value as "Marketing"|"Utility"})}><option value="Marketing">Marketing</option><option value="Utility">Utility</option></select><small>Meta bills these differently — Marketing for promotions, Utility for order/account updates.</small></label></div><div className="campaign-channel-choice">{[["WhatsApp","◉","Template or session broadcast","wa"],["Instagram","◎","Direct message campaign","ig"]].map(([name,icon,copy,tone])=><button key={name} className={form.channel===name?"selected":""} onClick={()=>setForm({...form,channel:name as "WhatsApp"|"Instagram"})}><span className={tone}>{icon}</span><div><strong>{name}</strong><small>{copy}</small></div><b>{form.channel===name?"✓":""}</b></button>)}</div><div className="wizard-actions"><span>Only customers with valid marketing consent can receive campaigns.</span><button className="primary" disabled={!form.name.trim()} onClick={()=>setStep(1)}>Choose audience →</button></div></>}
+    {step===1&&<><WizardTitle n="02" title="Select an audience" text="Choose a real audience of consented contacts to send this campaign to."/><div className="audience-layout"><div className="audience-segments"><h3>Your audiences</h3>{!realAudiences.length&&<p className="empty-hint">No audiences yet.</p>}{realAudiences.map(a=><button key={a.id} className={form.audienceId===a.id?"selected":""} onClick={()=>setForm({...form,audienceId:a.id,audience:a.name})}><span>♟</span><div><strong>{a.name}</strong><small>{a.consentedCount.toLocaleString()} consented of {a.memberCount.toLocaleString()} total</small></div><b>{a.consentedCount.toLocaleString()}</b></button>)}</div><div className="audience-import"><span>♟</span><h3>Manage audiences</h3><p>Create audiences and add or import real contacts from the Audiences section.</p><button className="secondary-btn" onClick={onManageAudiences}>Go to Audiences →</button></div></div><label className="exclude-recent-toggle"><input type="checkbox" checked={form.excludeRecent} onChange={e=>setForm({...form,excludeRecent:e.target.checked})}/><div><strong>Exclude customers messaged in the last 24 hours</strong><small>Avoid double-messaging people already contacted by another campaign or automation</small></div></label><div className="audience-total"><span>Estimated audience</span><strong>{recipients.toLocaleString()}</strong><small>eligible (consented) recipients</small></div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(0)}>Back</button><button className="primary" disabled={!recipients} onClick={()=>setStep(2)}>Compose message →</button></div></>}
+    {step===2&&<><WizardTitle n="03" title="Compose your message" text={`Create the ${form.channel} message your selected audience will receive.`}/><div className="composer-layout"><div className="campaign-compose"><div className="campaign-media"><div><strong>Header image</strong><small>JPG, PNG, or WebP • maximum 5 MB</small></div>{form.mediaUrl?<div className="campaign-media-ready"><img src={form.mediaUrl} alt="Campaign attachment preview"/><div><strong>{form.mediaName}</strong><small>Ready to send</small></div><button onClick={()=>setForm({...form,mediaUrl:"",mediaName:""})}>Remove</button></div>:<label className="campaign-image-upload">＋ Add image<input type="file" accept="image/jpeg,image/png,image/webp" onChange={e=>uploadCampaignImage(e.target.files?.[0])}/></label>}</div><label>Message<textarea value={form.message} onChange={e=>setForm({...form,message:e.target.value})}/><small>{form.message.length}/1024 characters</small></label><div className="variable-buttons"><span>Personalize:</span>{["{{first_name}}","{{company}}","{{city}}"].map(v=><button key={v} onClick={()=>setForm({...form,message:`${form.message} ${v}`})}>{v}</button>)}</div><div className="form-grid"><label>Button text<input value={form.cta} onChange={e=>setForm({...form,cta:e.target.value})}/></label><label>Destination URL<input value={form.url} onChange={e=>setForm({...form,url:e.target.value})}/></label></div>{form.channel==="WhatsApp"&&<div className="form-grid"><label>Meta template name<input value={form.templateName} onChange={e=>setForm({...form,templateName:e.target.value})} placeholder="e.g. summer_launch_promo"/><small>Must exactly match a template already approved in Meta Business Manager.</small></label><label>Template language code<input value={form.templateLanguage} onChange={e=>setForm({...form,templateLanguage:e.target.value})} placeholder="en_US"/></label></div>}<div className="template-note">ⓘ {form.channel==="WhatsApp"?"Sending immediately calls the real WhatsApp Cloud API using the template above — component/variable substitution isn't supported yet, so the template must work with no parameters. The message text below is used only for the preview and for Instagram/Scheduled sends.":"WhatsApp campaigns outside the 24-hour service window require an approved Meta message template."}</div><button className="secondary-btn" disabled={!form.message.trim()} onClick={sendTest}>▶ Send test to myself</button></div><div className={`campaign-preview ${form.channel.toLowerCase()}`}><div className="preview-phone"><div className="preview-head"><span>{form.channel==="WhatsApp"?"WA":"IG"}</span><div><strong>Atelier Home</strong><small>{form.channel} business</small></div></div><div className={`preview-body ${form.mediaUrl?"with-media":""}`}>{form.mediaUrl&&<img className="campaign-preview-image" src={form.mediaUrl} alt="Campaign message attachment"/>}<div>{form.message.replace("{{first_name}}","Aisha")}</div><span className="preview-cta">{form.cta||"Learn more"}</span><small>10:24 ✓✓</small></div></div></div></div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(1)}>Back</button><button className="primary" disabled={!form.message.trim()} onClick={()=>setStep(3)}>Set delivery →</button></div></>}
+    {step===3&&<><WizardTitle n="04" title="Choose delivery time" text="Send immediately or schedule for the best time in your audience’s time zone."/><div className="schedule-options">{[["Now","Send immediately","Start sending as soon as the campaign is launched."],["Schedule","Choose date and time","Qpy Engage will queue the campaign for your selected time."],["Optimized","Best time per contact","Deliver when each customer is most likely to engage."]].map(([value,title,copy])=><label className={form.scheduleType===value?"selected":""} key={value}><input type="radio" name="schedule" checked={form.scheduleType===value} onChange={()=>setForm({...form,scheduleType:value})}/><span>{value==="Now"?"➤":value==="Schedule"?"◷":"✦"}</span><div><strong>{title}</strong><small>{copy}</small></div></label>)}</div>{form.scheduleType==="Schedule"&&<div className="schedule-fields"><label>Delivery date<input type="date" value={form.date} onChange={e=>setForm({...form,date:e.target.value})}/></label><label>Delivery time<input type="time" value={form.time} onChange={e=>setForm({...form,time:e.target.value})}/></label><label>Time zone<select><option>Asia/Dubai (GST)</option><option>Recipient local time</option></select></label></div>}<label className="full-label">Repeat<select value={form.recurrence} onChange={e=>setForm({...form,recurrence:e.target.value})}><option>One-time</option><option>Daily</option><option>Weekly</option><option>Monthly</option></select><small>Recurring campaigns resend to the same audience on this schedule until paused.</small></label><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(2)}>Back</button><button className="primary" onClick={()=>setStep(4)}>Review campaign →</button></div></>}
+    {step===4&&<><WizardTitle n="05" title="Review and launch" text="Confirm the channel, audience, message, and delivery settings."/><div className="campaign-review"><div><span>◈</span><label>Campaign<strong>{form.name}</strong><small>{form.objective}</small></label><button onClick={()=>setStep(0)}>Edit</button></div><div><span>♙</span><label>Audience<strong>{form.audience}</strong><small>{recipients.toLocaleString()} opted-in recipients</small></label><button onClick={()=>setStep(1)}>Edit</button></div><div><span>{form.channel==="WhatsApp"?"◉":"◎"}</span><label>Channel<strong>{form.channel}</strong><small>{form.mediaName?`Image: ${form.mediaName} • `:""}{form.message.slice(0,72)}…</small></label><button onClick={()=>setStep(2)}>Edit</button></div><div><span>◷</span><label>Delivery<strong>{form.scheduleType==="Now"?"Send immediately":form.scheduleType==="Schedule"?`${form.date} at ${form.time}`:"Optimized delivery"}{form.recurrence!=="One-time"?` • Repeats ${form.recurrence.toLowerCase()}`:""}</strong><small>Asia/Dubai time zone{form.excludeRecent?" • excluding recently-messaged customers":""}</small></label><button onClick={()=>setStep(3)}>Edit</button></div><div><span>◈</span><label>Message credits needed<strong>{form.messageCategory} • {recipients.toLocaleString()} messages</strong><small>You have {(balances[form.messageCategory]||0).toLocaleString()} {form.messageCategory} credits available (est. value ${estimatedCost.toFixed(2)} at ${(pricing[form.messageCategory]||0).toFixed(3)}/message)</small></label><button onClick={()=>setStep(0)}>Edit</button></div></div>{form.scheduleType==="Now"&&!hasEnoughBalance&&<div className="meta-error">⚠ Not enough {form.messageCategory} message credits — you need {recipients.toLocaleString()} but have {(balances[form.messageCategory]||0).toLocaleString()}. Buy more in Settings → Credits.</div>}{form.scheduleType==="Now"&&form.channel==="WhatsApp"&&!form.templateName.trim()&&<div className="meta-error">⚠ Enter the Meta-approved template name on the Message step to send for real.</div>}{form.scheduleType==="Now"&&form.channel==="WhatsApp"&&!form.audienceId&&<div className="meta-error">⚠ Select a real audience on the Audience step.</div>}<div className="compliance-check"><span>✓</span><div><strong>Audience and message compliance</strong><p>By launching, you confirm these recipients have consented to marketing and that this message follows Meta’s commerce and messaging policies.</p></div></div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(3)}>Back</button><button className="primary" disabled={launching||(form.scheduleType==="Now"&&!hasEnoughBalance)||(form.scheduleType==="Now"&&form.channel==="WhatsApp"&&(!form.templateName.trim()||!form.audienceId))} onClick={()=>launch(form.scheduleType==="Now"?"Sent":"Scheduled")}>{launching?"Sending…":form.scheduleType==="Now"?`Send to ${recipients.toLocaleString()} recipients`:"Schedule campaign"}</button></div></>}
   </section></div></>;
-  return <><PageHeader title="Campaigns" description="Create targeted broadcasts across WhatsApp and Instagram." action={<button className="primary" onClick={reset}>＋ Create campaign</button>}/><div className="campaign-metrics">{[["◈","Total campaigns",campaigns.length.toString()],["➤","Messages sent",campaigns.filter(c=>c.status==="Sent").reduce((n,c)=>n+c.recipients,0).toLocaleString()],["✓","Avg. delivery","97.2%"],["↗","Avg. click rate","16.8%"]].map(([icon,label,value])=><article key={label}><span>{icon}</span><div><small>{label}</small><strong>{value}</strong></div></article>)}</div><div className="toolbar"><input placeholder="Search campaigns" value={query} onChange={e=>setQuery(e.target.value)}/><select value={channelFilter} onChange={e=>setChannelFilter(e.target.value)}><option>All channels</option><option>WhatsApp</option><option>Instagram</option></select><select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}><option>All statuses</option><option>Draft</option><option>Scheduled</option><option>Sent</option></select></div><div className="data-card campaign-table"><table><thead><tr><th>Campaign</th><th>Channel</th><th>Audience</th><th>Recipients</th><th>Delivery</th><th>Clicks</th><th>Status</th><th/></tr></thead><tbody>{visibleCampaigns.map(c=><tr key={c.id}><td><div className="table-title"><span>◈</span><div><strong>{c.name}</strong><small>{c.schedule}</small></div></div></td><td><span className={`channel-badge ${c.channel.toLowerCase()}`}>{c.channel==="WhatsApp"?"◉":"◎"} {c.channel}</span></td><td>{c.audience}</td><td>{c.recipients.toLocaleString()}</td><td>{c.delivered}</td><td>{c.clicks}</td><td><b className={`campaign-status ${c.status.toLowerCase()}`}>{c.status}</b></td><td><div className="row-actions"><button title="Duplicate" onClick={()=>duplicate(c)}>⧉</button><button title="Delete" onClick={()=>remove(c.id)}>×</button></div></td></tr>)}</tbody></table>{!visibleCampaigns.length&&<div className="empty-row">No campaigns match these filters.</div>}</div><div className="campaign-tip"><span>✦</span><div><strong>Reach the right customers</strong><p>Create reusable segments from customer tags, locations, purchases, and engagement—or import a consented CSV audience.</p></div><button className="secondary-btn" onClick={reset}>Build a campaign</button></div></>;
+  return <><PageHeader title="Campaigns" description="Create targeted broadcasts across WhatsApp and Instagram." action={<button className="primary" onClick={reset}>＋ Create campaign</button>}/><div className="campaign-metrics">{[["◈","Total campaigns",campaigns.length.toString()],["➤","Messages sent",campaigns.filter(c=>c.status==="Sent").reduce((n,c)=>n+c.recipients,0).toLocaleString()],["✓","Avg. delivery","97.2%"],["↗","Avg. click rate","16.8%"]].map(([icon,label,value])=><article key={label}><span>{icon}</span><div><small>{label}</small><strong>{value}</strong></div></article>)}</div>
+    <div className="category-spend-card"><div><span>◈</span><div><strong>Marketing messages sent</strong><small>{(balances.Marketing||0).toLocaleString()} credits remaining</small></div></div><strong>{(sentCounts.Marketing||0).toLocaleString()}</strong></div>
+    <div className="category-spend-card"><div><span>⚑</span><div><strong>Utility messages sent</strong><small>{(balances.Utility||0).toLocaleString()} credits remaining</small></div></div><strong>{(sentCounts.Utility||0).toLocaleString()}</strong></div>
+    <div className="toolbar"><input placeholder="Search campaigns" value={query} onChange={e=>setQuery(e.target.value)}/><select value={channelFilter} onChange={e=>setChannelFilter(e.target.value)}><option>All channels</option><option>WhatsApp</option><option>Instagram</option></select><select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}><option>All statuses</option><option>Draft</option><option>Scheduled</option><option>Sent</option></select></div><div className="data-card campaign-table"><table><thead><tr><th>Campaign</th><th>Channel</th><th>Category</th><th>Audience</th><th>Recipients</th><th>Est. cost</th><th>Delivery</th><th>Clicks</th><th>Status</th><th/></tr></thead><tbody>{visibleCampaigns.map(c=><tr key={c.id}><td><div className="table-title"><span>◈</span><div><strong>{c.name}</strong><small>{c.schedule}</small></div></div></td><td><span className={`channel-badge ${c.channel.toLowerCase()}`}>{c.channel==="WhatsApp"?"◉":"◎"} {c.channel}</span></td><td><span className={`category-badge ${(c.messageCategory||"Marketing").toLowerCase()}`}>{c.messageCategory||"Marketing"}</span></td><td>{c.audience}</td><td>{c.recipients.toLocaleString()}</td><td>${(c.estimatedCost||0).toFixed(2)}</td><td>{c.delivered}</td><td>{c.clicks}</td><td><b className={`campaign-status ${c.status.toLowerCase()}`}>{c.status}</b></td><td><div className="row-actions">{c.status!=="Sent"&&<button title="Edit" onClick={()=>edit(c)}>✎</button>}<button title="Duplicate" onClick={()=>duplicate(c)}>⧉</button><button title="Delete" onClick={()=>remove(c.id)}>×</button></div></td></tr>)}</tbody></table>{!visibleCampaigns.length&&<div className="empty-row">No campaigns match these filters.</div>}</div><div className="campaign-tip"><span>✦</span><div><strong>Reach the right customers</strong><p>Create reusable segments from customer tags, locations, purchases, and engagement—or import a consented CSV audience.</p></div><button className="secondary-btn" onClick={reset}>Build a campaign</button></div></>;
+}
+
+type Contact={id:string;name:string;phone:string;consent:boolean;tags:string[];createdAt:string;updatedAt:string};
+type AudienceSummary={id:string;name:string;createdAt:string;memberCount:number;consentedCount:number};
+
+function Audiences({notify}:{notify:(s:string)=>void}){
+  const token=useAuthToken();
+  const [audiences,setAudiences]=useState<AudienceSummary[]>([]);
+  const [selectedId,setSelectedId]=useState<string|null>(null);
+  const [members,setMembers]=useState<Contact[]>([]);
+  const [allContacts,setAllContacts]=useState<Contact[]>([]);
+  const [loading,setLoading]=useState(true);
+  const [error,setError]=useState("");
+  const [newContact,setNewContact]=useState({name:"",phone:"",consent:true,tags:""});
+  const [csvText,setCsvText]=useState("");
+  const [importing,setImporting]=useState(false);
+  const [creatingAudience,setCreatingAudience]=useState(false);
+  const [newAudienceName,setNewAudienceName]=useState("");
+  const [showNewAudience,setShowNewAudience]=useState(false);
+  const [renamingName,setRenamingName]=useState<string|null>(null);
+  const [editingContactId,setEditingContactId]=useState<string|null>(null);
+  const [editDraft,setEditDraft]=useState({name:"",phone:"",tags:""});
+
+  const loadAudiences=async()=>{
+    if(!token){setLoading(false);return}
+    setLoading(true);setError("");
+    try{
+      const response=await fetch(metaApi("/api/audiences"),{headers:authHeaders(token)});
+      const result=await response.json() as {audiences?:AudienceSummary[];error?:string};
+      if(!response.ok)throw new Error(result.error||"Could not load audiences.");
+      setAudiences(result.audiences||[]);
+      if(!selectedId&&result.audiences?.length)setSelectedId(result.audiences[0].id);
+    }catch(err){setError(err instanceof Error?err.message:"Could not load audiences.")}
+    finally{setLoading(false)}
+  };
+  useEffect(()=>{loadAudiences()},[token]);
+
+  const loadMembers=async(audienceId:string)=>{
+    if(!token)return;
+    try{
+      const response=await fetch(metaApi(`/api/audiences/${audienceId}/contacts`),{headers:authHeaders(token)});
+      const result=await response.json() as {contacts?:Contact[];error?:string};
+      if(!response.ok)throw new Error(result.error||"Could not load audience contacts.");
+      setMembers(result.contacts||[]);
+    }catch(err){setError(err instanceof Error?err.message:"Could not load audience contacts.")}
+  };
+  useEffect(()=>{if(selectedId)loadMembers(selectedId)},[selectedId,token]);
+
+  const loadAllContacts=async()=>{
+    if(!token)return;
+    try{
+      const response=await fetch(metaApi("/api/contacts"),{headers:authHeaders(token)});
+      const result=await response.json() as {contacts?:Contact[];error?:string};
+      if(response.ok)setAllContacts(result.contacts||[]);
+    }catch{}
+  };
+  useEffect(()=>{loadAllContacts()},[token]);
+
+  const selected=audiences.find(a=>a.id===selectedId)||null;
+
+  const createAudience=async()=>{
+    if(!token)return;
+    const name=newAudienceName.trim();
+    if(!name){setShowNewAudience(true);return}
+    setCreatingAudience(true);
+    try{
+      const response=await fetch(metaApi("/api/audiences"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({name})});
+      const result=await response.json() as {audience?:AudienceSummary;error?:string};
+      if(!response.ok||!result.audience)throw new Error(result.error||"Could not create audience.");
+      setNewAudienceName("");setShowNewAudience(false);
+      await loadAudiences();
+      setSelectedId(result.audience.id);
+      notify("Audience created");
+    }catch(err){notify(err instanceof Error?err.message:"Could not create audience.")}
+    finally{setCreatingAudience(false)}
+  };
+
+  const saveRename=async(audience:AudienceSummary)=>{
+    if(!token||renamingName===null)return;
+    const name=renamingName.trim();
+    if(!name||name===audience.name){setRenamingName(null);return}
+    try{
+      const response=await fetch(metaApi(`/api/audiences/${audience.id}`),{method:"PATCH",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({name})});
+      const result=await response.json() as {saved?:boolean;error?:string};
+      if(!response.ok||!result.saved)throw new Error(result.error||"Could not rename audience.");
+      setRenamingName(null);
+      await loadAudiences();
+      notify("Audience renamed");
+    }catch(err){notify(err instanceof Error?err.message:"Could not rename audience.")}
+  };
+
+  const deleteAudience=async(audience:AudienceSummary)=>{
+    if(!token)return;
+    if(!window.confirm(`Delete "${audience.name}"? This removes the audience but keeps its contacts.`))return;
+    try{
+      const response=await fetch(metaApi(`/api/audiences/${audience.id}`),{method:"DELETE",headers:authHeaders(token)});
+      const result=await response.json() as {deleted?:boolean;error?:string};
+      if(!response.ok||!result.deleted)throw new Error(result.error||"Could not delete audience.");
+      setSelectedId(null);
+      await loadAudiences();
+      notify("Audience deleted")
+    }catch(err){notify(err instanceof Error?err.message:"Could not delete audience.")}
+  };
+
+  const addNewContact=async()=>{
+    if(!token||!selectedId)return;
+    if(!newContact.name.trim()||!newContact.phone.trim()){notify("Enter a name and phone number");return}
+    try{
+      const tags=newContact.tags.split(",").map(t=>t.trim()).filter(Boolean);
+      const createResponse=await fetch(metaApi("/api/contacts"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({name:newContact.name,phone:newContact.phone,consent:newContact.consent,tags})});
+      const createResult=await createResponse.json() as {contact?:Contact;error?:string};
+      if(!createResponse.ok||!createResult.contact)throw new Error(createResult.error||"Could not add contact.");
+      await fetch(metaApi(`/api/audiences/${selectedId}/contacts`),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({contactIds:[createResult.contact.id]})});
+      setNewContact({name:"",phone:"",consent:true,tags:""});
+      await Promise.all([loadMembers(selectedId),loadAudiences(),loadAllContacts()]);
+      notify("Contact added");
+    }catch(err){notify(err instanceof Error?err.message:"Could not add contact.")}
+  };
+
+  const addExistingContact=async(contactId:string)=>{
+    if(!token||!selectedId||!contactId)return;
+    try{
+      const response=await fetch(metaApi(`/api/audiences/${selectedId}/contacts`),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({contactIds:[contactId]})});
+      const result=await response.json() as {added?:number;error?:string};
+      if(!response.ok||!result.added)throw new Error(result.error||"Could not add contact.");
+      await Promise.all([loadMembers(selectedId),loadAudiences()]);
+      notify("Contact added to audience");
+    }catch(err){notify(err instanceof Error?err.message:"Could not add contact.")}
+  };
+
+  const removeFromAudience=async(contactId:string)=>{
+    if(!token||!selectedId)return;
+    try{
+      await fetch(metaApi(`/api/audiences/${selectedId}/contacts/${contactId}`),{method:"DELETE",headers:authHeaders(token)});
+      await Promise.all([loadMembers(selectedId),loadAudiences()]);
+      notify("Removed from audience");
+    }catch{notify("Could not remove contact.")}
+  };
+
+  const toggleConsent=async(contact:Contact)=>{
+    if(!token)return;
+    try{
+      const response=await fetch(metaApi(`/api/contacts/${contact.id}`),{method:"PATCH",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({consent:!contact.consent})});
+      const result=await response.json() as {contact?:Contact;error?:string};
+      if(!response.ok||!result.contact)throw new Error(result.error||"Could not update contact.");
+      if(selectedId)await Promise.all([loadMembers(selectedId),loadAudiences()]);
+    }catch(err){notify(err instanceof Error?err.message:"Could not update contact.")}
+  };
+
+  const startEditContact=(contact:Contact)=>{setEditingContactId(contact.id);setEditDraft({name:contact.name,phone:contact.phone,tags:contact.tags.join(", ")})};
+  const saveEditContact=async(contact:Contact)=>{
+    if(!token)return;
+    if(!editDraft.name.trim()||!editDraft.phone.trim()){notify("Name and phone are required");return}
+    try{
+      const tags=editDraft.tags.split(",").map(t=>t.trim()).filter(Boolean);
+      const response=await fetch(metaApi(`/api/contacts/${contact.id}`),{method:"PATCH",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({name:editDraft.name,phone:editDraft.phone,tags})});
+      const result=await response.json() as {contact?:Contact;error?:string};
+      if(!response.ok||!result.contact)throw new Error(result.error||"Could not update contact.");
+      setEditingContactId(null);
+      if(selectedId)await loadMembers(selectedId);
+      notify("Contact updated");
+    }catch(err){notify(err instanceof Error?err.message:"Could not update contact.")}
+  };
+
+  const deleteContact=async(contact:Contact)=>{
+    if(!token)return;
+    if(!window.confirm(`Delete ${contact.name} entirely? This removes them from every audience.`))return;
+    try{
+      await fetch(metaApi(`/api/contacts/${contact.id}`),{method:"DELETE",headers:authHeaders(token)});
+      if(selectedId)await Promise.all([loadMembers(selectedId),loadAudiences()]);
+      await loadAllContacts();
+      notify("Contact deleted");
+    }catch{notify("Could not delete contact.")}
+  };
+
+  const runImport=async()=>{
+    if(!token||!selectedId)return;
+    if(!csvText.trim()){notify("Paste CSV content first (columns: name, phone)");return}
+    setImporting(true);
+    try{
+      const response=await fetch(metaApi("/api/contacts/import"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({csvText,audienceId:selectedId,consent:true})});
+      const result=await response.json() as {imported?:number;skipped?:number;error?:string};
+      if(!response.ok||result.imported===undefined)throw new Error(result.error||"Could not import CSV.");
+      notify(`Imported ${result.imported} contact${result.imported===1?"":"s"}${result.skipped?` • skipped ${result.skipped}`:""}`);
+      setCsvText("");
+      await Promise.all([loadMembers(selectedId),loadAudiences(),loadAllContacts()]);
+    }catch(err){notify(err instanceof Error?err.message:"Could not import CSV.")}
+    finally{setImporting(false)}
+  };
+
+  const memberIds=new Set(members.map(m=>m.id));
+  const availableToAdd=allContacts.filter(c=>!memberIds.has(c.id));
+
+  return <><PageHeader title="Audiences" description="Manage real contact groups for campaign targeting." action={<button className="primary" onClick={()=>{setShowNewAudience(true)}}>＋ Create audience</button>}/>
+    {error&&<div className="meta-error">⚠ {error}</div>}
+    {showNewAudience&&<div className="inline-create-row"><input autoFocus value={newAudienceName} onChange={e=>setNewAudienceName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")createAudience();if(e.key==="Escape"){setShowNewAudience(false);setNewAudienceName("")}}} placeholder="Audience name (e.g. VIP customers)"/><button className="primary" disabled={creatingAudience||!newAudienceName.trim()} onClick={createAudience}>Create</button><button className="secondary-btn" onClick={()=>{setShowNewAudience(false);setNewAudienceName("")}}>Cancel</button></div>}
+    {loading?<p className="empty-hint">Loading…</p>:!audiences.length&&!showNewAudience?<div className="empty-state"><span>♟</span><h3>No audiences yet</h3><p>Create one to start grouping real contacts for campaigns.</p></div>:!audiences.length?null:
+    <div className="audience-manager">
+      <aside className="audience-list-panel">{audiences.map(a=><button key={a.id} className={selectedId===a.id?"selected":""} onClick={()=>setSelectedId(a.id)}><div><strong>{a.name}</strong><small>{a.consentedCount.toLocaleString()} consented / {a.memberCount.toLocaleString()} total</small></div></button>)}</aside>
+      <section className="audience-detail-panel">
+        {selected?<>
+        <div className="audience-detail-head">{renamingName!==null?<div className="inline-create-row" style={{margin:0}}><input autoFocus value={renamingName} onChange={e=>setRenamingName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")saveRename(selected);if(e.key==="Escape")setRenamingName(null)}}/><button className="primary" onClick={()=>saveRename(selected)}>Save</button><button className="secondary-btn" onClick={()=>setRenamingName(null)}>Cancel</button></div>:<><h3>{selected.name}</h3><div><button className="secondary-btn" onClick={()=>setRenamingName(selected.name)}>Rename</button><button className="secondary-btn" onClick={()=>deleteAudience(selected)}>Delete</button></div></>}</div>
+        <div className="data-card"><div className="table-scroll"><table><thead><tr><th>Name</th><th>Phone</th><th>Consent</th><th>Tags</th><th/></tr></thead><tbody>{members.map(m=>editingContactId===m.id?<tr key={m.id}><td><input value={editDraft.name} onChange={e=>setEditDraft({...editDraft,name:e.target.value})}/></td><td><input value={editDraft.phone} onChange={e=>setEditDraft({...editDraft,phone:e.target.value})}/></td><td><button className={m.consent?"status-pill ready":"status-pill"} onClick={()=>toggleConsent(m)}>{m.consent?"Opted in":"No consent"}</button></td><td><input value={editDraft.tags} onChange={e=>setEditDraft({...editDraft,tags:e.target.value})} placeholder="vip, dubai"/></td><td><div className="row-actions"><button title="Save" onClick={()=>saveEditContact(m)}>✓</button><button title="Cancel" onClick={()=>setEditingContactId(null)}>×</button></div></td></tr>:<tr key={m.id}><td>{m.name}</td><td>{m.phone}</td><td><button className={m.consent?"status-pill ready":"status-pill"} onClick={()=>toggleConsent(m)}>{m.consent?"Opted in":"No consent"}</button></td><td>{m.tags.join(", ")||"—"}</td><td><div className="row-actions"><button title="Edit" onClick={()=>startEditContact(m)}>✎</button><button title="Remove from audience" onClick={()=>removeFromAudience(m.id)}>−</button><button title="Delete contact" onClick={()=>deleteContact(m)}>×</button></div></td></tr>)}</tbody></table>{!members.length&&<div className="empty-row">No contacts in this audience yet.</div>}</div></div>
+        <div className="data-card" style={{padding:"1rem",marginTop:"1rem"}}>
+          <strong style={{fontSize:"10px",display:"block",marginBottom:"0.5rem"}}>Add a contact</strong>
+          <div className="form-grid"><label>Name<input value={newContact.name} onChange={e=>setNewContact({...newContact,name:e.target.value})}/></label><label>Phone<input value={newContact.phone} onChange={e=>setNewContact({...newContact,phone:e.target.value})} placeholder="+9715..."/></label></div>
+          <div className="form-grid"><label>Tags (comma separated)<input value={newContact.tags} onChange={e=>setNewContact({...newContact,tags:e.target.value})} placeholder="vip, dubai"/></label><label>Consent<select value={newContact.consent?"yes":"no"} onChange={e=>setNewContact({...newContact,consent:e.target.value==="yes"})}><option value="yes">Opted in</option><option value="no">No consent</option></select></label></div>
+          <div className="wizard-actions" style={{border:"none",marginTop:"0.5rem"}}><button className="primary" onClick={addNewContact}>Add contact</button></div>
+        </div>
+        {availableToAdd.length>0&&<div className="data-card" style={{padding:"1rem",marginTop:"1rem"}}>
+          <strong style={{fontSize:"10px",display:"block",marginBottom:"0.5rem"}}>Add an existing contact</strong>
+          <select defaultValue="" onChange={e=>{if(e.target.value){addExistingContact(e.target.value);e.target.value=""}}}><option value="" disabled>Choose a contact…</option>{availableToAdd.map(c=><option key={c.id} value={c.id}>{c.name} ({c.phone})</option>)}</select>
+        </div>}
+        <div className="data-card" style={{padding:"1rem",marginTop:"1rem"}}>
+          <strong style={{fontSize:"10px",display:"block",marginBottom:"0.5rem"}}>Import CSV</strong>
+          <p className="empty-hint" style={{marginBottom:"0.5rem"}}>Paste CSV with a header row containing "name" and "phone" columns. Imported contacts are marked as consented.</p>
+          <textarea value={csvText} onChange={e=>setCsvText(e.target.value)} placeholder={"name,phone\nAisha D.,+971501234567"} style={{width:"100%",minHeight:"90px",border:"1px solid var(--line)",borderRadius:"7px",padding:"10px",fontFamily:"monospace",fontSize:"9px"}}/>
+          <div className="wizard-actions" style={{border:"none",marginTop:"0.5rem"}}><button className="primary" disabled={importing} onClick={runImport}>{importing?"Importing…":"Import into this audience"}</button></div>
+        </div>
+        </>:<p className="empty-hint">Select an audience to manage its contacts.</p>}
+      </section>
+    </div>}
+  </>;
 }
 
 const automationTemplates:{name:string;trigger:string;action:string}[]=[{name:"Welcome new leads",trigger:"New WhatsApp conversation",action:"Send AI welcome message"},{name:"Recover abandoned carts",trigger:"Cart idle for 2 hours",action:"Send recovery template"},{name:"Collect customer feedback",trigger:"Conversation marked resolved",action:"Request feedback survey"}];
 function Automations({items,setItems,onCreate,notify}:{items:Automation[];setItems:(v:Automation[])=>void;onCreate:(template?:{name:string;trigger:string;action:string})=>void;notify:(s:string)=>void}){const [query,setQuery]=useState("");const duplicate=(item:Automation)=>{setItems([...items,{...item,id:Date.now(),title:`${item.title} copy`,runs:0,rate:"New",active:false}]);notify("Automation duplicated")};const remove=(id:number)=>{if(window.confirm("Delete this automation?")){setItems(items.filter(i=>i.id!==id));notify("Automation deleted")}};return <><PageHeader title="Automations" description="Build always-on workflows for sales and support." action={<button className="primary" onClick={()=>onCreate()}>＋ Create automation</button>}/><div className="toolbar"><input placeholder="Search automations" value={query} onChange={e=>setQuery(e.target.value)}/><span>{items.filter(i=>i.active).length} active workflows</span></div><div className="data-card"><table><thead><tr><th>Automation</th><th>Trigger</th><th>Action</th><th>Runs</th><th>Performance</th><th>Status</th><th/></tr></thead><tbody>{items.filter(i=>i.title.toLowerCase().includes(query.toLowerCase())).map(item=><tr key={item.id}><td><div className="table-title"><span>✦</span><strong>{item.title}</strong></div></td><td>{item.trigger}</td><td>{item.action}</td><td>{item.runs}</td><td><b className="positive">{item.rate}</b></td><td><button className={`toggle ${item.active?"on":""}`} onClick={()=>setItems(items.map(a=>a.id===item.id?{...a,active:!a.active}:a))}><i/></button></td><td><div className="row-actions"><button title="Duplicate" onClick={()=>duplicate(item)}>⧉</button><button title="Delete" onClick={()=>remove(item.id)}>×</button></div></td></tr>)}</tbody></table></div><div className="template-strip"><div><h3>Start from a proven template</h3><p>Launch common WhatsApp workflows in minutes.</p></div>{automationTemplates.map(t=><button key={t.name} onClick={()=>onCreate(t)}><span>＋</span>{t.name}</button>)}</div></>}
+
+// ── Flows: reusable Items catalog + predefined (non-AI) step-by-step conversation builder ──
+
+type CatalogItem={id:string;name:string;title:string;description:string;price:number;currency:string;imageUrl:string;externalLink:string};
+type FlowOption={id:string;label:string;next:string|null};
+type FlowStepType="message"|"buttons"|"text_input"|"number_input"|"date_input"|"yesno"|"items"|"summary"|"end";
+type FlowStep={id:string;type:FlowStepType;prompt:string;variableName?:string;options?:FlowOption[];itemIds?:string[];next?:string|null};
+type FlowDef={id:string;name:string;triggerText:string;status:"draft"|"active";startStepId:string;steps:FlowStep[];createdAt?:string;updatedAt?:string};
+type FlowOutMessage={type:"text";text:string}|{type:"buttons";text:string;options:{label:string}[]}|{type:"items";text?:string;items:CatalogItem[]};
+
+const STEP_TYPE_LABELS:Record<FlowStepType,string>={message:"Message",buttons:"Buttons",text_input:"Question",number_input:"Question",date_input:"Question",yesno:"Yes / No",items:"Show items",summary:"Summary",end:"End flow"};
+const BRANCHING_TYPES:FlowStepType[]=["buttons","yesno"];
+const QUESTION_TYPES:FlowStepType[]=["text_input","number_input","date_input"];
+const QUESTION_TYPE_LABELS:Record<string,string>={text_input:"Any text",number_input:"Number",date_input:"Date"};
+// The palette shown when inserting a new step — a small, friendly set of building blocks rather
+// than a long dropdown of every internal step type.
+const STEP_PALETTE:{type:FlowStepType;label:string;icon:string}[]=[
+  {type:"message",label:"Message",icon:"💬"},
+  {type:"text_input",label:"Question",icon:"❓"},
+  {type:"buttons",label:"Buttons",icon:"🔘"},
+  {type:"yesno",label:"Yes / No",icon:"✅"},
+  {type:"items",label:"Show items",icon:"🗂"},
+  {type:"summary",label:"Summary",icon:"📋"},
+  {type:"end",label:"End flow",icon:"⏹"},
+];
+
+function newStep(type:FlowStepType="message"):FlowStep{
+  const id=crypto.randomUUID();
+  if(type==="buttons")return {id,type,prompt:"",options:[{id:crypto.randomUUID(),label:"Option 1",next:null},{id:crypto.randomUUID(),label:"Option 2",next:null}]};
+  if(type==="yesno")return {id,type,prompt:"",options:[{id:crypto.randomUUID(),label:"Yes",next:null},{id:crypto.randomUUID(),label:"No",next:null}]};
+  if(type==="items")return {id,type,prompt:"",itemIds:[]};
+  return {id,type,prompt:"",next:null};
+}
+
+function Flows({notify}:{notify:(s:string)=>void}){
+  const [tab,setTab]=useState<"flows"|"items">("flows");
+  const [items,setItems]=useState<CatalogItem[]>([]);
+  const [flows,setFlowsList]=useState<FlowDef[]>([]);
+  const [loading,setLoading]=useState(true);
+  const [editingFlow,setEditingFlow]=useState<FlowDef|null>(null);
+  const token=useAuthToken();
+
+  const load=async()=>{
+    if(!token){setLoading(false);return}
+    setLoading(true);
+    try{
+      const [ir,fr]=await Promise.all([fetch(metaApi("/api/items"),{headers:authHeaders(token)}),fetch(metaApi("/api/flows"),{headers:authHeaders(token)})]);
+      const [id,fd]=await Promise.all([ir.json(),fr.json()]) as [{items?:CatalogItem[]},{flows?:FlowDef[]}];
+      setItems(id.items||[]);setFlowsList(fd.flows||[]);
+    }catch{}
+    finally{setLoading(false)}
+  };
+  useEffect(()=>{load()},[token]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const saveItem=async(item:Partial<CatalogItem>&{id?:string})=>{
+    if(!token)return;
+    const isNew=!item.id;
+    const url=isNew?"/api/items":`/api/items/${item.id}`;
+    const response=await fetch(metaApi(url),{method:isNew?"POST":"PATCH",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify(item)});
+    const result=await response.json() as {item?:CatalogItem;error?:string};
+    if(!response.ok||!result.item){notify(result.error||"Could not save item.");return}
+    setItems(isNew?[result.item,...items]:items.map(i=>i.id===result.item!.id?result.item!:i));
+    notify(isNew?"Item created":"Item saved");
+  };
+  const deleteItem=async(item:CatalogItem)=>{
+    if(!token)return;
+    if(!window.confirm(`Delete "${item.name}"? Flows using it will show it as missing.`))return;
+    await fetch(metaApi(`/api/items/${item.id}`),{method:"DELETE",headers:authHeaders(token)});
+    setItems(items.filter(i=>i.id!==item.id));
+    notify("Item deleted");
+  };
+
+  const saveFlow=async(flow:FlowDef)=>{
+    if(!token)return;
+    const isNew=!flow.id;
+    const url=isNew?"/api/flows":`/api/flows/${flow.id}`;
+    const response=await fetch(metaApi(url),{method:isNew?"POST":"PATCH",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify(flow)});
+    const result=await response.json() as {flow?:FlowDef;error?:string};
+    if(!response.ok||!result.flow){notify(result.error||"Could not save flow.");return}
+    setFlowsList(isNew?[result.flow,...flows]:flows.map(f=>f.id===result.flow!.id?result.flow!:f));
+    setEditingFlow(null);
+    notify(isNew?"Flow created":"Flow saved");
+  };
+  const deleteFlow=async(flow:FlowDef)=>{
+    if(!token)return;
+    if(!window.confirm(`Delete the "${flow.name}" flow?`))return;
+    await fetch(metaApi(`/api/flows/${flow.id}`),{method:"DELETE",headers:authHeaders(token)});
+    setFlowsList(flows.filter(f=>f.id!==flow.id));
+    notify("Flow deleted");
+  };
+  const toggleFlowStatus=async(flow:FlowDef)=>{
+    const status=flow.status==="active"?"draft":"active";
+    await saveFlow({...flow,status});
+  };
+
+  if(editingFlow)return <FlowEditor flow={editingFlow} items={items} onCancel={()=>setEditingFlow(null)} onSave={saveFlow} token={token}/>;
+
+  return <>
+    <PageHeader title="Flows" description="Predefined, button-driven conversations — no AI required — plus the AI assistant can suggest from the same item catalog." action={tab==="flows"?<button className="primary" onClick={()=>setEditingFlow({id:"",name:"New flow",triggerText:"",status:"draft",startStepId:"",steps:[]})}>＋ New flow</button>:undefined}/>
+    <div className="settings-layout"><aside><button className={tab==="flows"?"active":""} onClick={()=>setTab("flows")}>Flows</button><button className={tab==="items"?"active":""} onClick={()=>setTab("items")}>Items catalog</button></aside><section className="subscription-content">
+      {loading?<p className="empty-hint">Loading…</p>:tab==="flows"?<>
+        {!flows.length?<div className="empty-state"><span>⑃</span><h3>No flows yet</h3><p>Create a predefined, step-by-step conversation like the recording — dates, choices, an items carousel — no AI needed.</p></div>:
+        <div className="flow-card-grid">{flows.map(f=><div key={f.id} className="flow-card">
+          <div className="flow-card-top"><div className="flow-card-icon">⑃</div><span className={`flow-status-pill ${f.status==="active"?"is-active":"is-draft"}`}>{f.status==="active"?"Active":"Draft"}</span></div>
+          <div><div className="flow-card-name">{f.name}</div><div className="flow-card-category">{f.triggerText?`Starts on "${f.triggerText}"`:"No trigger phrase set yet"}</div></div>
+          <div className="flow-card-desc">{f.steps.length} step{f.steps.length===1?"":"s"} · {f.steps.filter(s=>BRANCHING_TYPES.includes(s.type)).length} decision point{f.steps.filter(s=>BRANCHING_TYPES.includes(s.type)).length===1?"":"s"}</div>
+          <div className="flow-card-line">{f.status==="active"?"Live for visitors now":"Not shown to visitors yet"}</div>
+          <div className="flow-card-actions">
+            <button className="flow-card-btn-outline" onClick={()=>toggleFlowStatus(f)}>{f.status==="active"?"Set draft":"Activate"}</button>
+            <button className="flow-card-btn-outline" onClick={()=>setEditingFlow(f)}>Edit flow →</button>
+          </div>
+          <button className="flow-card-delete" onClick={()=>deleteFlow(f)} title="Delete flow">×</button>
+        </div>)}</div>}
+      </>:<ItemsCatalog items={items} onSave={saveItem} onDelete={deleteItem}/>}
+    </section></div>
+  </>;
+}
+
+type ItemDraft={name:string;title:string;description:string;price:number;currency:string;imageUrl:string;externalLink:string};
+const EMPTY_ITEM_DRAFT:ItemDraft={name:"",title:"",description:"",price:0,currency:"AED",imageUrl:"",externalLink:""};
+
+function ItemForm({draft,setDraft,onSave,onCancel,saveLabel}:{draft:ItemDraft;setDraft:(d:ItemDraft)=>void;onSave:()=>void;onCancel:()=>void;saveLabel:string}){
+  return <div className="flow-item-form">
+    <div className="form-grid">
+      <label>Name<input value={draft.name} onChange={e=>setDraft({...draft,name:e.target.value})} placeholder="e.g. Deluxe Twin Room" autoFocus/></label>
+      <label>Display title<input value={draft.title} onChange={e=>setDraft({...draft,title:e.target.value})} placeholder="Shown to visitors"/></label>
+    </div>
+    <div className="form-grid">
+      <label>Price<input type="number" min="0" value={draft.price} onChange={e=>setDraft({...draft,price:Number(e.target.value)})}/></label>
+      <label>Currency<input value={draft.currency} onChange={e=>setDraft({...draft,currency:e.target.value.toUpperCase()})} placeholder="AED"/></label>
+    </div>
+    <label className="full-label">Image URL<input value={draft.imageUrl} onChange={e=>setDraft({...draft,imageUrl:e.target.value})} placeholder="https://…"/></label>
+    <label className="full-label">Link (opens when a visitor taps this item)<input value={draft.externalLink} onChange={e=>setDraft({...draft,externalLink:e.target.value})} placeholder="https://…"/></label>
+    <div className="wizard-actions"><button className="secondary-btn" onClick={onCancel}>Cancel</button><button className="primary" onClick={onSave}>{saveLabel}</button></div>
+  </div>;
+}
+
+function ItemsCatalog({items,onSave,onDelete}:{items:CatalogItem[];onSave:(item:Partial<CatalogItem>&{id?:string})=>void;onDelete:(item:CatalogItem)=>void}){
+  const [showNew,setShowNew]=useState(false);
+  const [draft,setDraft]=useState<ItemDraft>(EMPTY_ITEM_DRAFT);
+  const [editingId,setEditingId]=useState<string|null>(null);
+  const [editDraft,setEditDraft]=useState<ItemDraft>(EMPTY_ITEM_DRAFT);
+
+  const startEdit=(item:CatalogItem)=>{setEditingId(item.id);setShowNew(false);setEditDraft({name:item.name,title:item.title,description:item.description,price:item.price,currency:item.currency,imageUrl:item.imageUrl,externalLink:item.externalLink})};
+  const create=()=>{if(!draft.name.trim())return;onSave(draft);setDraft(EMPTY_ITEM_DRAFT);setShowNew(false)};
+
+  return <div>
+    {!items.length&&!showNew&&<div className="empty-state"><span>▤</span><h3>No items yet</h3><p>Add rooms, products, or anything else your flows should offer.</p></div>}
+    {items.length>0&&<div className="action-list">{items.map(item=>editingId===item.id?
+      <article key={item.id} className="flow-item-editing"><ItemForm draft={editDraft} setDraft={setEditDraft} onSave={()=>{onSave({id:item.id,...editDraft});setEditingId(null)}} onCancel={()=>setEditingId(null)} saveLabel="Save item"/></article>
+      :<article key={item.id}>
+        {item.imageUrl?<img src={item.imageUrl} alt="" className="flow-item-thumb"/>:<span className="flow-item-thumb placeholder">▤</span>}
+        <div><div className="action-name"><strong>{item.name}</strong>{item.price>0&&<b>{item.currency} {item.price}</b>}</div>
+          <p>{item.title||"No display title set"}</p>
+          {item.externalLink&&<small><a href={item.externalLink} target="_blank" rel="noreferrer">{item.externalLink} ↗</a></small>}</div>
+        <div className="action-buttons"><button onClick={()=>startEdit(item)}>Edit</button><button onClick={()=>onDelete(item)}>Delete</button></div>
+      </article>)}</div>}
+
+    {showNew&&<div className="data-card" style={{padding:"1.25rem",marginTop:"1rem"}}><h3>New item</h3><ItemForm draft={draft} setDraft={setDraft} onSave={create} onCancel={()=>setShowNew(false)} saveLabel="Create item"/></div>}
+    {!showNew&&<button className="primary" style={{marginTop:"1rem"}} onClick={()=>{setShowNew(true);setEditingId(null)}}>＋ Add item</button>}
+  </div>;
+}
+
+function FlowEditor({flow,items,onCancel,onSave,token}:{flow:FlowDef;items:CatalogItem[];onCancel:()=>void;onSave:(flow:FlowDef)=>void;token:string|null}){
+  const [name,setName]=useState(flow.name);
+  const [triggerText,setTriggerText]=useState(flow.triggerText);
+  const [status,setStatus]=useState<"draft"|"active">(flow.status);
+  const [steps,setSteps]=useState<FlowStep[]>(flow.steps.length?flow.steps:[newStep("message")]);
+
+  // The first step in the list is always where the flow starts — reordering IS how you change
+  // the start step, so there's no separate "start step" control to keep in sync.
+  const startStepId=steps[0]?.id||"";
+
+  const updateStep=(id:string,patch:Partial<FlowStep>)=>setSteps(steps.map(s=>s.id===id?{...s,...patch}:s));
+  const changeStepType=(id:string,type:FlowStepType)=>setSteps(steps.map(s=>s.id===id?{...newStep(type),id,prompt:s.prompt,variableName:QUESTION_TYPES.includes(type)&&QUESTION_TYPES.includes(s.type)?s.variableName:undefined}:s));
+  const insertStepAt=(index:number,type:FlowStepType)=>{const next=[...steps];next.splice(index,0,newStep(type));setSteps(next);setInsertAt(null)};
+  const removeStep=(id:string)=>{if(steps.length<=1)return;setSteps(steps.filter(s=>s.id!==id))};
+  const moveStep=(id:string,dir:-1|1)=>{const idx=steps.findIndex(s=>s.id===id);const swapIdx=idx+dir;if(swapIdx<0||swapIdx>=steps.length)return;const next=[...steps];[next[idx],next[swapIdx]]=[next[swapIdx],next[idx]];setSteps(next)};
+  const [insertAt,setInsertAt]=useState<number|null>(null);
+
+  const addOption=(stepId:string)=>updateStep(stepId,{options:[...(steps.find(s=>s.id===stepId)?.options||[]),{id:crypto.randomUUID(),label:"New option",next:null}]});
+  const updateOption=(stepId:string,optId:string,patch:Partial<FlowOption>)=>{const step=steps.find(s=>s.id===stepId);if(!step)return;updateStep(stepId,{options:(step.options||[]).map(o=>o.id===optId?{...o,...patch}:o)})};
+  const removeOption=(stepId:string,optId:string)=>{const step=steps.find(s=>s.id===stepId);if(!step||(step.options||[]).length<=1)return;updateStep(stepId,{options:(step.options||[]).filter(o=>o.id!==optId)})};
+
+  const save=()=>{
+    if(!name.trim()){alert("Give this flow a name.");return}
+    onSave({...flow,name:name.trim(),triggerText:triggerText.trim(),status,startStepId,steps});
+  };
+
+  const InsertSlot=({index}:{index:number})=>insertAt===index?
+    <div className="flow-insert-palette">
+      {STEP_PALETTE.map(p=><button key={p.type} onClick={()=>insertStepAt(index,p.type)}><span>{p.icon}</span>{p.label}</button>)}
+      <button className="flow-insert-cancel" onClick={()=>setInsertAt(null)}>×</button>
+    </div>
+    :<button className="flow-insert-slot" onClick={()=>setInsertAt(index)}><span>＋</span></button>;
+
+  return <>
+    <PageHeader title={flow.id?"Edit flow":"New flow"} description="A step-by-step conversation — no AI needed. Click + anywhere to add a step; steps just run in order unless a button branches them." action={<div style={{display:"flex",gap:"0.5rem"}}><button className="secondary-btn" onClick={onCancel}>Cancel</button><button className="primary" onClick={save}>Save flow</button></div>}/>
+    <div className="flow-builder-grid">
+      <div>
+        <div className="data-card flow-settings-card">
+          <div className="form-grid">
+            <label>Flow name<input value={name} onChange={e=>setName(e.target.value)}/></label>
+            <label>Status<select value={status} onChange={e=>setStatus(e.target.value as "draft"|"active")}><option value="draft">Draft</option><option value="active">Active</option></select></label>
+          </div>
+          <label className="full-label">Starts when a visitor's message contains<input value={triggerText} onChange={e=>setTriggerText(e.target.value)} placeholder='e.g. "Book a room now"'/></label>
+        </div>
+
+        <div className="flow-steps-list">
+          <InsertSlot index={0}/>
+          {steps.map((step,i)=><div key={step.id}>
+          <div className={`flow-step-card${BRANCHING_TYPES.includes(step.type)?" is-branch":step.type==="end"?" is-end":""}`}>
+            <div className="flow-step-head">
+              <span className="flow-step-badge">{i+1}</span>
+              <span className="flow-step-type-label">{STEP_TYPE_LABELS[step.type]}</span>
+              <div className="row-actions"><button title="Move up" onClick={()=>moveStep(step.id,-1)} disabled={i===0}>↑</button><button title="Move down" onClick={()=>moveStep(step.id,1)} disabled={i===steps.length-1}>↓</button><button title="Delete step" onClick={()=>removeStep(step.id)} disabled={steps.length<=1}>×</button></div>
+            </div>
+
+            {step.type!=="end"&&<label className="flow-field">Message<textarea value={step.prompt} onChange={e=>updateStep(step.id,{prompt:e.target.value})} placeholder={step.type==="summary"?"e.g. Check-in {{date}} for {{nights}} night(s). Is that correct?":"What should the visitor see?"}/>{step.type==="summary"&&<small className="flow-hint">Use <code>{"{{variableName}}"}</code> to insert an earlier answer.</small>}</label>}
+
+            {QUESTION_TYPES.includes(step.type)&&<div className="flow-format-toggle">
+              {QUESTION_TYPES.map(t=><button key={t} className={step.type===t?"active":""} onClick={()=>changeStepType(step.id,t)}>{QUESTION_TYPE_LABELS[t]}</button>)}
+            </div>}
+
+            {BRANCHING_TYPES.includes(step.type)&&<div className="flow-options-list">
+              {(step.options||[]).map(opt=><div key={opt.id} className="flow-option-row">
+                <input value={opt.label} onChange={e=>updateOption(step.id,opt.id,{label:e.target.value})} placeholder="Button label" disabled={step.type==="yesno"}/>
+                <span className="flow-arrow">→</span>
+                <select value={opt.next||""} onChange={e=>updateOption(step.id,opt.id,{next:e.target.value||null})}>
+                  <option value="">— End —</option>
+                  {steps.filter(s=>s.id!==step.id).map(s=><option key={s.id} value={s.id}>Step {steps.indexOf(s)+1} · {STEP_TYPE_LABELS[s.type]}</option>)}
+                </select>
+                {step.type==="buttons"&&<button title="Remove option" onClick={()=>removeOption(step.id,opt.id)} disabled={(step.options||[]).length<=1}>×</button>}
+              </div>)}
+              {step.type==="buttons"&&<button className="secondary-btn" onClick={()=>addOption(step.id)}>＋ Add option</button>}
+            </div>}
+
+            {step.type==="items"&&<label className="flow-field">Items to show<div className="parameter-list">{items.map(it=><label key={it.id} style={{display:"flex",gap:"0.4rem",alignItems:"center"}}><input type="checkbox" checked={(step.itemIds||[]).includes(it.id)} onChange={()=>{const cur=step.itemIds||[];updateStep(step.id,{itemIds:cur.includes(it.id)?cur.filter(x=>x!==it.id):[...cur,it.id]})}}/> {it.name}</label>)}{!items.length&&<small className="empty-hint">No items in your catalog yet — add some in the Items tab.</small>}</div></label>}
+
+            {QUESTION_TYPES.includes(step.type)&&<label className="flow-field"><span>Save reply as <small>(optional — needed if you'll reference it in a Summary step)</small></span><input value={step.variableName||""} onChange={e=>updateStep(step.id,{variableName:e.target.value})} placeholder="e.g. checkInDate"/></label>}
+          </div>
+          <InsertSlot index={i+1}/>
+          </div>)}
+        </div>
+      </div>
+
+      <FlowTestPanel flow={{startStepId,steps}} token={token}/>
+    </div>
+  </>;
+}
+
+function FlowTestPanel({flow,token}:{flow:{startStepId:string;steps:FlowStep[]};token:string|null}){
+  const [log,setLog]=useState<{from:"bot"|"me";message:FlowOutMessage}[]>([]);
+  const [currentStepId,setCurrentStepId]=useState<string|null>(null);
+  const [variables,setVariables]=useState<Record<string,string>>({});
+  const [input,setInput]=useState("");
+  const [ended,setEnded]=useState(false);
+  const [busy,setBusy]=useState(false);
+
+  const call=async(message:string,reset:boolean)=>{
+    if(!token)return;
+    setBusy(true);
+    try{
+      const response=await fetch(metaApi("/api/flows/test"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({flow,currentStepId,variables,message,reset})});
+      const result=await response.json() as {messages?:FlowOutMessage[];currentStepId?:string|null;variables?:Record<string,string>;ended?:boolean;error?:string};
+      if(!response.ok){setLog(l=>[...l,{from:"bot",message:{type:"text",text:result.error||"Test failed."}}]);setBusy(false);return}
+      setLog(l=>[...l,...(result.messages||[]).map(m=>({from:"bot" as const,message:m}))]);
+      setCurrentStepId(result.currentStepId??null);
+      setVariables(result.variables||{});
+      setEnded(Boolean(result.ended));
+    }catch{}
+    finally{setBusy(false)}
+  };
+
+  const restart=()=>{setLog([]);setCurrentStepId(null);setVariables({});setEnded(false);call("",true)};
+  const send=(text:string)=>{if(!text.trim())return;setLog(l=>[...l,{from:"me",message:{type:"text",text}}]);setInput("");call(text,false)};
+
+  return <div className="data-card flow-test-panel">
+    <div className="flow-test-head"><strong>Test this flow</strong><button className="secondary-btn" onClick={restart} disabled={busy}>{log.length?"Restart":"Start test"}</button></div>
+    <div className="flow-test-body">
+      {!log.length&&<p className="empty-hint">Click "Start test" to try this flow exactly as a visitor would, using your steps above (even unsaved changes).</p>}
+      {log.map((entry,i)=><div key={i} className={entry.from==="me"?"flow-test-msg me":"flow-test-msg bot"}>
+        {entry.message.type==="text"&&<p>{entry.message.text}</p>}
+        {entry.message.type==="buttons"&&<>{entry.message.text&&<p>{entry.message.text}</p>}<div className="flow-test-buttons">{entry.message.options.map((o,oi)=><button key={oi} onClick={()=>send(o.label)} disabled={busy||i!==log.length-1}>{o.label}</button>)}</div></>}
+        {entry.message.type==="items"&&<>{entry.message.text&&<p>{entry.message.text}</p>}<div className="flow-test-items">{entry.message.items.map((it,ii)=><div key={ii} className="flow-test-item"><strong>{it.title||it.name}</strong><small>{it.price?`${it.currency} ${it.price}`:""}</small></div>)}</div></>}
+      </div>)}
+      {ended&&log.length>0&&<p className="empty-hint">— flow ended —</p>}
+    </div>
+    <div className="flow-test-input"><input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&send(input)} placeholder="Type a reply…" disabled={busy||!log.length||ended}/><button className="primary" onClick={()=>send(input)} disabled={busy||!log.length||ended}>Send</button></div>
+  </div>;
+}
 
 type Submission={id:number;actionName:string;channel:string;data:Record<string,unknown>;createdAt:string;updatedAt:string;source:string;status:string;priority:string;segment:string};
 const LEAD_SOURCES=["Website","Referral","Event"];
@@ -1156,12 +1697,165 @@ function Team({members,role,onInvite,onUpdateRole,onRemove,notify}:{members:Memb
   return <><PageHeader title="Team" description="Invite teammates and control access to customer conversations." action={<button className="primary" disabled={!canManage} onClick={onInvite}>＋ Invite teammate</button>}/><div className="team-summary"><article><strong>{members.length}</strong><span>Team members</span></article><article><strong>{members.filter(m=>m.status==="Active").length}</strong><span>Active now</span></article><article><strong>{role}</strong><span>Your role</span></article></div><div className="data-card"><table><thead><tr><th>Member</th><th>Role</th><th>Status</th><th/></tr></thead><tbody>{members.map(m=><tr key={m.id}><td><div className="member-cell"><span>{m.name.split(" ").map(x=>x[0]).join("").slice(0,2)}</span><div><strong>{m.name}</strong><small>{m.email}</small></div></div></td><td><select value={m.role} disabled={m.role==="Owner"||!canManage} onChange={e=>onUpdateRole(m.email,e.target.value as Member["role"])}>{m.role==="Owner"&&<option>Owner</option>}<option>Admin</option><option>Agent</option><option>Analyst</option></select></td><td><span className={`status-pill ${m.status==="Active"?"ready":"syncing"}`}>{m.status}</span></td><td><button className="dots" disabled={!canManage} onClick={()=>m.role==="Owner"?notify("The workspace owner cannot be removed"):onRemove(m.email)}>•••</button></td></tr>)}</tbody></table>{!members.length&&<div className="empty-row">No team members yet.</div>}</div></>}
 
 function Settings(props:{activeTab:string;setActiveTab:(s:string)=>void;connected:boolean;onChannels:()=>void;workspaceName:string;notify:(s:string)=>void}){
+  if(props.activeTab==="Credits")return <CreditsSettings activeTab={props.activeTab} setActiveTab={props.setActiveTab} notify={props.notify}/>;
+  if(props.activeTab==="API & OTP")return <ApiKeysSettings activeTab={props.activeTab} setActiveTab={props.setActiveTab} connected={props.connected} onChannels={props.onChannels} notify={props.notify}/>;
   if(props.activeTab!=="Billing")return <LegacySettings {...props}/>;
   return <SubscriptionSettings activeTab={props.activeTab} setActiveTab={props.setActiveTab} notify={props.notify}/>;
 }
 
+type ApiKeyRow={id:string;name:string;keyPrefix:string;createdAt:string;lastUsedAt:string|null};
+const SETTINGS_TABS=["General","AI assistant","Notifications","Billing","Credits","API & OTP"];
+
+function ApiKeysSettings({activeTab,setActiveTab,connected,onChannels,notify}:{activeTab:string;setActiveTab:(s:string)=>void;connected:boolean;onChannels:()=>void;notify:(s:string)=>void}){
+  const token=useAuthToken();
+  const [keys,setKeys]=useState<ApiKeyRow[]>([]);
+  const [loading,setLoading]=useState(true);
+  const [authBalance,setAuthBalance]=useState<number|null>(null);
+  const [newKeyName,setNewKeyName]=useState("");
+  const [creating,setCreating]=useState(false);
+  const [freshKey,setFreshKey]=useState<string|null>(null);
+
+  const load=async()=>{
+    if(!token){setLoading(false);return}
+    setLoading(true);
+    try{
+      const [keysRes,creditsRes]=await Promise.all([
+        fetch(metaApi("/api/api-keys"),{headers:authHeaders(token)}),
+        fetch(metaApi("/api/credits"),{headers:authHeaders(token)}),
+      ]);
+      const keysData=await keysRes.json() as {keys?:ApiKeyRow[]};
+      const creditsData=await creditsRes.json() as {balances?:Record<string,number>};
+      setKeys(keysData.keys||[]);
+      if(creditsData.balances)setAuthBalance(creditsData.balances.Authentication??0);
+    }catch{}
+    finally{setLoading(false)}
+  };
+  useEffect(()=>{load()},[token]);
+
+  const createKey=async()=>{
+    if(!token)return;
+    setCreating(true);setFreshKey(null);
+    try{
+      const response=await fetch(metaApi("/api/api-keys"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({name:newKeyName.trim()||"API key"})});
+      const result=await response.json() as {key?:string;error?:string};
+      if(!response.ok||!result.key)throw new Error(result.error||"Could not create API key.");
+      setFreshKey(result.key);setNewKeyName("");
+      await load();
+      notify("API key created — copy it now, it won't be shown again");
+    }catch(err){notify(err instanceof Error?err.message:"Could not create API key.")}
+    finally{setCreating(false)}
+  };
+
+  const revokeKey=async(key:ApiKeyRow)=>{
+    if(!token)return;
+    if(!window.confirm(`Revoke "${key.name}" (${key.keyPrefix}…)? Any system using it will immediately stop working.`))return;
+    try{
+      await fetch(metaApi(`/api/api-keys/${key.id}`),{method:"DELETE",headers:authHeaders(token)});
+      await load();
+      notify("API key revoked");
+    }catch{notify("Could not revoke key.")}
+  };
+
+  const curlExample=`curl -X POST ${META_BACKEND_ORIGIN}/api/whatsapp/send-otp \\\n  -H "Authorization: Bearer YOUR_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"to":"9715XXXXXXXX","code":"384726","templateName":"your_auth_template"}'`;
+
+  return <><PageHeader title="Settings" description="Manage your workspace, assistant behavior, and subscription."/><div className="settings-layout"><aside>{SETTINGS_TABS.map(t=><button className={activeTab===t?"active":""} onClick={()=>setActiveTab(t)} key={t}>{t}</button>)}</aside><section className="subscription-content">
+    <h2>API keys & OTP sending</h2>
+    <p>Send WhatsApp verification codes (OTPs) from your own backend. Your system generates and validates the code; Qpy Engage just delivers it via your Meta-approved authentication template. Each OTP uses one Authentication message credit.</p>
+    {!connected&&<div className="meta-error">⚠ No WhatsApp Business account is connected — OTP sends will fail until you connect one. <button className="text-action" onClick={onChannels}>Connect in Channels →</button></div>}
+    <div className="credits-balance-card"><div><span>AUTHENTICATION CREDITS</span><strong>{loading?"—":(authBalance??0).toLocaleString()} messages</strong></div><div style={{textAlign:"right"}}><span style={{fontSize:"8px",color:"#8b929f",display:"block",marginBottom:"6px"}}>BUY MORE</span><button className="secondary-btn" onClick={()=>setActiveTab("Credits")}>Credits tab →</button></div></div>
+
+    <div className="data-card" style={{padding:"1rem",marginBottom:"1rem"}}>
+      <strong style={{fontSize:"10px",display:"block",marginBottom:"0.5rem"}}>Your API keys</strong>
+      {loading?<p className="empty-hint">Loading…</p>:<div className="table-scroll"><table><thead><tr><th>Name</th><th>Key</th><th>Created</th><th>Last used</th><th/></tr></thead><tbody>
+        {keys.map(k=><tr key={k.id}><td>{k.name}</td><td><code>{k.keyPrefix}…</code></td><td>{new Date(k.createdAt).toLocaleDateString()}</td><td>{k.lastUsedAt?new Date(k.lastUsedAt).toLocaleDateString():"—"}</td><td><div className="row-actions"><button title="Revoke" onClick={()=>revokeKey(k)}>×</button></div></td></tr>)}
+      </tbody></table>{!keys.length&&<div className="empty-row">No API keys yet. Create one below.</div>}</div>}
+      <div className="inline-create-row" style={{marginTop:"0.75rem",marginBottom:0}}><input value={newKeyName} onChange={e=>setNewKeyName(e.target.value)} placeholder="Key name (e.g. Production server)"/><button className="primary" disabled={creating} onClick={createKey}>{creating?"Creating…":"Create key"}</button></div>
+      {freshKey&&<div className="fresh-key-note"><strong>Copy your new key now — it won't be shown again:</strong><code>{freshKey}</code></div>}
+    </div>
+
+    <div className="data-card" style={{padding:"1rem"}}>
+      <strong style={{fontSize:"10px",display:"block",marginBottom:"0.5rem"}}>Send an OTP from your backend</strong>
+      <p className="empty-hint" style={{marginBottom:"0.5rem"}}>Your <code>templateName</code> must be an approved WhatsApp <em>authentication</em> template in Meta Business Manager. Add <code>"copyCodeButton": false</code> if your template has no copy-code button.</p>
+      <pre className="code-block">{curlExample}</pre>
+    </div>
+  </section></div></>;
+}
+
+const MESSAGE_PACK_SIZES=[100,500,1000,5000];
+const PURCHASABLE_CATEGORIES=["Marketing","Utility","Authentication","Service"];
+
+function CreditsSettings({activeTab,setActiveTab,notify}:{activeTab:string;setActiveTab:(s:string)=>void;notify:(s:string)=>void}){
+  const token=useAuthToken();
+  const [balances,setBalances]=useState<Record<string,number>>({Marketing:0,Utility:0,Authentication:0,Service:0});
+  const [loading,setLoading]=useState(true);
+  const [pricing,setPricing]=useState<{category:string;priceUsd:number}[]>([]);
+  const [plan,setPlan]=useState("Free");
+  const [planLimits,setPlanLimits]=useState<Record<string,number>>({Marketing:0,Utility:0,Authentication:0,Service:0});
+  const [sent,setSent]=useState<Record<string,number>>({Marketing:0,Utility:0,Authentication:0,Service:0});
+  const [category,setCategory]=useState("Marketing");
+  const [quantity,setQuantity]=useState(500);
+  const [buying,setBuying]=useState(false);
+  const tabs=["General","AI assistant","Notifications","Billing","Credits","API & OTP"];
+
+  const load=async()=>{
+    if(!token){setLoading(false);return}
+    setLoading(true);
+    try{
+      const [creditsRes,pricingRes,planRes]=await Promise.all([
+        fetch(metaApi("/api/credits"),{headers:authHeaders(token)}),
+        fetch(metaApi("/api/pricing"),{headers:authHeaders(token)}),
+        fetch(metaApi("/api/plan-limits"),{headers:authHeaders(token)}),
+      ]);
+      const creditsData=await creditsRes.json() as {balances?:Record<string,number>;sent?:Record<string,number>};
+      const pricingData=await pricingRes.json() as {pricing?:{category:string;priceUsd:number}[]};
+      const planData=await planRes.json() as {plan?:string;limits?:Record<string,number>};
+      if(creditsData.balances)setBalances(creditsData.balances);
+      if(creditsData.sent)setSent(creditsData.sent);
+      setPricing(pricingData.pricing||[]);
+      if(planData.plan)setPlan(planData.plan);
+      if(planData.limits)setPlanLimits(planData.limits);
+    }catch{}
+    finally{setLoading(false)}
+  };
+  useEffect(()=>{load()},[token]);
+
+  const rate=pricing.find(p=>p.category===category)?.priceUsd||0;
+  const previewCost=Math.round(quantity*rate*100)/100;
+
+  const buy=async()=>{
+    if(!token)return;
+    setBuying(true);
+    try{
+      const response=await fetch(metaApi("/api/credits/topup"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({category,messages:quantity})});
+      const result=await response.json() as {balances?:Record<string,number>;error?:string};
+      if(!response.ok||!result.balances)throw new Error(result.error||"Could not add message credits.");
+      setBalances(result.balances);
+      notify(`${quantity.toLocaleString()} ${category} messages added (demo purchase, est. value $${previewCost.toFixed(2)})`);
+    }catch(err){notify(err instanceof Error?err.message:"Could not add message credits.")}
+    finally{setBuying(false)}
+  };
+
+
+  return <><PageHeader title="Settings" description="Manage your workspace, assistant behavior, and subscription."/><div className="settings-layout"><aside>{tabs.map(t=><button className={activeTab===t?"active":""} onClick={()=>setActiveTab(t)} key={t}>{t}</button>)}</aside><section className="subscription-content">
+    <h2>WhatsApp message credits</h2>
+    <p>Your plan includes a set number of free messages per category each month, topped up automatically. Buy more on top if you need extra — sending a campaign deducts from that category's balance, and you can't send more than you have. Purchases here are a demo — no real payment is processed yet.</p>
+    <div className="table-scroll"><div className="data-card" style={{padding:"1rem",marginBottom:"1rem"}}>
+      <strong style={{fontSize:"10px",display:"block",marginBottom:"0.5rem"}}>Message balances <span style={{fontWeight:400,color:"#8b929f"}}>— {plan} plan</span></strong>
+      <table><thead><tr><th>Category</th><th>Plan includes</th><th>Balance</th><th>Sent this workspace</th><th>Current rate</th></tr></thead><tbody>
+        {PURCHASABLE_CATEGORIES.map(cat=><tr key={cat}><td><span className={`category-badge ${cat.toLowerCase()}`}>{cat}</span></td><td>{loading?"—":(planLimits[cat]||0).toLocaleString()}/mo</td><td>{loading?"—":(balances[cat]||0).toLocaleString()} messages</td><td>{(sent[cat]||0).toLocaleString()}</td><td>${(pricing.find(p=>p.category===cat)?.priceUsd||0).toFixed(3)}/message</td></tr>)}
+      </tbody></table>
+    </div></div>
+    <div className="data-card" style={{padding:"1rem"}}>
+      <strong style={{fontSize:"10px",display:"block",marginBottom:"0.5rem"}}>Buy messages</strong>
+      <div className="form-grid"><label>Category<select value={category} onChange={e=>setCategory(e.target.value)}>{PURCHASABLE_CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}</select></label><label>Quantity<select value={quantity} onChange={e=>setQuantity(Number(e.target.value))}>{MESSAGE_PACK_SIZES.map(q=><option key={q} value={q}>{q.toLocaleString()} messages</option>)}</select></label></div>
+      <div className="credits-topup-row"><button className="primary" disabled={buying} onClick={buy}>{buying?"Adding…":`Buy ${quantity.toLocaleString()} ${category} messages — est. $${previewCost.toFixed(2)} (demo)`}</button></div>
+      <div className="demo-note">⚠ Demo purchase — this does not charge a real payment method. Real billing (via Stripe and/or Meta Client Billing) isn't connected yet. Estimated cost shown uses the platform's currently configured per-message rate.</div>
+    </div>
+  </section></div></>;
+}
+
 function SubscriptionSettings({activeTab,setActiveTab,notify}:{activeTab:string;setActiveTab:(s:string)=>void;notify:(s:string)=>void}){
-  const tabs=["General","AI assistant","Notifications","Billing"];
+  const tabs=["General","AI assistant","Notifications","Billing","Credits","API & OTP"];
   const [billing,setBilling]=useStoredState("qpy-engage-billing-v2",{plan:"Basic" as "Free"|"Basic"|"Premium",cycle:"monthly" as "monthly"|"annual",renewal:"August 17, 2026",payment:"Visa •••• 4242"});
   const [pending,setPending]=useState<null|"Free"|"Basic"|"Premium">(null);
   const plans=[
@@ -1178,7 +1872,7 @@ function SubscriptionSettings({activeTab,setActiveTab,notify}:{activeTab:string;
   return <><PageHeader title="Subscription & billing" description="Three straightforward plans with clear limits, pricing, and no hidden platform fees."/><div className="settings-layout subscription-layout"><aside>{tabs.map(t=><button className={activeTab===t?"active":""} onClick={()=>setActiveTab(t)} key={t}>{t}</button>)}</aside><section className="subscription-content"><div className="billing-overview"><div><span>CURRENT PLAN</span><strong>{billing.plan}</strong><small>{billing.plan==="Free"?"No payment required":`Renews ${billing.renewal} • ${billing.cycle} billing`}</small></div><div><span>THIS MONTH</span><strong>1,284 <small>/ {billing.plan==="Premium"?"15,000":billing.plan==="Basic"?"3,000":"500"}</small></strong><small>AI conversations used</small></div><div><span>PAYMENT METHOD</span><strong>{billing.plan==="Free"?"Not required":billing.payment}</strong><button onClick={updatePayment}>{billing.plan==="Free"?"Add card":"Update"}</button></div></div><div className="billing-cycle"><div><strong>Choose the plan that fits today</strong><small>Change or cancel at any time. Meta messaging fees are billed separately by Meta.</small></div><div><button className={billing.cycle==="monthly"?"active":""} onClick={()=>setBilling({...billing,cycle:"monthly"})}>Monthly</button><button className={billing.cycle==="annual"?"active":""} onClick={()=>setBilling({...billing,cycle:"annual"})}>Annual <b>Save 20%</b></button></div></div><div className="pricing-grid">{plans.map(plan=><article className={`${plan.name.toLowerCase()} ${billing.plan===plan.name?"current":""}`} key={plan.name}>{plan.name==="Basic"&&<em>Recommended</em>}<div className="price-head"><span>{plan.eyebrow}</span><h2>{plan.name}</h2><p>{plan.description}</p><div className="price"><strong>${price(plan)}</strong><small>{plan.name==="Free"?"forever":"per month"}</small></div>{billing.cycle==="annual"&&plan.annual>0&&<label>${plan.annual*12} billed once per year</label>}</div><button className={plan.name==="Basic"?"primary":"secondary-btn"} disabled={billing.plan===plan.name} onClick={()=>setPending(plan.name)}>{billing.plan===plan.name?"✓ Current plan":plan.name==="Free"?"Move to Free":billing.plan==="Free"?`Start ${plan.name}`:`Switch to ${plan.name}`}</button><div className="plan-includes"><strong>What’s included</strong>{plan.limits.map(x=><span key={x}>✓ {x}</span>)}{plan.excluded.map(x=><span className="muted" key={x}>— {x}</span>)}</div><p className="overage">{plan.overage}</p></article>)}</div><div className="pricing-clarity"><div><span>◎</span><strong>What counts as a conversation?</strong><p>A conversation is counted once when the AI sends at least one response to a customer within a 24-hour window. Human-only conversations do not count.</p></div><div><span>☎</span><strong>How are voice minutes counted?</strong><p>Premium includes 1,000 connected call minutes. Ringing time and failed calls are not charged.</p></div><div><span>◈</span><strong>What is billed separately?</strong><p>Meta WhatsApp template and conversation fees, phone numbers, and third-party provider charges are paid directly to those providers.</p></div></div><div className="feature-compare"><h2>Compare plans</h2><table><thead><tr><th>Capability</th><th>Free</th><th>Basic</th><th>Premium</th></tr></thead><tbody>{[["AI conversations / month","500","3,000","15,000"],["AI assistants","1","3","Unlimited"],["Channels","1","3","All + voice"],["Knowledge pages","1,000","25,000","100,000"],["Campaigns & automations","—","Included","Unlimited"],["AI actions / webhooks","—","2","Unlimited"],["Voice minutes","—","—","1,000"],["Team seats","1","5","20"],["Support","Community","Email","Priority"]].map(row=><tr key={row[0]}>{row.map((cell,i)=><td key={cell}>{i===0?<strong>{cell}</strong>:cell}</td>)}</tr>)}</tbody></table></div><div className="billing-footer"><div><strong>Invoices and account</strong><small>Next billing date: {billing.renewal} • Prices shown in USD before applicable tax.</small></div><button className="secondary-btn" onClick={downloadInvoice}>Download latest invoice</button>{billing.plan!=="Free"&&<button className="danger-link" onClick={()=>setPending("Free")}>Cancel subscription</button>}</div></section></div>{selected&&<SimpleModal title={selected.name==="Free"?"Confirm downgrade":"Confirm subscription"} onClose={()=>setPending(null)}><div className="checkout-summary"><div><strong>{selected.name} plan</strong><span>${price(selected)}<small>/month</small></span></div><p>{selected.name==="Free"?"Your paid features remain available until the end of the current billing period.":billing.cycle==="annual"?`You’ll be billed $${selected.annual*12} yearly. The effective monthly price is $${selected.annual}.`:`You’ll be billed $${selected.monthly} monthly. You can change or cancel at any time.`}</p><label><input type="checkbox" defaultChecked/> I understand the included limits and overage pricing.</label></div><div className="modal-actions"><button className="secondary-btn" onClick={()=>setPending(null)}>Back</button><button className="primary" onClick={confirm}>{selected.name==="Free"?"Schedule downgrade":`Confirm ${selected.name}`}</button></div></SimpleModal>}</>;
 }
 
-function LegacySettings({activeTab,setActiveTab,connected,onChannels,workspaceName,notify}:{activeTab:string;setActiveTab:(s:string)=>void;connected:boolean;onChannels:()=>void;workspaceName:string;notify:(s:string)=>void}){const tabs=["General","AI assistant","Notifications","Billing"];const [prefs,setPrefs]=useStoredState("qpy-engage-settings",{workspace:workspaceName,website:"",timeZone:"Asia/Dubai",language:"English",assistantName:"Assistant",voice:"Friendly, polished and concise. Make practical recommendations without being pushy.",tone:"Warm & helpful",confidence:72,checkout:true,legal:true,notifications:[true,true,true,true,false]});const save=(message:string)=>notify(message);return <><PageHeader title="Settings" description="Manage your workspace, assistant behavior, and subscription."/><div className="settings-layout"><aside>{tabs.map(t=><button className={activeTab===t?"active":""} onClick={()=>setActiveTab(t)} key={t}>{t}</button>)}</aside><section className="settings-card">{activeTab==="General"&&<><h2>Workspace details</h2><p>Information used across your Qpy Engage account.</p><div className="form-grid"><label>Workspace name<input value={prefs.workspace} onChange={e=>setPrefs({...prefs,workspace:e.target.value})}/></label><label>Business website<input value={prefs.website} onChange={e=>setPrefs({...prefs,website:e.target.value})}/></label><label>Time zone<select value={prefs.timeZone} onChange={e=>setPrefs({...prefs,timeZone:e.target.value})}><option>Asia/Dubai</option><option>Europe/London</option><option>America/New_York</option></select></label><label>Default language<select value={prefs.language} onChange={e=>setPrefs({...prefs,language:e.target.value})}><option>English</option><option>Arabic</option><option>French</option></select></label></div><div className="connection-card"><span className="wa-logo">◉</span><div><strong>WhatsApp Business</strong><small>{connected?"A phone number is connected":"No phone number connected"}</small></div><b className={`status-pill ${connected?"ready":"syncing"}`}>{connected?"Connected":"Setup required"}</b><button className="secondary-btn" onClick={onChannels}>{connected?"Manage":"Connect"}</button></div><div className="settings-actions"><button className="primary" onClick={()=>save("Workspace settings saved")}>Save changes</button></div></>}
+function LegacySettings({activeTab,setActiveTab,connected,onChannels,workspaceName,notify}:{activeTab:string;setActiveTab:(s:string)=>void;connected:boolean;onChannels:()=>void;workspaceName:string;notify:(s:string)=>void}){const tabs=["General","AI assistant","Notifications","Billing","Credits","API & OTP"];const [prefs,setPrefs]=useStoredState("qpy-engage-settings",{workspace:workspaceName,website:"",timeZone:"Asia/Dubai",language:"English",assistantName:"Assistant",voice:"Friendly, polished and concise. Make practical recommendations without being pushy.",tone:"Warm & helpful",confidence:72,checkout:true,legal:true,notifications:[true,true,true,true,false]});const save=(message:string)=>notify(message);return <><PageHeader title="Settings" description="Manage your workspace, assistant behavior, and subscription."/><div className="settings-layout"><aside>{tabs.map(t=><button className={activeTab===t?"active":""} onClick={()=>setActiveTab(t)} key={t}>{t}</button>)}</aside><section className="settings-card">{activeTab==="General"&&<><h2>Workspace details</h2><p>Information used across your Qpy Engage account.</p><div className="form-grid"><label>Workspace name<input value={prefs.workspace} onChange={e=>setPrefs({...prefs,workspace:e.target.value})}/></label><label>Business website<input value={prefs.website} onChange={e=>setPrefs({...prefs,website:e.target.value})}/></label><label>Time zone<select value={prefs.timeZone} onChange={e=>setPrefs({...prefs,timeZone:e.target.value})}><option>Asia/Dubai</option><option>Europe/London</option><option>America/New_York</option></select></label><label>Default language<select value={prefs.language} onChange={e=>setPrefs({...prefs,language:e.target.value})}><option>English</option><option>Arabic</option><option>French</option></select></label></div><div className="connection-card"><span className="wa-logo">◉</span><div><strong>WhatsApp Business</strong><small>{connected?"A phone number is connected":"No phone number connected"}</small></div><b className={`status-pill ${connected?"ready":"syncing"}`}>{connected?"Connected":"Setup required"}</b><button className="secondary-btn" onClick={onChannels}>{connected?"Manage":"Connect"}</button></div><div className="settings-actions"><button className="primary" onClick={()=>save("Workspace settings saved")}>Save changes</button></div></>}
     {activeTab==="AI assistant"&&<><h2>AI assistant behavior</h2><p>Define how Qpy Engage speaks and when it should hand off.</p><label className="full-label">Assistant name<input value={prefs.assistantName} onChange={e=>setPrefs({...prefs,assistantName:e.target.value})}/></label><label className="full-label">Brand voice<textarea value={prefs.voice} onChange={e=>setPrefs({...prefs,voice:e.target.value})}/></label><div className="choice-grid">{["Warm & helpful","Concise & direct","Premium concierge","Playful & casual"].map(x=><button className={prefs.tone===x?"selected":""} onClick={()=>setPrefs({...prefs,tone:x})} key={x}><span>✦</span><strong>{x}</strong></button>)}</div><div className="range-setting"><div><strong>Human handoff confidence</strong><small>Hand off when AI confidence is below this level.</small></div><input type="range" min="40" max="95" value={prefs.confidence} onChange={e=>setPrefs({...prefs,confidence:Number(e.target.value)})}/><b>{prefs.confidence}%</b></div><label className="check-setting"><input type="checkbox" checked={prefs.checkout} onChange={e=>setPrefs({...prefs,checkout:e.target.checked})}/><span><strong>Ask before sharing checkout links</strong><small>Prevents accidental product or pricing mismatches.</small></span></label><label className="check-setting"><input type="checkbox" checked={prefs.legal} onChange={e=>setPrefs({...prefs,legal:e.target.checked})}/><span><strong>Never answer legal or payment disputes</strong><small>Immediately assign sensitive conversations to a human.</small></span></label><div className="settings-actions"><button className="primary" onClick={()=>save("AI behavior saved")}>Save assistant</button></div></>}
     {activeTab==="Notifications"&&<><h2>Notification preferences</h2><p>Choose when Qpy Engage should alert you and your team.</p>{["New conversation assigned","AI requests human help","Negative customer sentiment","Daily performance summary","Weekly revenue report"].map((x,i)=><label className="notification-row" key={x}><span><strong>{x}</strong><small>{i<3?"Instant push and email alert":"Delivered to workspace admins"}</small></span><button className={`toggle ${prefs.notifications[i]?"on":""}`} onClick={()=>setPrefs({...prefs,notifications:prefs.notifications.map((v,j)=>i===j?!v:v)})}><i/></button></label>)}<div className="settings-actions"><button className="primary" onClick={()=>save("Notification preferences saved")}>Save preferences</button></div></>}
   </section></div></>}
