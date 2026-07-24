@@ -1536,8 +1536,8 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
           <td>{automation.flow.trigger.subtitle}</td>
           <td><span className={`flow-status-pill ${automation.status==="active"?"is-active":"is-draft"}`}>{automation.status==="active"?"Active":automation.status==="draft"?"Draft":"Inactive"}</span></td>
           <td>{runCounts[automation.id]||0}</td>
-          <td><div className="row-actions">
-            <button className="secondary-btn" onClick={()=>{setSelected(automation);setView("canvas")}}>Open →</button>
+          <td><div className="row-actions" style={{justifyContent:"flex-end"}}>
+            <button className="secondary-btn" style={{width:"auto",whiteSpace:"nowrap"}} onClick={()=>{setSelected(automation);setView("canvas")}}>Open →</button>
             <button title="Delete" onClick={()=>remove(automation)}>×</button>
           </div></td>
         </tr>)}</tbody></table>
