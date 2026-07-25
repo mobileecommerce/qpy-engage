@@ -11,6 +11,20 @@ export interface AutomationsEnv extends AuthEnv {
 function uid(): string { return crypto.randomUUID(); }
 function sqliteNow(): string { return new Date().toISOString().slice(0, 19).replace("T", " "); }
 
+// Lets an AI reply/AI action step give each shown item card a conversation-specific link (e.g.
+// the guest's actual dates/guest count) instead of the AI having to paste a URL in its text reply.
+function withLinkParams<T extends { externalLink: string }>(items: T[], linkParams?: Record<string, string>): T[] {
+  if (!linkParams || !Object.keys(linkParams).length) return items;
+  return items.map((item) => {
+    if (!item.externalLink) return item;
+    try {
+      const url = new URL(item.externalLink);
+      for (const [k, v] of Object.entries(linkParams)) url.searchParams.set(k, v);
+      return { ...item, externalLink: url.toString() };
+    } catch { return item; }
+  });
+}
+
 // ── Types (mirrors the design's tree shape exactly: trigger -> split1 -> 2 branches -> optional
 // split2 -> 2 sub-branches -> exit) ──
 
@@ -624,12 +638,13 @@ async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx
     const systemPrompt = await buildSystemPrompt(env.DB, workspaceId);
     const catalogItems = await listItemsForWorkspace(env.DB, workspaceId);
     let shownItemIds: string[] = [];
+    let shownLinkParams: Record<string, string> | undefined;
     const result = catalogItems.length
-      ? await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, [], undefined, undefined, undefined, catalogItems, async (ids) => { shownItemIds = ids; })
+      ? await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, [], undefined, undefined, undefined, catalogItems, async (ids, linkParams) => { shownItemIds = ids; shownLinkParams = linkParams; })
       : await callClaude(env.ANTHROPIC_API_KEY, systemPrompt, history);
     await send(result.reply || "Thanks for reaching out — a team member will follow up shortly.");
     if (shownItemIds.length) {
-      const items = await getItemsByIds(env.DB, workspaceId, shownItemIds);
+      const items = withLinkParams(await getItemsByIds(env.DB, workspaceId, shownItemIds), shownLinkParams);
       if (items.length) outMessages.push({ type: "items", items });
     }
     return "continue";
@@ -641,10 +656,11 @@ async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx
     const systemPrompt = await buildSystemPrompt(env.DB, workspaceId) + `\n\nIf relevant, use the "${cfg.aiActionName}" tool to help answer this.`;
     const catalogItems = await listItemsForWorkspace(env.DB, workspaceId);
     let shownItemIds: string[] = [];
-    const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions, undefined, undefined, undefined, catalogItems, async (ids) => { shownItemIds = ids; });
+    let shownLinkParams: Record<string, string> | undefined;
+    const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions, undefined, undefined, undefined, catalogItems, async (ids, linkParams) => { shownItemIds = ids; shownLinkParams = linkParams; });
     await send(result.reply || "Let me look into that and get back to you.");
     if (shownItemIds.length) {
-      const items = await getItemsByIds(env.DB, workspaceId, shownItemIds);
+      const items = withLinkParams(await getItemsByIds(env.DB, workspaceId, shownItemIds), shownLinkParams);
       if (items.length) outMessages.push({ type: "items", items });
     }
     return "continue";

@@ -159,7 +159,7 @@ function isBlockedHost(hostname: string): boolean {
   return host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host === "::1" || host.endsWith(".local");
 }
 
-type ToolDef = { name: string; description: string; input_schema: { type: "object"; properties: Record<string, { type: string; description?: string; items?: { type: string } }>; required: string[] } };
+type ToolDef = { name: string; description: string; input_schema: { type: "object"; properties: Record<string, { type: string; description?: string; items?: { type: string }; additionalProperties?: { type: string } }>; required: string[] } };
 
 function toolNameFor(name: string, index: number, used: Set<string>): string {
   const base = name.toLowerCase().trim().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 50) || `action_${index}`;
@@ -233,7 +233,7 @@ export async function callClaudeWithActions(
   onCustomerName?: (name: string) => Promise<void>,
   onNeedsHuman?: (reason: string) => Promise<void>,
   catalogItems?: CatalogItemRef[],
-  onShowItems?: (itemIds: string[]) => Promise<void>,
+  onShowItems?: (itemIds: string[], linkParams?: Record<string, string>) => Promise<void>,
 ): Promise<{ reply?: string; error?: string; status?: number }> {
   if (!actions.length && !onCustomerName && !onNeedsHuman && !catalogItems?.length) return callClaude(apiKey, systemPrompt, messages);
 
@@ -259,10 +259,13 @@ export async function callClaudeWithActions(
     const listing = catalogItems.map((it) => `${it.id}: ${it.name} (${it.currency} ${it.price || "price not listed"})`).join("; ");
     tools.push({
       name: SHOW_ITEMS_TOOL_NAME,
-      description: `Call this once you're ready to show the customer one or more catalog items as visual cards (e.g. rooms, menu items, products) — never describe them yourself in text instead. Available items: ${listing}`,
+      description: `Call this once you're ready to show the customer one or more catalog items as visual cards (e.g. rooms, menu items, products) — never describe them yourself in text instead, and never paste a raw link in your reply. If the item's own link needs conversation-specific values to be useful (e.g. the customer's chosen dates or quantities), pass them as linkParams so each card's button leads somewhere accurate — do not put them in a separate message. Available items: ${listing}`,
       input_schema: {
         type: "object",
-        properties: { itemIds: { type: "array", items: { type: "string" }, description: "The ids of the specific catalog items to show, from the available items list." } },
+        properties: {
+          itemIds: { type: "array", items: { type: "string" }, description: "The ids of the specific catalog items to show, from the available items list." },
+          linkParams: { type: "object", additionalProperties: { type: "string" }, description: "Optional URL query parameters to append to each shown item's link, if this business's instructions specify which parameter names to use and what conversation values to fill them with." },
+        },
         required: ["itemIds"],
       },
     });
@@ -318,8 +321,13 @@ export async function callClaudeWithActions(
       }
       if (toolUse.name === SHOW_ITEMS_TOOL_NAME) {
         const itemIds = Array.isArray(toolUse.input?.itemIds) ? toolUse.input.itemIds.filter((id): id is string => typeof id === "string") : [];
-        if (itemIds.length && onShowItems) { try { await onShowItems(itemIds); } catch { /* don't let a storage failure break the reply */ } }
-        results.push({ type: "tool_result", tool_use_id: toolUse.id, content: "Shown to the customer as cards — do not repeat their details in text." });
+        const rawLinkParams = toolUse.input?.linkParams;
+        const linkParams: Record<string, string> = {};
+        if (rawLinkParams && typeof rawLinkParams === "object") {
+          for (const [k, v] of Object.entries(rawLinkParams as Record<string, unknown>)) if (typeof v === "string" && v) linkParams[k] = v;
+        }
+        if (itemIds.length && onShowItems) { try { await onShowItems(itemIds, Object.keys(linkParams).length ? linkParams : undefined); } catch { /* don't let a storage failure break the reply */ } }
+        results.push({ type: "tool_result", tool_use_id: toolUse.id, content: "Shown to the customer as cards with their own link/button — do not repeat their details or paste a link in text." });
         continue;
       }
       const action = nameToAction.get(toolUse.name);
