@@ -269,4 +269,21 @@
 .drawer-modal{max-width:420px}
 .checkbox-row{display:flex;gap:16px}
 .checkbox-row label{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:500}
+.channel-choice{display:flex;flex-direction:column;gap:8px}
+.channel-opt{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:12px;font-weight:500;cursor:pointer}
+.channel-opt.disabled{opacity:.55;cursor:not-allowed}
+.auto-node.is-incomplete{border-color:oklch(80% 0.09 60)}
+.auto-node-warn{margin-left:auto;color:oklch(60% 0.13 60);font-size:13px;flex:none}
+.auto-add-split{border-style:dashed;color:oklch(48% 0.15 295)}
+.auto-add-split:hover{border-color:oklch(56% 0.15 295);color:oklch(46% 0.15 295)}
+.automation-name-title{font-size:25px;letter-spacing:-.65px;margin:0 0 6px;cursor:pointer;display:inline-flex;align-items:center;gap:8px}
+.automation-name-title .rename-hint{font-size:14px;color:#b8bec9;opacity:0;transition:opacity .12s}
+.automation-name-title:hover .rename-hint{opacity:1}
+.automation-name-input{font-size:23px;letter-spacing:-.5px;font-weight:700;border:1px solid oklch(56% 0.19 265);border-radius:8px;padding:4px 8px;margin:0 0 6px;outline:none;max-width:420px;width:100%}
+.test-result{margin-top:14px;border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:10px}
+.test-result-branch{border:1px solid var(--line);border-radius:9px;padding:11px 13px}
+.test-result-label{font-size:12px;font-weight:700;color:oklch(48% 0.19 265)}
+.test-result-note{font-size:10.5px;color:#8b93a1;margin:3px 0 6px}
+.test-result-branch ul{margin:0;padding-left:16px}
+.test-result-branch li{font-size:11.5px;color:#414855;line-height:1.7}
 @media(max-width:900px){.auto-branches{flex-direction:column;align-items:center}.auto-fork{display:none}.template-gallery{grid-template-columns:1fr}}

@@ -1,6 +1,7 @@
 import { requireSession, requireRole, type AuthEnv } from "./auth";
-import { encoder, arrayBuffer, allowedOrigin, json, corsPreflight, sha256, safeEqual, bytesToBase64, base64ToBytes } from "./shared";
+import { encoder, arrayBuffer, allowedOrigin, json, corsPreflight, sha256, safeEqual, bytesToBase64, base64ToBytes, type ChatMessage } from "./shared";
 import { meterMessageBalance, incrementSentCount } from "./messageBalance";
+import { runAutomations, type RunCtx } from "./automations";
 
 const DEFAULT_GRAPH_VERSION = "v25.0";
 
@@ -12,6 +13,7 @@ export interface MetaEnv extends AuthEnv {
   META_WEBHOOK_VERIFY_TOKEN?: string;
   META_TOKEN_ENCRYPTION_KEY?: string;
   META_GRAPH_VERSION?: string;
+  ANTHROPIC_API_KEY?: string;
 }
 
 export type ConnectionRow = {
@@ -252,6 +254,36 @@ async function getInbox(request: Request, env: MetaEnv): Promise<Response> {
   });
 }
 
+// Sends one free-form WhatsApp text via the Cloud API, records it as an outbound message, and
+// meters a Service credit. Shared by the manual inbox reply and the automations engine so both
+// use identical send/record/meter behavior. Returns true on a successful send.
+export async function sendWhatsAppText(env: MetaEnv, workspaceId: string, connection: ConnectionRow, to: string, text: string): Promise<boolean> {
+  if (!env.META_TOKEN_ENCRYPTION_KEY || !env.META_APP_SECRET) return false;
+  const cleanTo = to.replace(/[^\d]/g, "");
+  const body = (text || "").trim().slice(0, 4096);
+  if (cleanTo.length < 8 || cleanTo.length > 15 || !body) return false;
+  const token = await decryptToken(connection.token_ciphertext, connection.token_iv, env.META_TOKEN_ENCRYPTION_KEY);
+  const proof = await hmacHex(env.META_APP_SECRET, token);
+  const response = await fetch(`https://graph.facebook.com/${graphVersion(env)}/${connection.phone_number_id}/messages?appsecret_proof=${proof}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ messaging_product: "whatsapp", recipient_type: "individual", to: cleanTo, type: "text", text: { preview_url: false, body } }),
+  });
+  if (!response.ok) return false;
+  const payload = await response.json() as { messages?: Array<{ id: string }> };
+  const id = payload.messages?.[0]?.id || crypto.randomUUID();
+  await env.DB.prepare(`INSERT INTO whatsapp_messages
+    (id, direction, wa_id, phone_number_id, workspace_id, message_type, message_text, status, message_timestamp, payload)
+    VALUES (?, 'outbound', ?, ?, ?, 'text', ?, 'accepted', ?, ?)
+    ON CONFLICT(id) DO UPDATE SET message_text=excluded.message_text, status=excluded.status, payload=excluded.payload`)
+    .bind(id, cleanTo, connection.phone_number_id, workspaceId, body, String(Math.floor(Date.now() / 1000)), JSON.stringify(payload)).run();
+  // A free-form reply within the 24h window is a WhatsApp "Service" message — meter one Service
+  // credit (best-effort, floors at 0, never blocks a live-conversation reply).
+  await meterMessageBalance(env.DB, workspaceId, "Service", 1).catch(() => {});
+  await incrementSentCount(env.DB, workspaceId, "Service", 1).catch(() => {});
+  return true;
+}
+
 async function sendInboxMessage(request: Request, env: MetaEnv): Promise<Response> {
   const session = await requireSession(request, env); if (session instanceof Response) return session;
   if (!env.META_TOKEN_ENCRYPTION_KEY || !env.META_APP_SECRET) return json(request, { error: "Meta server credentials are incomplete." }, 503);
@@ -262,28 +294,29 @@ async function sendInboxMessage(request: Request, env: MetaEnv): Promise<Respons
   if (!text || text.length > 4096) return json(request, { error: "Message text must be between 1 and 4096 characters." }, 400);
   const connection = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(session.workspaceId).first<ConnectionRow>();
   if (!connection) return json(request, { error: "Connect a WhatsApp account first." }, 409);
-  const token = await decryptToken(connection.token_ciphertext, connection.token_iv, env.META_TOKEN_ENCRYPTION_KEY);
-  const proof = await hmacHex(env.META_APP_SECRET, token);
-  const response = await fetch(`https://graph.facebook.com/${graphVersion(env)}/${connection.phone_number_id}/messages?appsecret_proof=${proof}`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ messaging_product: "whatsapp", recipient_type: "individual", to, type: "text", text: { preview_url: false, body: text } }),
-  });
-  if (!response.ok) return json(request, { error: await metaError(response) }, 400);
-  const payload = await response.json() as { messages?: Array<{ id: string }> };
-  const id = payload.messages?.[0]?.id || crypto.randomUUID();
-  await env.DB.prepare(`INSERT INTO whatsapp_messages
-    (id, direction, wa_id, phone_number_id, workspace_id, message_type, message_text, status, message_timestamp, payload)
-    VALUES (?, 'outbound', ?, ?, ?, 'text', ?, 'accepted', ?, ?)
-    ON CONFLICT(id) DO UPDATE SET message_text=excluded.message_text, status=excluded.status, payload=excluded.payload`)
-    .bind(id, to, connection.phone_number_id, session.workspaceId, text, String(Math.floor(Date.now() / 1000)), JSON.stringify(payload)).run();
-  // A free-form agent reply within the 24h window is a WhatsApp "Service" message — meter one
-  // Service credit. Soft meter (best-effort, floors at 0, never blocks): refusing to let an agent
-  // reply to a live customer over a credit balance would be worse than the metering being slightly
-  // approximate, and Meta itself doesn't gate service-window replies the way it gates templates.
-  await meterMessageBalance(env.DB, session.workspaceId, "Service", 1).catch(() => {});
-  await incrementSentCount(env.DB, session.workspaceId, "Service", 1).catch(() => {});
-  return json(request, { sent: true, message: { id, direction: "outbound", waId: to, type: "text", text, status: "accepted", timestamp: String(Math.floor(Date.now() / 1000)), createdAt: new Date().toISOString() } });
+  const sent = await sendWhatsAppText(env, session.workspaceId, connection, to, text);
+  if (!sent) return json(request, { error: "WhatsApp rejected the message." }, 400);
+  return json(request, { sent: true, message: { id: crypto.randomUUID(), direction: "outbound", waId: to, type: "text", text, status: "accepted", timestamp: String(Math.floor(Date.now() / 1000)), createdAt: new Date().toISOString() } });
+}
+
+// Runs the Automations engine for one inbound WhatsApp message. Called (fire-and-forget via
+// waitUntil) from the webhook after the message is stored. A message/aiReply/aiAction step sends a
+// real WhatsApp reply back to the customer through sendWhatsAppText; escalate/notify are recorded
+// in the Activity log. Gated on the workspace having a live connection and an active automation
+// whose trigger includes the whatsapp channel (the engine itself does that filtering).
+async function runWhatsAppAutomations(env: MetaEnv, workspaceId: string, connection: ConnectionRow, fromWaId: string, message: string): Promise<void> {
+  // Build a short history from this contact's recent messages so aiReply steps have context.
+  const recent = await env.DB.prepare(`SELECT direction, message_text FROM whatsapp_messages WHERE workspace_id = ? AND wa_id = ? AND message_text IS NOT NULL ORDER BY message_timestamp DESC LIMIT 6`)
+    .bind(workspaceId, fromWaId).all<{ direction: string; message_text: string }>();
+  const history: ChatMessage[] = (recent.results || []).reverse().map((m) => ({ role: m.direction === "inbound" ? "user" as const : "assistant" as const, content: m.message_text }));
+  const ctx: RunCtx = {
+    channel: "whatsapp",
+    contactKey: fromWaId,
+    phoneNumberId: connection.phone_number_id,
+    persistConversationState: false, // WhatsApp has no web-chat-style conversation-state Inbox surface yet
+    deliver: (text: string) => sendWhatsAppText(env, workspaceId, connection, fromWaId, text),
+  };
+  await runAutomations(env, workspaceId, "whatsapp", ctx, message, history).catch(() => {});
 }
 
 async function verifyWebhook(request: Request, env: MetaEnv): Promise<Response> {
@@ -305,27 +338,41 @@ async function receiveWebhook(request: Request, env: MetaEnv): Promise<Response>
   await ensureMetaSchema(env.DB);
   const eventId = request.headers.get("x-hub-signature-256") || crypto.randomUUID();
   await env.DB.prepare("INSERT OR IGNORE INTO whatsapp_webhook_events (id, object_type, payload) VALUES (?, ?, ?)").bind(eventId, payload.object || "unknown", JSON.stringify(payload)).run();
-  const workspaceCache = new Map<string, string | null>();
-  const resolveWorkspace = async (phoneNumberId: string | null): Promise<string | null> => {
+  const connectionCache = new Map<string, ConnectionRow | null>();
+  const resolveConnection = async (phoneNumberId: string | null): Promise<ConnectionRow | null> => {
     if (!phoneNumberId) return null;
-    if (workspaceCache.has(phoneNumberId)) return workspaceCache.get(phoneNumberId)!;
-    const owner = await env.DB.prepare("SELECT workspace_id FROM whatsapp_connections WHERE phone_number_id = ?").bind(phoneNumberId).first<{ workspace_id: string }>();
-    workspaceCache.set(phoneNumberId, owner?.workspace_id || null);
-    return owner?.workspace_id || null;
+    if (connectionCache.has(phoneNumberId)) return connectionCache.get(phoneNumberId)!;
+    const owner = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE phone_number_id = ?").bind(phoneNumberId).first<ConnectionRow>();
+    connectionCache.set(phoneNumberId, owner || null);
+    return owner || null;
   };
+  // Inbound messages that were genuinely new this delivery (not a Meta retry) and are text — these
+  // are the only ones eligible to trigger an automation, so a webhook retry never double-replies.
+  const toAutomate: Array<{ connection: ConnectionRow; from: string; text: string }> = [];
   for (const entry of payload.entry || []) for (const change of entry.changes || []) {
     const value = change.value || {}; const phoneNumberId = value.metadata?.phone_number_id || null;
-    const workspaceId = await resolveWorkspace(phoneNumberId);
+    const connection = await resolveConnection(phoneNumberId);
+    const workspaceId = connection?.workspace_id || null;
     for (const item of value.messages || []) {
       const id = String(item.id || crypto.randomUUID()); const text = (item.text as { body?: string } | undefined)?.body || null;
-      await env.DB.prepare("INSERT OR IGNORE INTO whatsapp_messages (id, direction, wa_id, phone_number_id, workspace_id, message_type, message_text, status, message_timestamp, payload) VALUES (?, 'inbound', ?, ?, ?, ?, ?, 'received', ?, ?)")
-        .bind(id, item.from ? String(item.from) : null, phoneNumberId, workspaceId, item.type ? String(item.type) : null, text, item.timestamp ? String(item.timestamp) : null, JSON.stringify(item)).run();
+      const res = await env.DB.prepare("INSERT OR IGNORE INTO whatsapp_messages (id, direction, wa_id, phone_number_id, workspace_id, message_type, message_text, status, message_timestamp, payload) VALUES (?, 'inbound', ?, ?, ?, ?, ?, 'received', ?, ?)")
+        .bind(id, item.from ? String(item.from) : null, phoneNumberId, workspaceId, item.type ? String(item.type) : null, text, item.timestamp ? String(item.timestamp) : null, JSON.stringify(item)).run() as { meta?: { changes?: number } };
+      const wasNew = (res.meta?.changes || 0) > 0;
+      if (wasNew && connection && item.from && text && String(item.type) === "text") {
+        toAutomate.push({ connection, from: String(item.from), text });
+      }
     }
     for (const item of value.statuses || []) {
       const id = String(item.id || crypto.randomUUID());
       await env.DB.prepare("INSERT INTO whatsapp_messages (id, direction, wa_id, phone_number_id, workspace_id, status, message_timestamp, payload) VALUES (?, 'outbound', ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, message_timestamp=excluded.message_timestamp, payload=excluded.payload")
         .bind(id, item.recipient_id ? String(item.recipient_id) : null, phoneNumberId, workspaceId, item.status ? String(item.status) : null, item.timestamp ? String(item.timestamp) : null, JSON.stringify(item)).run();
     }
+  }
+  // Run automations for the newly-received text messages. Done synchronously (this environment's
+  // webhook handler has no ExecutionContext to waitUntil on) but only for messages that actually
+  // matched a new insert, so a slow run + Meta retry never produces a duplicate reply.
+  for (const item of toAutomate) {
+    await runWhatsAppAutomations(env, item.connection.workspace_id, item.connection, item.from, item.text).catch(() => {});
   }
   return new Response("EVENT_RECEIVED", { status: 200, headers: { "content-type": "text/plain" } });
 }

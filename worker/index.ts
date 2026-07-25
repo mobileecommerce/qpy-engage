@@ -14,7 +14,8 @@ import { handleCampaignsRequest, type CampaignsEnv } from "./campaigns";
 import { handleOtpRequest, type OtpEnv } from "./otp";
 import { handleItemsRequest, type ItemsEnv } from "./items";
 import { handleFlowsRequest, type FlowsEnv } from "./flows";
-import { handleAutomationsRequest, type AutomationsEnv } from "./automations";
+import { handleAutomationsRequest, resumeDueAutomationWaits, type AutomationsEnv } from "./automations";
+import { sendWhatsAppText, type ConnectionRow } from "./meta";
 import { json, corsPreflight, allowedOrigin } from "./shared";
 
 interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv, LeadsEnv, AdminEnv, CreditsEnv, ContactsEnv, CampaignsEnv, OtpEnv, ItemsEnv, FlowsEnv, AutomationsEnv {
@@ -121,6 +122,32 @@ const worker = {
     }
 
     return handler.fetch(request, env, ctx);
+  },
+
+  // Cron Trigger (see wrangler.jsonc): resume any automation "wait" steps whose delay has elapsed.
+  // Delivery is rebuilt per pending wait from its stored channel — web chat records a widget
+  // message; WhatsApp re-sends through the Cloud API using the workspace's live connection.
+  async scheduled(_event: unknown, env: Env, ctx: ExecutionContext): Promise<void> {
+    const connByWorkspace = new Map<string, ConnectionRow | null>();
+    const makeDeliver = (row: { workspace_id: string; channel: string; contact_key: string; phone_number_id: string }): ((text: string) => Promise<boolean>) | null => {
+      if (row.channel === "whatsapp") {
+        return async (text: string) => {
+          let connection = connByWorkspace.get(row.workspace_id);
+          if (connection === undefined) {
+            connection = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(row.workspace_id).first<ConnectionRow>() || null;
+            connByWorkspace.set(row.workspace_id, connection);
+          }
+          if (!connection) return false;
+          return sendWhatsAppText(env, row.workspace_id, connection, row.contact_key, text);
+        };
+      }
+      return async (text: string) => {
+        const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+        await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`).bind(row.workspace_id, row.contact_key, text, now).run();
+        return true;
+      };
+    };
+    ctx.waitUntil(resumeDueAutomationWaits(env, makeDeliver).then(() => undefined).catch(() => undefined));
   },
 };
 

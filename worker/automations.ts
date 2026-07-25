@@ -94,6 +94,8 @@ async function ensureAutomationsSchema(db: D1Database): Promise<void> {
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_automation_waits_due ON automation_waits (due_at)`),
   ]);
+  // phone_number_id lets a resumed WhatsApp wait step still reach the right Cloud API number.
+  try { await db.prepare(`ALTER TABLE automation_waits ADD COLUMN phone_number_id TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
   automationsSchemaEnsured = true;
 }
 
@@ -320,6 +322,32 @@ export const SECTOR_ORDER = ["general", "fnb", "hotels", "grocery", "realestate"
 
 // ── CRUD ──
 
+// A step is "incomplete" when the field that makes it actually do something is still blank.
+// Shared by needsConfig (automation-level badge) and the per-node attention markers in the UI.
+export function stepIsIncomplete(step: AutomationStep): boolean {
+  const c = step.config || {};
+  switch (step.kind) {
+    case "trigger": return !(c.channels || []).length;
+    case "split": return (c.ruleType || "conditional") === "conditional" && !(c.condition || "").trim();
+    case "message": return !(c.messageText || "").trim();
+    case "tag": return !(c.tagName || "").trim();
+    case "aiAction": return !(c.aiActionName || "").trim();
+    case "escalate": return !(c.escalateQueue || "").trim();
+    case "notify": return !(c.notifyChannels || []).length;
+    default: return false; // aiReply/wait/generic need no required field
+  }
+}
+
+export function flowNeedsConfig(flow: FlowTree): boolean {
+  if (stepIsIncomplete(flow.trigger) || stepIsIncomplete(flow.split1)) return true;
+  for (const branch of flow.branches) {
+    if (branch.steps.some(stepIsIncomplete)) return true;
+    if (branch.split2 && stepIsIncomplete(branch.split2)) return true;
+    if (branch.subBranches) for (const sub of branch.subBranches) if (sub.steps.some(stepIsIncomplete)) return true;
+  }
+  return false;
+}
+
 type AutomationRow = { id: string; name: string; sector_key: string; status: string; priority: number; needs_config: number; flow_json: string; created_at: string; updated_at: string };
 
 function rowToAutomation(row: AutomationRow): Automation {
@@ -368,8 +396,9 @@ async function createBlank(request: Request, env: AutomationsEnv): Promise<Respo
   const priority = (maxPriority?.m ?? -1) + 1;
   const id = uid();
   const name = (body.name || "New automation").trim().slice(0, 120) || "New automation";
-  await env.DB.prepare(`INSERT INTO automations2 (id, workspace_id, name, sector_key, status, priority, needs_config, flow_json) VALUES (?, ?, ?, 'custom', 'draft', ?, 1, ?)`)
-    .bind(id, session.workspaceId, name, priority, JSON.stringify(blankFlow())).run();
+  const flow = blankFlow();
+  await env.DB.prepare(`INSERT INTO automations2 (id, workspace_id, name, sector_key, status, priority, needs_config, flow_json) VALUES (?, ?, ?, 'custom', 'draft', ?, ?, ?)`)
+    .bind(id, session.workspaceId, name, priority, flowNeedsConfig(flow) ? 1 : 0, JSON.stringify(flow)).run();
   const row = await env.DB.prepare(`SELECT * FROM automations2 WHERE id = ?`).bind(id).first<AutomationRow>();
   return json(request, { automation: row ? rowToAutomation(row) : null });
 }
@@ -386,8 +415,8 @@ async function createFromTemplate(request: Request, env: AutomationsEnv): Promis
   const priority = (maxPriority?.m ?? -1) + 1;
   const id = uid();
   const name = (body.name || `${template.name} automation`).slice(0, 120);
-  await env.DB.prepare(`INSERT INTO automations2 (id, workspace_id, name, sector_key, status, priority, flow_json) VALUES (?, ?, ?, ?, 'draft', ?, ?)`)
-    .bind(id, session.workspaceId, name, sectorKey, priority, JSON.stringify(template.flow)).run();
+  await env.DB.prepare(`INSERT INTO automations2 (id, workspace_id, name, sector_key, status, priority, needs_config, flow_json) VALUES (?, ?, ?, ?, 'draft', ?, ?, ?)`)
+    .bind(id, session.workspaceId, name, sectorKey, priority, flowNeedsConfig(template.flow) ? 1 : 0, JSON.stringify(template.flow)).run();
   const row = await env.DB.prepare(`SELECT * FROM automations2 WHERE id = ?`).bind(id).first<AutomationRow>();
   return json(request, { automation: row ? rowToAutomation(row) : null });
 }
@@ -401,8 +430,11 @@ async function updateAutomation(request: Request, env: AutomationsEnv, id: strin
   const body = await request.json() as { name?: string; status?: string; flow?: FlowTree; needsConfig?: boolean };
   const name = body.name !== undefined ? body.name.trim().slice(0, 120) || existing.name : existing.name;
   const status = body.status !== undefined && ["active", "draft", "inactive"].includes(body.status) ? body.status : existing.status;
-  const flowJson = body.flow !== undefined ? JSON.stringify(body.flow) : existing.flow_json;
-  const needsConfig = body.needsConfig !== undefined ? (body.needsConfig ? 1 : 0) : existing.needs_config;
+  const flow = body.flow !== undefined ? body.flow : JSON.parse(existing.flow_json) as FlowTree;
+  const flowJson = JSON.stringify(flow);
+  // needsConfig is always derived from the flow's real completeness — the badge clears itself once
+  // every step's required field is filled in, and reappears if something is emptied.
+  const needsConfig = flowNeedsConfig(flow) ? 1 : 0;
   await env.DB.prepare(`UPDATE automations2 SET name = ?, status = ?, flow_json = ?, needs_config = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
     .bind(name, status, flowJson, needsConfig, id).run();
   const row = await env.DB.prepare(`SELECT * FROM automations2 WHERE id = ?`).bind(id).first<AutomationRow>();
@@ -454,9 +486,67 @@ async function listActivity(request: Request, env: AutomationsEnv): Promise<Resp
   });
 }
 
-// ── Real execution engine ──
+// Lists the workspace's configured AI Action names so the step drawer can offer a real dropdown
+// (instead of a free-text field the user has to spell exactly right).
+async function listAiActions(request: Request, env: AutomationsEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const stored = (await readWorkspaceState<unknown[]>(env.DB, session.workspaceId, "qpy-engage-assistant-actions")) || [];
+  const actions = sanitizeActions(stored).map((a) => ({ name: a.name, description: a.description }));
+  return json(request, { actions });
+}
 
-function interpolateStep(text: string): string { return text; }
+function describeStepEffect(step: AutomationStep): string {
+  const c = step.config || {};
+  switch (step.kind) {
+    case "message": return `Send message: "${(c.messageText || "").slice(0, 80) || "(empty)"}"`;
+    case "aiReply": return "Send a live AI assistant reply";
+    case "aiAction": return `Run AI Action: ${c.aiActionName || "(none selected)"}`;
+    case "wait": return `Wait ${c.waitAmount ?? 1} ${c.waitUnit || "hours"} (then continue)`;
+    case "tag": return `Add tag: ${c.tagName || "(none)"}`;
+    case "notify": return `Notify via ${(c.notifyChannels || []).join(" + ") || "(none)"}`;
+    case "escalate": return `Escalate to ${c.escalateQueue || "Support queue"} (${c.escalatePriority || "Normal"})`;
+    default: return step.title;
+  }
+}
+
+// Dry-run: walk the tree for a sample message, reporting which branch(es) it takes and the actions
+// that would run — without sending anything or writing any side effects. Conditional/time splits
+// are evaluated for real; A/B and frequency-cap splits are inherently non-deterministic, so the
+// result flags that.
+async function dryRunAutomation(request: Request, env: AutomationsEnv, id: string): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  await ensureAutomationsSchema(env.DB);
+  const row = await env.DB.prepare(`SELECT * FROM automations2 WHERE id = ? AND workspace_id = ?`).bind(id, session.workspaceId).first<AutomationRow>();
+  if (!row) return json(request, { error: "Automation not found." }, 404);
+  const body = await request.json().catch(() => ({})) as { message?: string };
+  const message = (body.message || "").trim();
+  const flow = JSON.parse(row.flow_json) as FlowTree;
+
+  const describeSplit = (split: AutomationStep): { note: string } => {
+    const rt = split.config?.ruleType || "conditional";
+    if (rt === "ab") return { note: "A/B split — branch chosen at random per message" };
+    if (rt === "freq") return { note: "Frequency cap — branch depends on this contact's recent send count" };
+    if (rt === "time") return { note: "Time window — branch depends on current day/time" };
+    return { note: `Matches if message contains: ${split.config?.condition || "(no keywords set)"}` };
+  };
+
+  const branchIdx = await evaluateSplit(env.DB, session.workspaceId, row.id, flow.split1, message, "dry-run");
+  const branch = flow.branches[branchIdx];
+  const path: Array<{ label: string; note?: string; steps: string[] }> = [];
+  path.push({ label: branch.label, note: describeSplit(flow.split1).note, steps: branch.steps.map(describeStepEffect) });
+
+  if (branch.split2 && branch.subBranches) {
+    const subIdx = await evaluateSplit(env.DB, session.workspaceId, row.id, branch.split2, message, "dry-run");
+    const sub = branch.subBranches[subIdx];
+    path.push({ label: sub.label, note: describeSplit(branch.split2).note, steps: sub.steps.map(describeStepEffect) });
+  }
+
+  return json(request, { branchIdx, path });
+}
+
+// ── Real execution engine ──
 
 function withinTimeWindow(activeDays: string[] | undefined, startTime: string | undefined, endTime: string | undefined, now: Date): boolean {
   const dayKeys = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
@@ -498,54 +588,65 @@ async function evaluateSplit(db: D1Database, workspaceId: string, automationId: 
 
 export type AutomationOutMessage = { type: "text"; text: string };
 
+// Delivery is channel-specific and injected by the caller: the Web chat widget records an
+// assistant row in widget_messages; the WhatsApp webhook (worker/meta.ts) sends a real Cloud API
+// message and meters a Service credit. The engine itself stays delivery-agnostic so both channels
+// share the exact same branch/step logic. `deliver` returns false if the send failed.
+export type RunChannel = "webchat" | "whatsapp";
+export interface RunCtx {
+  channel: RunChannel;
+  contactKey: string;            // widget session_id, or the customer's WhatsApp number
+  phoneNumberId?: string;        // whatsapp only — persisted so a resumed wait can still deliver
+  deliver: (text: string) => Promise<boolean>;
+  persistConversationState: boolean; // web chat has an Inbox surface for tags/escalation; whatsapp doesn't (yet)
+}
+
 async function sendSlackNotification(webhookUrl: string, text: string): Promise<void> {
   try { await fetch(webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) }); } catch { /* best-effort */ }
 }
 
-async function executeStep(env: AutomationsEnv, workspaceId: string, sessionId: string, automation: AutomationRow, step: AutomationStep, history: ChatMessage[], outMessages: AutomationOutMessage[]): Promise<"continue" | "waiting"> {
+async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx, automation: AutomationRow, step: AutomationStep, history: ChatMessage[], outMessages: AutomationOutMessage[]): Promise<"continue" | "waiting"> {
   const cfg = step.config || {};
-  if (step.kind === "message") {
-    const text = cfg.messageText || step.subtitle;
+  const send = async (text: string) => {
     outMessages.push({ type: "text", text });
-    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`).bind(workspaceId, sessionId, text, sqliteNow()).run();
-    await env.DB.prepare(`INSERT INTO automation_sends (workspace_id, automation_id, contact_key) VALUES (?, ?, ?)`).bind(workspaceId, automation.id, sessionId).run();
+    await ctx.deliver(text);
+    await env.DB.prepare(`INSERT INTO automation_sends (workspace_id, automation_id, contact_key) VALUES (?, ?, ?)`).bind(workspaceId, automation.id, ctx.contactKey).run();
+  };
+  if (step.kind === "message") {
+    await send(cfg.messageText || step.subtitle);
     return "continue";
   }
   if (step.kind === "aiReply") {
-    if (!env.ANTHROPIC_API_KEY) { outMessages.push({ type: "text", text: "Our assistant isn't fully configured yet — a team member will follow up shortly." }); return "continue"; }
+    if (!env.ANTHROPIC_API_KEY) { await send("Our assistant isn't fully configured yet — a team member will follow up shortly."); return "continue"; }
     const systemPrompt = await buildSystemPrompt(env.DB, workspaceId);
     const result = await callClaude(env.ANTHROPIC_API_KEY, systemPrompt, history);
-    const reply = result.reply || "Thanks for reaching out — a team member will follow up shortly.";
-    outMessages.push({ type: "text", text: reply });
-    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`).bind(workspaceId, sessionId, reply, sqliteNow()).run();
+    await send(result.reply || "Thanks for reaching out — a team member will follow up shortly.");
     return "continue";
   }
   if (step.kind === "aiAction") {
-    if (!env.ANTHROPIC_API_KEY) { outMessages.push({ type: "text", text: "One moment — checking on that for you." }); return "continue"; }
+    if (!env.ANTHROPIC_API_KEY) { await send("One moment — checking on that for you."); return "continue"; }
     const storedActions = (await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions")) || [];
     const actions: AssistantActionDef[] = sanitizeActions(storedActions).filter((a) => a.name.toLowerCase() === (cfg.aiActionName || "").toLowerCase());
     const systemPrompt = await buildSystemPrompt(env.DB, workspaceId) + `\n\nIf relevant, use the "${cfg.aiActionName}" tool to help answer this.`;
     const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions);
-    const reply = result.reply || "Let me look into that and get back to you.";
-    outMessages.push({ type: "text", text: reply });
-    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`).bind(workspaceId, sessionId, reply, sqliteNow()).run();
+    await send(result.reply || "Let me look into that and get back to you.");
     return "continue";
   }
-  if (step.kind === "tag") {
+  if (step.kind === "tag" && ctx.persistConversationState) {
     try { await env.DB.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN tags TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
-    const existing = await env.DB.prepare(`SELECT tags FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`).bind(workspaceId, sessionId).first<{ tags: string }>();
+    const existing = await env.DB.prepare(`SELECT tags FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`).bind(workspaceId, ctx.contactKey).first<{ tags: string }>();
     const tags = new Set((existing?.tags || "").split(",").map((t) => t.trim()).filter(Boolean));
     if (cfg.tagName) tags.add(cfg.tagName);
     await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, tags) VALUES (?, ?, ?)
-      ON CONFLICT(workspace_id, session_id) DO UPDATE SET tags = excluded.tags`).bind(workspaceId, sessionId, [...tags].join(",")).run();
+      ON CONFLICT(workspace_id, session_id) DO UPDATE SET tags = excluded.tags`).bind(workspaceId, ctx.contactKey, [...tags].join(",")).run();
     return "continue";
   }
-  if (step.kind === "escalate") {
+  if (step.kind === "escalate" && ctx.persistConversationState) {
     try { await env.DB.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN queue_name TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
     try { await env.DB.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN queue_priority TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
     await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, needs_attention, attention_reason, queue_name, queue_priority) VALUES (?, ?, 1, ?, ?, ?)
       ON CONFLICT(workspace_id, session_id) DO UPDATE SET needs_attention = 1, attention_reason = excluded.attention_reason, queue_name = excluded.queue_name, queue_priority = excluded.queue_priority`)
-      .bind(workspaceId, sessionId, `Automation: ${automation.name}`, cfg.escalateQueue || "Support queue", cfg.escalatePriority || "Normal").run();
+      .bind(workspaceId, ctx.contactKey, `Automation: ${automation.name}`, cfg.escalateQueue || "Support queue", cfg.escalatePriority || "Normal").run();
     return "continue";
   }
   if (step.kind === "notify") {
@@ -561,7 +662,8 @@ async function executeStep(env: AutomationsEnv, workspaceId: string, sessionId: 
   if (step.kind === "wait") {
     return "waiting";
   }
-  return "continue"; // generic / trigger / split (split handled by caller before reaching steps)
+  // tag/escalate on a channel without a conversation-state surface (whatsapp), or generic/trigger/split.
+  return "continue";
 }
 
 function waitDueDate(cfg: AutomationStep["config"]): string {
@@ -573,51 +675,50 @@ function waitDueDate(cfg: AutomationStep["config"]): string {
 
 type ResumePath = { branchIdx: 0 | 1; subBranchIdx?: 0 | 1; stepIdx: number };
 
-async function runStepsFrom(env: AutomationsEnv, workspaceId: string, sessionId: string, automation: AutomationRow, steps: AutomationStep[], startIdx: number, history: ChatMessage[], resumePathBase: Omit<ResumePath, "stepIdx">): Promise<{ messages: AutomationOutMessage[]; waiting: boolean }> {
+async function runStepsFrom(env: AutomationsEnv, workspaceId: string, ctx: RunCtx, automation: AutomationRow, steps: AutomationStep[], startIdx: number, history: ChatMessage[], resumePathBase: Omit<ResumePath, "stepIdx">): Promise<{ messages: AutomationOutMessage[]; waiting: boolean }> {
   const messages: AutomationOutMessage[] = [];
   for (let i = startIdx; i < steps.length; i++) {
-    const outcome = await executeStep(env, workspaceId, sessionId, automation, steps[i], history, messages);
+    const outcome = await executeStep(env, workspaceId, ctx, automation, steps[i], history, messages);
     if (outcome === "waiting") {
       const dueAt = waitDueDate(steps[i].config);
       const resumePath: ResumePath = { ...resumePathBase, stepIdx: i + 1 };
-      await env.DB.prepare(`INSERT INTO automation_waits (workspace_id, automation_id, session_id, contact_key, channel, resume_path, due_at) VALUES (?, ?, ?, ?, 'webchat', ?, ?)`)
-        .bind(workspaceId, automation.id, sessionId, sessionId, JSON.stringify(resumePath), dueAt).run();
+      await env.DB.prepare(`INSERT INTO automation_waits (workspace_id, automation_id, session_id, contact_key, channel, phone_number_id, resume_path, due_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(workspaceId, automation.id, ctx.contactKey, ctx.contactKey, ctx.channel, ctx.phoneNumberId || "", JSON.stringify(resumePath), dueAt).run();
       return { messages, waiting: true };
     }
   }
   return { messages, waiting: false };
 }
 
-export interface AutomationRunResult { handled: boolean; messages: AutomationOutMessage[] }
+export interface AutomationRunResult { handled: boolean; messages: AutomationOutMessage[]; automationName?: string; branchLabel?: string }
 
-// Called from the widget message pipeline, before falling back to a bare AI reply. Automations
-// are event-reactive (they run once, fully, per triggering message) — a different execution
-// model from the interactive step-by-step Flows feature, which still runs separately/earlier.
-export async function runAutomationsForWidgetMessage(env: AutomationsEnv, workspaceId: string, sessionId: string, message: string, history: ChatMessage[]): Promise<AutomationRunResult> {
+// Channel-agnostic core: selects the first active automation whose trigger includes this channel,
+// evaluates the split(s), runs the matching branch's steps, and writes an Activity-log row. All
+// delivery goes through ctx.deliver so Web chat and WhatsApp share this identical logic.
+export async function runAutomations(env: AutomationsEnv, workspaceId: string, channel: RunChannel, ctx: RunCtx, message: string, history: ChatMessage[]): Promise<AutomationRunResult> {
   await ensureAutomationsSchema(env.DB);
   const result = await env.DB.prepare(`SELECT * FROM automations2 WHERE workspace_id = ? AND status = 'active' ORDER BY priority ASC`).bind(workspaceId).all<AutomationRow>();
   const active = (result.results || []).filter((a) => {
     const flow = JSON.parse(a.flow_json) as FlowTree;
-    return (flow.trigger.config?.channels || []).includes("webchat");
+    return (flow.trigger.config?.channels || []).includes(channel);
   });
   if (!active.length) return { handled: false, messages: [] };
 
   const automation = active[0]; // first match wins — later active automations skipped for this message
   const flow = JSON.parse(automation.flow_json) as FlowTree;
-  const branchIdx = await evaluateSplit(env.DB, workspaceId, automation.id, flow.split1, message, sessionId);
-  const branchAny = flow.branches[branchIdx];
-  const branch1 = { id: branchAny.id, label: branchAny.label, color: branchAny.color, steps: branchAny.steps, split2: branchAny.split2, subBranches: branchAny.subBranches };
+  const branchIdx = await evaluateSplit(env.DB, workspaceId, automation.id, flow.split1, message, ctx.contactKey);
+  const branch1 = flow.branches[branchIdx];
 
-  const { messages: branchMessages, waiting: waiting1 } = await runStepsFrom(env, workspaceId, sessionId, automation, branch1.steps, 0, history, { branchIdx: branchIdx as 0 | 1 });
+  const { messages: branchMessages, waiting: waiting1 } = await runStepsFrom(env, workspaceId, ctx, automation, branch1.steps, 0, history, { branchIdx: branchIdx as 0 | 1 });
   let allMessages = branchMessages;
   let branchLabel = branch1.label;
   let waiting = waiting1;
   let executedSteps = branch1.steps;
 
   if (!waiting1 && branch1.split2 && branch1.subBranches) {
-    const subIdx = await evaluateSplit(env.DB, workspaceId, automation.id, branch1.split2, message, sessionId);
+    const subIdx = await evaluateSplit(env.DB, workspaceId, automation.id, branch1.split2, message, ctx.contactKey);
     const subBranch = branch1.subBranches[subIdx];
-    const { messages: subMessages, waiting: waiting2 } = await runStepsFrom(env, workspaceId, sessionId, automation, subBranch.steps, 0, history, { branchIdx: branchIdx as 0 | 1, subBranchIdx: subIdx as 0 | 1 });
+    const { messages: subMessages, waiting: waiting2 } = await runStepsFrom(env, workspaceId, ctx, automation, subBranch.steps, 0, history, { branchIdx: branchIdx as 0 | 1, subBranchIdx: subIdx as 0 | 1 });
     allMessages = [...allMessages, ...subMessages];
     branchLabel = `${branch1.label} → ${subBranch.label}`;
     waiting = waiting2;
@@ -627,27 +728,54 @@ export async function runAutomationsForWidgetMessage(env: AutomationsEnv, worksp
   const wasEscalated = executedSteps.some((s) => s.kind === "escalate");
   const outcome = waiting ? "Waiting" : wasEscalated ? "Escalated" : "Resolved by AI";
   const outcomeType = outcome === "Escalated" ? "warn" : "good";
-  await env.DB.prepare(`INSERT INTO automation_runs (workspace_id, automation_id, automation_name, contact, channel, branch_label, outcome, outcome_type) VALUES (?, ?, ?, ?, 'Web chat', ?, ?, ?)`)
-    .bind(workspaceId, automation.id, automation.name, sessionId.slice(0, 12), branchLabel, outcome, outcomeType).run();
+  const channelLabel = channel === "whatsapp" ? "WhatsApp" : "Web chat";
+  await env.DB.prepare(`INSERT INTO automation_runs (workspace_id, automation_id, automation_name, contact, channel, branch_label, outcome, outcome_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(workspaceId, automation.id, automation.name, ctx.contactKey.slice(0, 14), channelLabel, branchLabel, outcome, outcomeType).run();
 
-  return { handled: true, messages: allMessages };
+  return { handled: true, messages: allMessages, automationName: automation.name, branchLabel };
 }
 
-// Resumes any due "wait" steps — called from the scheduled (cron) handler.
-export async function resumeDueAutomationWaits(env: AutomationsEnv): Promise<number> {
+// Web chat wrapper: delivery records an assistant row in widget_messages (the widget's poll loop
+// then shows it). Called from worker/widget.ts's respond() before the bare-AI fallback.
+export async function runAutomationsForWidgetMessage(env: AutomationsEnv, workspaceId: string, sessionId: string, message: string, history: ChatMessage[]): Promise<AutomationRunResult> {
+  const ctx: RunCtx = {
+    channel: "webchat",
+    contactKey: sessionId,
+    persistConversationState: true,
+    deliver: async (text: string) => {
+      await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`).bind(workspaceId, sessionId, text, sqliteNow()).run();
+      return true;
+    },
+  };
+  return runAutomations(env, workspaceId, "webchat", ctx, message, history);
+}
+
+// Resumes any due "wait" steps — called from the scheduled (cron) handler. `makeDeliver` lets the
+// caller supply a channel-appropriate sender (worker/index.ts builds a WhatsApp one when needed),
+// since delivering from a background tick needs the same channel plumbing as a live message.
+export async function resumeDueAutomationWaits(env: AutomationsEnv, makeDeliver: (row: { workspace_id: string; channel: string; contact_key: string; phone_number_id: string }) => ((text: string) => Promise<boolean>) | null): Promise<number> {
   await ensureAutomationsSchema(env.DB);
   const now = sqliteNow();
-  const due = await env.DB.prepare(`SELECT * FROM automation_waits WHERE due_at <= ? LIMIT 25`).bind(now).all<{ id: number; workspace_id: string; automation_id: string; session_id: string; resume_path: string }>();
+  const due = await env.DB.prepare(`SELECT * FROM automation_waits WHERE due_at <= ? LIMIT 25`).bind(now).all<{ id: number; workspace_id: string; automation_id: string; session_id: string; contact_key: string; channel: string; phone_number_id: string; resume_path: string }>();
   let resumed = 0;
   for (const row of due.results || []) {
     const automationRow = await env.DB.prepare(`SELECT * FROM automations2 WHERE id = ?`).bind(row.automation_id).first<AutomationRow>();
     await env.DB.prepare(`DELETE FROM automation_waits WHERE id = ?`).bind(row.id).run();
     if (!automationRow) continue;
+    const deliver = makeDeliver({ workspace_id: row.workspace_id, channel: row.channel, contact_key: row.contact_key || row.session_id, phone_number_id: row.phone_number_id });
+    if (!deliver) continue; // channel no longer deliverable (e.g. WhatsApp disconnected) — drop the resume
+    const ctx: RunCtx = {
+      channel: row.channel === "whatsapp" ? "whatsapp" : "webchat",
+      contactKey: row.contact_key || row.session_id,
+      phoneNumberId: row.phone_number_id || undefined,
+      persistConversationState: row.channel !== "whatsapp",
+      deliver,
+    };
     const flow = JSON.parse(automationRow.flow_json) as FlowTree;
     const path = JSON.parse(row.resume_path) as ResumePath;
     const branch = flow.branches[path.branchIdx];
     const steps = path.subBranchIdx !== undefined && branch.subBranches ? branch.subBranches[path.subBranchIdx].steps : branch.steps;
-    await runStepsFrom(env, row.workspace_id, row.session_id, automationRow, steps, path.stepIdx, [], { branchIdx: path.branchIdx, subBranchIdx: path.subBranchIdx });
+    await runStepsFrom(env, row.workspace_id, ctx, automationRow, steps, path.stepIdx, [], { branchIdx: path.branchIdx, subBranchIdx: path.subBranchIdx });
     resumed++;
   }
   return resumed;
@@ -665,8 +793,11 @@ export async function handleAutomationsRequest(request: Request, env: Automation
   if (url.pathname === "/api/automations/sectors" && request.method === "GET") return listSectors(request, env);
   if (url.pathname === "/api/automations/from-template" && request.method === "POST") return createFromTemplate(request, env);
   if (url.pathname === "/api/automations/activity" && request.method === "GET") return listActivity(request, env);
+  if (url.pathname === "/api/automations/ai-actions" && request.method === "GET") return listAiActions(request, env);
   const reorderMatch = url.pathname.match(/^\/api\/automations\/([^/]+)\/reorder$/);
   if (reorderMatch && request.method === "POST") return reorderAutomation(request, env, reorderMatch[1]);
+  const testMatch = url.pathname.match(/^\/api\/automations\/([^/]+)\/test$/);
+  if (testMatch && request.method === "POST") return dryRunAutomation(request, env, testMatch[1]);
   const match = url.pathname.match(/^\/api\/automations\/([^/]+)$/);
   if (match && request.method === "PATCH") return updateAutomation(request, env, match[1]);
   if (match && request.method === "DELETE") return deleteAutomation(request, env, match[1]);

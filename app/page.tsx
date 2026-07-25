@@ -1368,6 +1368,39 @@ function appendStepAtTarget(flow:AutoFlow, target:StepTarget, newStep:AutoStep):
   return {...flow,branches};
 }
 
+// Mirror of the backend flowNeedsConfig / stepIsIncomplete logic so the canvas can flag exactly
+// which blocks still need a required field, before the user even saves.
+function stepIsIncomplete(step:AutoStep):boolean{
+  const c=step.config||{};
+  switch(step.kind){
+    case "trigger": return !(c.channels||[]).length;
+    case "split": return (c.ruleType||"conditional")==="conditional" && !(c.condition||"").trim();
+    case "message": return !(c.messageText||"").trim();
+    case "tag": return !(c.tagName||"").trim();
+    case "aiAction": return !(c.aiActionName||"").trim();
+    case "escalate": return !(c.escalateQueue||"").trim();
+    case "notify": return !(c.notifyChannels||[]).length;
+    default: return false;
+  }
+}
+
+function addSplitToBranch(flow:AutoFlow, branchIdx:0|1): AutoFlow {
+  const branches:[AutoBranch,AutoBranch]=[{...flow.branches[0]},{...flow.branches[1]}];
+  const b=branches[branchIdx];
+  b.split2={id:crypto.randomUUID(),icon:"⑂",title:"Conditional split",subtitle:"Click to set the keywords that decide the branch",chip:"purple",kind:"split",config:{ruleType:"conditional",condition:""}};
+  b.subBranches=[
+    {id:crypto.randomUUID(),label:"Matches",color:"green",steps:[{id:crypto.randomUUID(),icon:"💬",title:"Send message",subtitle:"Click to write what gets sent",chip:"rose",kind:"message",config:{messageChannel:"webchat",messageText:""}}]},
+    {id:crypto.randomUUID(),label:"No match",color:"blue",steps:[{id:crypto.randomUUID(),icon:"💬",title:"Send message",subtitle:"Click to write what gets sent",chip:"rose",kind:"message",config:{messageChannel:"webchat",messageText:""}}]},
+  ];
+  return {...flow,branches};
+}
+function removeSplitFromBranch(flow:AutoFlow, branchIdx:0|1): AutoFlow {
+  const branches:[AutoBranch,AutoBranch]=[{...flow.branches[0]},{...flow.branches[1]}];
+  const b=branches[branchIdx];
+  delete b.split2; delete b.subBranches;
+  return {...flow,branches};
+}
+
 const NEW_STEP_KINDS:{kind:AutoStepKind;icon:string;title:string;chip:string;config:AutoStepConfig}[]=[
   {kind:"message",icon:"💬",title:"Send message",chip:"rose",config:{messageChannel:"webchat",messageText:""}},
   {kind:"aiReply",icon:"✨",title:"Send AI reply",chip:"indigo",config:{}},
@@ -1392,6 +1425,13 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
   const [addingStepTo,setAddingStepTo]=useState<StepTarget|null>(null);
   const [activity,setActivity]=useState<ActivityRow[]>([]);
   const [activityLoading,setActivityLoading]=useState(false);
+  const [aiActions,setAiActions]=useState<{name:string;description:string}[]>([]);
+  const [renaming,setRenaming]=useState(false);
+  const [nameDraft,setNameDraft]=useState("");
+  const [testOpen,setTestOpen]=useState(false);
+  const [testMessage,setTestMessage]=useState("");
+  const [testResult,setTestResult]=useState<{path:{label:string;note?:string;steps:string[]}[]}|null>(null);
+  const [testing,setTesting]=useState(false);
 
   const load=async()=>{
     if(!token){setLoading(false);return}
@@ -1403,7 +1443,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
     }catch{}
     finally{setLoading(false)}
   };
-  useEffect(()=>{load()},[token]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(()=>{load();loadAiActions()},[token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadActivity=async()=>{
     if(!token)return;
@@ -1503,6 +1543,46 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
     if(saved){notify("Step added");setEditing({path:target.subIdx===undefined?{kind:"branchStep",branchIdx:target.branchIdx,stepIdx:saved.flow.branches[target.branchIdx].steps.length-1}:{kind:"subStep",branchIdx:target.branchIdx,subIdx:target.subIdx,stepIdx:saved.flow.branches[target.branchIdx].subBranches![target.subIdx].steps.length-1},step:newStep})}
   };
 
+  const addNestedSplit=async(branchIdx:0|1)=>{
+    if(!selected)return;
+    const saved=await patchAutomation(selected.id,{flow:addSplitToBranch(selected.flow,branchIdx)});
+    if(saved)notify("Condition split added — click it to set the keywords");
+  };
+  const removeNestedSplit=async(branchIdx:0|1)=>{
+    if(!selected)return;
+    if(!window.confirm("Remove this condition split and its two sub-branches?"))return;
+    const saved=await patchAutomation(selected.id,{flow:removeSplitFromBranch(selected.flow,branchIdx)});
+    if(saved)notify("Condition split removed");
+  };
+
+  const startRename=()=>{if(selected){setNameDraft(selected.name);setRenaming(true)}};
+  const commitRename=async()=>{
+    if(!selected)return;
+    const name=nameDraft.trim();
+    setRenaming(false);
+    if(name&&name!==selected.name)await patchAutomation(selected.id,{name});
+  };
+
+  const loadAiActions=async()=>{
+    if(!token)return;
+    try{
+      const response=await fetch(metaApi("/api/automations/ai-actions"),{headers:authHeaders(token)});
+      const data=await response.json() as {actions?:{name:string;description:string}[]};
+      setAiActions(data.actions||[]);
+    }catch{}
+  };
+
+  const runTest=async()=>{
+    if(!selected||!token)return;
+    setTesting(true);setTestResult(null);
+    try{
+      const response=await fetch(metaApi(`/api/automations/${selected.id}/test`),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({message:testMessage})});
+      const data=await response.json() as {path?:{label:string;note?:string;steps:string[]}[]};
+      setTestResult({path:data.path||[]});
+    }catch{notify("Could not run the test.")}
+    finally{setTesting(false)}
+  };
+
   const runCounts=useMemo(()=>{
     const counts:Record<string,number>={};
     activity.forEach(row=>{counts[row.automationId]=(counts[row.automationId]||0)+1});
@@ -1523,10 +1603,14 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
   if(view==="canvas"&&selected){
     const flow=selected.flow;
     return <>
-      <PageHeader title={selected.name} description={selected.needsConfig?"⚠ This automation needs configuration before it can run reliably.":"Click any step to view or edit its configuration."} action={<div className="header-buttons">
+      <div className="page-header"><div>
+        {renaming?<input className="automation-name-input" autoFocus value={nameDraft} onChange={e=>setNameDraft(e.target.value)} onBlur={commitRename} onKeyDown={e=>{if(e.key==="Enter")commitRename();if(e.key==="Escape")setRenaming(false)}}/>:<h1 className="automation-name-title" onClick={startRename} title="Click to rename">{selected.name} <span className="rename-hint">✎</span></h1>}
+        <p>{selected.needsConfig?"⚠ Some steps still need configuration — fill in the highlighted blocks before activating.":"Click any block to edit it. Hover a step to remove it."}</p>
+      </div><div className="header-buttons">
         <button className="secondary-btn" onClick={()=>setView("list")}>← Back to list</button>
+        <button className="secondary-btn" onClick={()=>{setTestOpen(true);setTestResult(null)}}>▷ Test</button>
         <button className={`toggle ${selected.status==="active"?"on":""}`} onClick={()=>toggleStatus(selected)} title={selected.status==="active"?"Active — click to deactivate":"Inactive — click to activate"}><i/></button>
-      </div>}/>
+      </div></div>
       <div className="automation-canvas">
         <AutoNode step={flow.trigger} onClick={()=>setEditing({path:{kind:"trigger"},step:flow.trigger})}/>
         <div className="auto-conn"/>
@@ -1542,9 +1626,9 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
                 <div className="auto-conn"/>
               </Fragment>)}
               <button className="auto-add-step" onClick={()=>setAddingStepTo({branchIdx:bi})}>＋ Add step</button>
-              {branch.split2&&branch.subBranches&&<>
+              {branch.split2&&branch.subBranches?<>
                 <div className="auto-conn"/>
-                <AutoNode step={branch.split2} onClick={()=>setEditing({path:{kind:"split2",branchIdx:bi},step:branch.split2!})}/>
+                <AutoNode step={branch.split2} onClick={()=>setEditing({path:{kind:"split2",branchIdx:bi},step:branch.split2!})} onDelete={()=>removeNestedSplit(bi)}/>
                 <AutoFork/>
                 <div className="auto-branches">
                   {branch.subBranches.map((sub,subIdx)=>{
@@ -1559,18 +1643,28 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
                     </div>;
                   })}
                 </div>
-              </>}
+              </>:<><div className="auto-conn"/><button className="auto-add-step auto-add-split" onClick={()=>addNestedSplit(bi)}>⑂ Add a condition split</button></>}
             </div>;
           })}
         </div>
       </div>
-      {editing&&<StepDrawer path={editing.path} step={editing.step} onClose={()=>setEditing(null)} onSave={saveStep} onDelete={editing.path.kind==="branchStep"||editing.path.kind==="subStep"?()=>deleteStep(editing.path):undefined}/>}
+      {editing&&<StepDrawer path={editing.path} step={editing.step} aiActions={aiActions} onClose={()=>setEditing(null)} onSave={saveStep} onDelete={editing.path.kind==="branchStep"||editing.path.kind==="subStep"?()=>deleteStep(editing.path):undefined}/>}
       {addingStepTo&&<SimpleModal title="Add a step" onClose={()=>setAddingStepTo(null)}>
         <p>Choose what this step does — you can configure the details afterward.</p>
         <div className="template-gallery">{NEW_STEP_KINDS.map(option=><button key={option.kind} onClick={()=>appendStep(addingStepTo,option)}>
           <span className={`auto-node-icon ${AUTO_CHIP_CLASS[option.chip]||"chip-neutral"}`} style={{display:"inline-grid",placeItems:"center",width:28,height:28,borderRadius:8}}>{option.icon}</span>
           <strong>{option.title}</strong>
         </button>)}</div>
+      </SimpleModal>}
+      {testOpen&&<SimpleModal title="Test this automation" onClose={()=>setTestOpen(false)}>
+        <p>Type a sample customer message. This is a dry run — it shows which branch it would take and what would happen, without sending anything.</p>
+        <div className="modal-form"><label>Sample message<input value={testMessage} onChange={e=>setTestMessage(e.target.value)} placeholder="e.g. I need to talk to a human" onKeyDown={e=>{if(e.key==="Enter")runTest()}}/></label></div>
+        <div className="modal-actions"><button className="secondary-btn" onClick={()=>setTestOpen(false)}>Close</button><button className="primary" disabled={testing} onClick={runTest}>{testing?"Running…":"Run test"}</button></div>
+        {testResult&&<div className="test-result">{testResult.path.map((p,i)=><div key={i} className="test-result-branch">
+          <div className="test-result-label">→ {p.label}</div>
+          {p.note&&<div className="test-result-note">{p.note}</div>}
+          <ul>{p.steps.length?p.steps.map((s,j)=><li key={j}>{s}</li>):<li className="empty-hint">No steps in this branch</li>}</ul>
+        </div>)}</div>}
       </SimpleModal>}
     </>;
   }
@@ -1606,10 +1700,12 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
 }
 
 function AutoNode({step,onClick,onDelete}:{step:AutoStep;onClick:()=>void;onDelete?:()=>void}){
+  const incomplete=stepIsIncomplete(step);
   return <div className="auto-node-wrap">
-    <button className="auto-node" onClick={onClick}>
+    <button className={`auto-node ${incomplete?"is-incomplete":""}`} onClick={onClick}>
       <span className={`auto-node-icon ${AUTO_CHIP_CLASS[step.chip]||"chip-neutral"}`}>{step.icon}</span>
       <span className="auto-node-text"><strong>{step.title}</strong><small>{step.subtitle}</small></span>
+      {incomplete&&<span className="auto-node-warn" title="This step still needs a required field">⚠</span>}
     </button>
     {onDelete&&<button className="auto-node-delete" title="Remove this step" onClick={(e)=>{e.stopPropagation();onDelete()}}>×</button>}
   </div>;
@@ -1619,7 +1715,7 @@ function AutoFork(){
   return <div className="auto-fork"><div className="auto-fork-stem"/><div className="auto-fork-bar"/><div className="auto-fork-drop auto-fork-drop-l"/><div className="auto-fork-drop auto-fork-drop-r"/></div>;
 }
 
-function StepDrawer({path,step,onClose,onSave,onDelete}:{path:StepPath;step:AutoStep;onClose:()=>void;onSave:(path:StepPath,next:AutoStep)=>void;onDelete?:()=>void}){
+function StepDrawer({path,step,aiActions,onClose,onSave,onDelete}:{path:StepPath;step:AutoStep;aiActions:{name:string;description:string}[];onClose:()=>void;onSave:(path:StepPath,next:AutoStep)=>void;onDelete?:()=>void}){
   const [config,setConfig]=useState<AutoStepConfig>(step.config||{});
   const update=(patch:Partial<AutoStepConfig>)=>setConfig({...config,...patch});
   const toggleIn=(key:"channels"|"notifyChannels",value:string)=>{
@@ -1633,8 +1729,8 @@ function StepDrawer({path,step,onClose,onSave,onDelete}:{path:StepPath;step:Auto
     <div className="modal-form">
       <p className="empty-hint" style={{margin:"0 0 8px"}}>{step.subtitle}</p>
 
-      {step.kind==="trigger"&&<label>Channels
-        <div className="checkbox-row"><label><input type="checkbox" checked={(config.channels||[]).includes("whatsapp")} onChange={()=>toggleIn("channels","whatsapp")}/> WhatsApp</label><label><input type="checkbox" checked={(config.channels||[]).includes("webchat")} onChange={()=>toggleIn("channels","webchat")}/> Web chat</label></div>
+      {step.kind==="trigger"&&<label>Channels this automation runs on
+        <div className="channel-choice"><label className="channel-opt"><input type="checkbox" checked={(config.channels||[]).includes("webchat")} onChange={()=>toggleIn("channels","webchat")}/> <span>◉ Web chat</span></label><label className="channel-opt"><input type="checkbox" checked={(config.channels||[]).includes("whatsapp")} onChange={()=>toggleIn("channels","whatsapp")}/> <span>✆ WhatsApp</span></label><label className="channel-opt disabled" title="Instagram messaging isn't connected in this workspace yet"><input type="checkbox" disabled/> <span>◎ Instagram — not available yet</span></label></div>
       </label>}
 
       {step.kind==="split"&&<>
@@ -1658,7 +1754,7 @@ function StepDrawer({path,step,onClose,onSave,onDelete}:{path:StepPath;step:Auto
 
       {step.kind==="notify"&&<><label>Notify via<div className="checkbox-row"><label><input type="checkbox" checked={(config.notifyChannels||[]).includes("email")} onChange={()=>toggleIn("notifyChannels","email")}/> Email</label><label><input type="checkbox" checked={(config.notifyChannels||[]).includes("slack")} onChange={()=>toggleIn("notifyChannels","slack")}/> Slack</label></div></label><label>Recipient<input value={config.notifyRecipient||""} onChange={e=>update({notifyRecipient:e.target.value})} placeholder="email or leave blank for the workspace Slack webhook"/></label></>}
 
-      {step.kind==="aiAction"&&<label>AI Action name (must match one configured in Assistants → AI Actions)<input value={config.aiActionName||""} onChange={e=>update({aiActionName:e.target.value})}/></label>}
+      {step.kind==="aiAction"&&(aiActions.length?<label>Which AI Action to run<select value={config.aiActionName||""} onChange={e=>update({aiActionName:e.target.value})}><option value="">— Select an action —</option>{aiActions.map(a=><option key={a.name} value={a.name}>{a.name}</option>)}</select>{config.aiActionName&&aiActions.find(a=>a.name===config.aiActionName)?.description&&<small style={{fontWeight:400,color:"#8b93a1"}}>{aiActions.find(a=>a.name===config.aiActionName)!.description}</small>}</label>:<p className="empty-hint">No AI Actions are configured yet. Create one in Assistants → AI Actions, then pick it here.</p>)}
 
       {step.kind==="escalate"&&<><label>Assign to queue<input value={config.escalateQueue||""} onChange={e=>update({escalateQueue:e.target.value})}/></label><label>Priority<select value={config.escalatePriority||"Normal"} onChange={e=>update({escalatePriority:e.target.value as AutoStepConfig["escalatePriority"]})}><option value="Normal">Normal</option><option value="Urgent">Urgent</option></select></label></>}
 
