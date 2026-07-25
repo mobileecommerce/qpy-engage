@@ -233,8 +233,12 @@
 .chip-neutral{background:oklch(94% 0.003 90);color:oklch(45% 0.005 270)}
 .chip-teal{background:oklch(93% 0.05 190);color:oklch(45% 0.1 190)}
 .automation-canvas{display:flex;flex-direction:column;align-items:center;padding:28px 16px 40px;border:1px solid var(--line);border-radius:9px;background-color:oklch(99% 0.002 90);background-image:radial-gradient(oklch(90% 0.005 90) 1.5px,transparent 1.5px);background-size:22px 22px;overflow-x:auto}
-.auto-node{display:flex;align-items:flex-start;gap:10px;width:260px;max-width:100%;text-align:left;background:#fff;border:1px solid oklch(90% 0.005 90);border-radius:12px;padding:12px 14px;cursor:pointer;flex:none}
+.auto-node-wrap{position:relative;width:260px;max-width:100%}
+.auto-node{display:flex;align-items:flex-start;gap:10px;width:100%;text-align:left;background:#fff;border:1px solid oklch(90% 0.005 90);border-radius:12px;padding:12px 14px;cursor:pointer;flex:none}
 .auto-node:hover{border-color:oklch(56% 0.19 265)}
+.auto-node-delete{position:absolute;top:-8px;right:-8px;width:22px;height:22px;border-radius:50%;border:1px solid oklch(90% 0.005 90);background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.15);color:oklch(55% 0.16 15);font-size:14px;line-height:1;cursor:pointer;display:grid;place-items:center;opacity:0;transition:opacity .12s}
+.auto-node-wrap:hover .auto-node-delete{opacity:1}
+.auto-node-delete:hover{background:oklch(95% 0.03 15);border-color:oklch(55% 0.16 15)}
 .auto-node-icon{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;font-size:13px;flex:none}
 .auto-node-text{display:flex;flex-direction:column;gap:2px;min-width:0}
 .auto-node-text strong{font-size:12px}

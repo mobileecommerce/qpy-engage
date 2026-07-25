@@ -1538,7 +1538,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
             return <div className="auto-branch-col" key={branch.id}>
               <span className={`auto-branch-label ${AUTO_CHIP_CLASS[branch.color]||"chip-neutral"}`}>{branch.label}</span>
               {branch.steps.map((step,stepIdx)=><Fragment key={step.id}>
-                <AutoNode step={step} onClick={()=>setEditing({path:{kind:"branchStep",branchIdx:bi,stepIdx},step})}/>
+                <AutoNode step={step} onClick={()=>setEditing({path:{kind:"branchStep",branchIdx:bi,stepIdx},step})} onDelete={()=>deleteStep({kind:"branchStep",branchIdx:bi,stepIdx})}/>
                 <div className="auto-conn"/>
               </Fragment>)}
               <button className="auto-add-step" onClick={()=>setAddingStepTo({branchIdx:bi})}>＋ Add step</button>
@@ -1552,7 +1552,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
                     return <div className="auto-branch-col" key={sub.id}>
                       <span className={`auto-branch-label ${AUTO_CHIP_CLASS[sub.color]||"chip-neutral"}`}>{sub.label}</span>
                       {sub.steps.map((step,stepIdx)=><Fragment key={step.id}>
-                        <AutoNode step={step} onClick={()=>setEditing({path:{kind:"subStep",branchIdx:bi,subIdx:si,stepIdx},step})}/>
+                        <AutoNode step={step} onClick={()=>setEditing({path:{kind:"subStep",branchIdx:bi,subIdx:si,stepIdx},step})} onDelete={()=>deleteStep({kind:"subStep",branchIdx:bi,subIdx:si,stepIdx})}/>
                         <div className="auto-conn"/>
                       </Fragment>)}
                       <button className="auto-add-step" onClick={()=>setAddingStepTo({branchIdx:bi,subIdx:si})}>＋ Add step</button>
@@ -1605,11 +1605,14 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
   </>;
 }
 
-function AutoNode({step,onClick}:{step:AutoStep;onClick:()=>void}){
-  return <button className="auto-node" onClick={onClick}>
-    <span className={`auto-node-icon ${AUTO_CHIP_CLASS[step.chip]||"chip-neutral"}`}>{step.icon}</span>
-    <span className="auto-node-text"><strong>{step.title}</strong><small>{step.subtitle}</small></span>
-  </button>;
+function AutoNode({step,onClick,onDelete}:{step:AutoStep;onClick:()=>void;onDelete?:()=>void}){
+  return <div className="auto-node-wrap">
+    <button className="auto-node" onClick={onClick}>
+      <span className={`auto-node-icon ${AUTO_CHIP_CLASS[step.chip]||"chip-neutral"}`}>{step.icon}</span>
+      <span className="auto-node-text"><strong>{step.title}</strong><small>{step.subtitle}</small></span>
+    </button>
+    {onDelete&&<button className="auto-node-delete" title="Remove this step" onClick={(e)=>{e.stopPropagation();onDelete()}}>×</button>}
+  </div>;
 }
 
 function AutoFork(){
@@ -1662,7 +1665,7 @@ function StepDrawer({path,step,onClose,onSave,onDelete}:{path:StepPath;step:Auto
       {(step.kind==="aiReply"||step.kind==="generic")&&<p className="empty-hint">{step.kind==="aiReply"?"This step calls your real AI assistant (its own prompt, role, and knowledge sources) — it doesn't send scripted text.":"No configurable fields for this step."}</p>}
     </div>
     <div className="modal-actions">
-      {onDelete&&<button className="danger-link" onClick={onDelete}>Delete step</button>}
+      {onDelete&&<button className="danger-btn" style={{marginRight:"auto"}} onClick={onDelete}>🗑 Delete step</button>}
       <button className="secondary-btn" onClick={onClose}>Cancel</button>
       <button className="primary" onClick={save}>Save changes</button>
     </div>
