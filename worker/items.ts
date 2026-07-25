@@ -116,6 +116,14 @@ export async function getItemsByIds(db: D1Database, workspaceId: string, ids: st
   return ids.map((id) => byId.get(id)).filter((x): x is ReturnType<typeof itemToJson> => Boolean(x));
 }
 
+// Exposed for the Automations engine (worker/automations.ts) so an AI reply/AI action step can
+// let Claude know which catalog items exist and choose which ones to show via the show_items tool.
+export async function listItemsForWorkspace(db: D1Database, workspaceId: string): Promise<ReturnType<typeof itemToJson>[]> {
+  await ensureItemsSchema(db);
+  const result = await db.prepare(`SELECT * FROM catalog_items WHERE workspace_id = ? ORDER BY created_at DESC`).bind(workspaceId).all<ItemRow>();
+  return (result.results || []).map(itemToJson);
+}
+
 export async function handleItemsRequest(request: Request, env: ItemsEnv): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/items")) return null;

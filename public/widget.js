@@ -156,6 +156,11 @@
         price.className = "qpy-item-price";
         price.textContent = item.price ? (item.currency + " " + item.price) : "";
         body.appendChild(title);
+        if (item.description) {
+          var desc = document.createElement("small");
+          desc.textContent = item.description;
+          body.appendChild(desc);
+        }
         if (item.price) body.appendChild(price);
         if (item.externalLink) {
           var link = document.createElement("a");

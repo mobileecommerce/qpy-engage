@@ -1,6 +1,7 @@
 import { requireSession, type AuthEnv } from "./auth";
 import { json, corsPreflight, allowedOrigin, callClaude, callClaudeWithActions, sanitizeActions, type ChatMessage, type AssistantActionDef } from "./shared";
 import { readWorkspaceState, buildSystemPrompt } from "./widget";
+import { listItemsForWorkspace, getItemsByIds } from "./items";
 
 export interface AutomationsEnv extends AuthEnv {
   DB: D1Database;
@@ -586,7 +587,9 @@ async function evaluateSplit(db: D1Database, workspaceId: string, automationId: 
   return 1;
 }
 
-export type AutomationOutMessage = { type: "text"; text: string };
+export type AutomationOutMessage =
+  | { type: "text"; text: string }
+  | { type: "items"; text?: string; items: Array<{ id: string; name: string; title: string; description: string; price: number; currency: string; imageUrl: string; externalLink: string }> };
 
 // Delivery is channel-specific and injected by the caller: the Web chat widget records an
 // assistant row in widget_messages; the WhatsApp webhook (worker/meta.ts) sends a real Cloud API
@@ -619,8 +622,16 @@ async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx
   if (step.kind === "aiReply") {
     if (!env.ANTHROPIC_API_KEY) { await send("Our assistant isn't fully configured yet — a team member will follow up shortly."); return "continue"; }
     const systemPrompt = await buildSystemPrompt(env.DB, workspaceId);
-    const result = await callClaude(env.ANTHROPIC_API_KEY, systemPrompt, history);
+    const catalogItems = await listItemsForWorkspace(env.DB, workspaceId);
+    let shownItemIds: string[] = [];
+    const result = catalogItems.length
+      ? await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, [], undefined, undefined, undefined, catalogItems, async (ids) => { shownItemIds = ids; })
+      : await callClaude(env.ANTHROPIC_API_KEY, systemPrompt, history);
     await send(result.reply || "Thanks for reaching out — a team member will follow up shortly.");
+    if (shownItemIds.length) {
+      const items = await getItemsByIds(env.DB, workspaceId, shownItemIds);
+      if (items.length) outMessages.push({ type: "items", items });
+    }
     return "continue";
   }
   if (step.kind === "aiAction") {
@@ -628,8 +639,14 @@ async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx
     const storedActions = (await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions")) || [];
     const actions: AssistantActionDef[] = sanitizeActions(storedActions).filter((a) => a.name.toLowerCase() === (cfg.aiActionName || "").toLowerCase());
     const systemPrompt = await buildSystemPrompt(env.DB, workspaceId) + `\n\nIf relevant, use the "${cfg.aiActionName}" tool to help answer this.`;
-    const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions);
+    const catalogItems = await listItemsForWorkspace(env.DB, workspaceId);
+    let shownItemIds: string[] = [];
+    const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions, undefined, undefined, undefined, catalogItems, async (ids) => { shownItemIds = ids; });
     await send(result.reply || "Let me look into that and get back to you.");
+    if (shownItemIds.length) {
+      const items = await getItemsByIds(env.DB, workspaceId, shownItemIds);
+      if (items.length) outMessages.push({ type: "items", items });
+    }
     return "continue";
   }
   if (step.kind === "tag" && ctx.persistConversationState) {

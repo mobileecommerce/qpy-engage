@@ -159,7 +159,7 @@ function isBlockedHost(hostname: string): boolean {
   return host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host === "::1" || host.endsWith(".local");
 }
 
-type ToolDef = { name: string; description: string; input_schema: { type: "object"; properties: Record<string, { type: string; description?: string }>; required: string[] } };
+type ToolDef = { name: string; description: string; input_schema: { type: "object"; properties: Record<string, { type: string; description?: string; items?: { type: string } }>; required: string[] } };
 
 function toolNameFor(name: string, index: number, used: Set<string>): string {
   const base = name.toLowerCase().trim().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 50) || `action_${index}`;
@@ -223,14 +223,19 @@ type AnthropicMessage = { role: "user" | "assistant"; content: string | Anthropi
 
 const NAME_TOOL_NAME = "record_customer_name";
 const NEEDS_HUMAN_TOOL_NAME = "flag_for_human";
+const SHOW_ITEMS_TOOL_NAME = "show_items";
+
+export type CatalogItemRef = { id: string; name: string; price: number; currency: string };
 
 export async function callClaudeWithActions(
   apiKey: string, systemPrompt: string, messages: ChatMessage[], actions: AssistantActionDef[],
   recordSubmission?: RecordSubmission,
   onCustomerName?: (name: string) => Promise<void>,
   onNeedsHuman?: (reason: string) => Promise<void>,
+  catalogItems?: CatalogItemRef[],
+  onShowItems?: (itemIds: string[]) => Promise<void>,
 ): Promise<{ reply?: string; error?: string; status?: number }> {
-  if (!actions.length && !onCustomerName && !onNeedsHuman) return callClaude(apiKey, systemPrompt, messages);
+  if (!actions.length && !onCustomerName && !onNeedsHuman && !catalogItems?.length) return callClaude(apiKey, systemPrompt, messages);
 
   const { tools, nameToAction } = buildTools(actions);
   // Available in every conversation regardless of what AI Actions the business configured —
@@ -248,6 +253,18 @@ export async function callClaudeWithActions(
       name: NEEDS_HUMAN_TOOL_NAME,
       description: "Call this when the customer explicitly insists on speaking with a human/agent after you've already tried to help or asked what they need — see the business hours and handoff instructions above for exactly when to call this.",
       input_schema: { type: "object", properties: { reason: { type: "string", description: "One short phrase summarizing what the customer needs, for the team's dashboard." } }, required: ["reason"] },
+    });
+  }
+  if (catalogItems?.length && onShowItems) {
+    const listing = catalogItems.map((it) => `${it.id}: ${it.name} (${it.currency} ${it.price || "price not listed"})`).join("; ");
+    tools.push({
+      name: SHOW_ITEMS_TOOL_NAME,
+      description: `Call this once you're ready to show the customer one or more catalog items as visual cards (e.g. rooms, menu items, products) — never describe them yourself in text instead. Available items: ${listing}`,
+      input_schema: {
+        type: "object",
+        properties: { itemIds: { type: "array", items: { type: "string" }, description: "The ids of the specific catalog items to show, from the available items list." } },
+        required: ["itemIds"],
+      },
     });
   }
   const conversation: AnthropicMessage[] = messages.map((m) => ({ role: m.role, content: m.content }));
@@ -297,6 +314,12 @@ export async function callClaudeWithActions(
         const reason = typeof toolUse.input?.reason === "string" ? toolUse.input.reason : "Customer asked for a human.";
         if (onNeedsHuman) { try { await onNeedsHuman(reason); } catch { /* don't let a storage failure break the reply */ } }
         results.push({ type: "tool_result", tool_use_id: toolUse.id, content: "Noted — the team has been flagged." });
+        continue;
+      }
+      if (toolUse.name === SHOW_ITEMS_TOOL_NAME) {
+        const itemIds = Array.isArray(toolUse.input?.itemIds) ? toolUse.input.itemIds.filter((id): id is string => typeof id === "string") : [];
+        if (itemIds.length && onShowItems) { try { await onShowItems(itemIds); } catch { /* don't let a storage failure break the reply */ } }
+        results.push({ type: "tool_result", tool_use_id: toolUse.id, content: "Shown to the customer as cards — do not repeat their details in text." });
         continue;
       }
       const action = nameToAction.get(toolUse.name);
