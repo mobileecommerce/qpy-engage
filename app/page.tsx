@@ -1432,6 +1432,9 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
   const [testMessage,setTestMessage]=useState("");
   const [testResult,setTestResult]=useState<{path:{label:string;note?:string;steps:string[]}[]}|null>(null);
   const [testing,setTesting]=useState(false);
+  const topBranchesRef=useRef<HTMLDivElement>(null);
+  const nestedBranchesRef0=useRef<HTMLDivElement>(null);
+  const nestedBranchesRef1=useRef<HTMLDivElement>(null);
 
   const load=async()=>{
     if(!token){setLoading(false);return}
@@ -1615,10 +1618,11 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
         <AutoNode step={flow.trigger} onClick={()=>setEditing({path:{kind:"trigger"},step:flow.trigger})}/>
         <div className="auto-conn"/>
         <AutoNode step={flow.split1} onClick={()=>setEditing({path:{kind:"split1"},step:flow.split1})}/>
-        <AutoFork/>
-        <div className="auto-branches">
+        <AutoFork containerRef={topBranchesRef}/>
+        <div className="auto-branches" ref={topBranchesRef}>
           {flow.branches.map((branch,branchIdx)=>{
             const bi=branchIdx as 0|1;
+            const nestedRef=bi===0?nestedBranchesRef0:nestedBranchesRef1;
             return <div className="auto-branch-col" key={branch.id}>
               <span className={`auto-branch-label ${AUTO_CHIP_CLASS[branch.color]||"chip-neutral"}`}>{branch.label}</span>
               {branch.steps.map((step,stepIdx)=><Fragment key={step.id}>
@@ -1629,8 +1633,8 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
               {branch.split2&&branch.subBranches?<>
                 <div className="auto-conn"/>
                 <AutoNode step={branch.split2} onClick={()=>setEditing({path:{kind:"split2",branchIdx:bi},step:branch.split2!})} onDelete={()=>removeNestedSplit(bi)}/>
-                <AutoFork/>
-                <div className="auto-branches">
+                <AutoFork containerRef={nestedRef}/>
+                <div className="auto-branches" ref={nestedRef}>
                   {branch.subBranches.map((sub,subIdx)=>{
                     const si=subIdx as 0|1;
                     return <div className="auto-branch-col" key={sub.id}>
@@ -1711,8 +1715,57 @@ function AutoNode({step,onClick,onDelete}:{step:AutoStep;onClick:()=>void;onDele
   </div>;
 }
 
-function AutoFork(){
-  return <div className="auto-fork"><div className="auto-fork-stem"/><div className="auto-fork-bar"/><div className="auto-fork-drop auto-fork-drop-l"/><div className="auto-fork-drop auto-fork-drop-r"/></div>;
+// Measures the real rendered positions of the two branch columns in `containerRef` (its next
+// sibling in the DOM) and draws the stem/bar/drops to match exactly — rather than assuming a
+// fixed two-column width, which breaks the moment one column is wider than the other (e.g. a
+// nested condition split makes its column wider than its sibling, and the two top-level branches
+// are no longer symmetric). Re-measures on any resize of the branches row, including reflows
+// caused by adding/removing steps or a nested split.
+type AutoForkGeo={width:number;mid:number;leftCenter:number;rightCenter:number};
+
+function AutoFork({containerRef}:{containerRef:React.RefObject<HTMLDivElement|null>}){
+  const [geo,setGeo]=useState<AutoForkGeo|null>(null);
+  useEffect(()=>{
+    const geoRef:{current:AutoForkGeo|null}={current:null};
+    let frame=0;
+    const measure=()=>{
+      // rAF-batch: ResizeObserver can fire multiple times per frame (this fork's own change plus
+      // a sibling fork's cascading column resize) — only the last one in a frame needs to apply.
+      cancelAnimationFrame(frame);
+      frame=requestAnimationFrame(()=>{
+        const el=containerRef.current;
+        if(!el)return;
+        const cols=el.querySelectorAll(":scope > .auto-branch-col");
+        if(cols.length<2)return;
+        const parentRect=el.getBoundingClientRect();
+        const r0=cols[0].getBoundingClientRect();
+        const r1=cols[1].getBoundingClientRect();
+        const leftCenter=r0.left+r0.width/2-parentRect.left;
+        const rightCenter=r1.left+r1.width/2-parentRect.left;
+        const next:AutoForkGeo={width:Math.round(parentRect.width),mid:Math.round((leftCenter+rightCenter)/2),leftCenter:Math.round(leftCenter),rightCenter:Math.round(rightCenter)};
+        const prev=geoRef.current;
+        if(prev&&prev.width===next.width&&prev.mid===next.mid&&prev.leftCenter===next.leftCenter&&prev.rightCenter===next.rightCenter)return;
+        geoRef.current=next;
+        setGeo(next);
+      });
+    };
+    measure();
+    const el=containerRef.current;
+    const ro=typeof ResizeObserver!=="undefined"?new ResizeObserver(measure):null;
+    if(el&&ro)ro.observe(el);
+    window.addEventListener("resize",measure);
+    return ()=>{cancelAnimationFrame(frame);ro?.disconnect();window.removeEventListener("resize",measure)};
+  },[containerRef]); // mount-once (containerRef is a stable ref object) — updates are driven purely
+                      // by ResizeObserver/window resize from here on, not by this component's own
+                      // re-renders, so there's no feedback loop between this effect and its setState
+
+  if(!geo)return <div className="auto-fork" style={{width:2}}/>;
+  return <div className="auto-fork" style={{width:geo.width}}>
+    <div className="auto-fork-stem" style={{left:geo.mid}}/>
+    <div className="auto-fork-bar" style={{left:Math.min(geo.leftCenter,geo.rightCenter),width:Math.abs(geo.rightCenter-geo.leftCenter)}}/>
+    <div className="auto-fork-drop" style={{left:geo.leftCenter}}/>
+    <div className="auto-fork-drop" style={{left:geo.rightCenter}}/>
+  </div>;
 }
 
 function StepDrawer({path,step,aiActions,onClose,onSave,onDelete}:{path:StepPath;step:AutoStep;aiActions:{name:string;description:string}[];onClose:()=>void;onSave:(path:StepPath,next:AutoStep)=>void;onDelete?:()=>void}){
