@@ -286,4 +286,4 @@
 .test-result-note{font-size:10.5px;color:#8b93a1;margin:3px 0 6px}
 .test-result-branch ul{margin:0;padding-left:16px}
 .test-result-branch li{font-size:11.5px;color:#414855;line-height:1.7}
-@media(max-width:900px){.auto-branches{flex-direction:column;align-items:center}.auto-fork{display:none}.template-gallery{grid-template-columns:1fr}}
+@media(max-width:900px){.auto-branches{flex-direction:column;align-items:center;gap:28px}.auto-fork{position:static;width:2px;height:26px;background:oklch(80% 0.005 90)}.auto-fork-stem,.auto-fork-bar,.auto-fork-drop{display:none}.template-gallery{grid-template-columns:1fr}}
