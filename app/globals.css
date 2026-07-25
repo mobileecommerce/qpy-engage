@@ -287,3 +287,37 @@
 .test-result-branch ul{margin:0;padding-left:16px}
 .test-result-branch li{font-size:11.5px;color:#414855;line-height:1.7}
 @media(max-width:900px){.auto-branches{flex-direction:column;align-items:center;gap:28px}.auto-fork{position:static;width:2px;height:26px;background:oklch(80% 0.005 90)}.auto-fork-stem,.auto-fork-bar,.auto-fork-drop{display:none}.template-gallery{grid-template-columns:1fr}}
+
+/* ── Popup redesign: scoped to modals/drawers only (.modal-backdrop and everything inside
+   .modal), so it never touches the same-named form classes used on regular pages. Bigger,
+   legible type and clearly-styled checkboxes — the previous 9px labels + unstyled native
+   checkboxes were easy to miss entirely. ── */
+.modal-backdrop{backdrop-filter:blur(2px)}
+.modal{padding:24px;border-radius:14px}
+.modal-head{padding-bottom:14px;margin-bottom:18px}
+.modal-head h2{font-size:18px;font-weight:700;letter-spacing:-.2px}
+.modal-head button{width:32px;height:32px;font-size:19px;color:#565e6b;transition:background .12s}
+.modal-head button:hover{background:#e7e9ed}
+.modal>p{font-size:12.5px;line-height:1.6;color:#646d7a;margin:0 0 4px}
+.modal .modal-form{gap:16px}
+.modal .modal-form label{font-size:12.5px;font-weight:700;color:#2b2f38;gap:8px}
+.modal .modal-form input,.modal .modal-form select,.modal .modal-form textarea{font-size:13.5px;height:44px;border-radius:9px;border-color:#d8dbe1}
+.modal .modal-form input:focus,.modal .modal-form select:focus,.modal .modal-form textarea:focus{border-color:oklch(56% 0.19 265);box-shadow:0 0 0 3px oklch(90% 0.05 265)}
+.modal .modal-form textarea{height:auto;min-height:88px;padding-top:11px;line-height:1.5}
+.modal-actions{margin-top:20px;padding-top:16px;gap:10px}
+.modal-actions button{font-size:12.5px;height:42px;padding:0 18px}
+
+/* Checkboxes inside any popup: bigger, colored, obviously interactive. */
+.modal input[type="checkbox"]{width:18px;height:18px;accent-color:oklch(56% 0.19 265);cursor:pointer;flex:none}
+.checkbox-row{gap:20px}
+.checkbox-row label{font-size:12.5px;font-weight:600;color:#2b2f38;gap:8px}
+.channel-choice{gap:10px}
+.channel-opt{font-size:13px;font-weight:600;color:#2b2f38;padding:12px 14px;border-radius:9px;transition:border-color .12s,background .12s}
+.channel-opt:has(input:checked){border-color:oklch(56% 0.19 265);background:oklch(97% 0.02 265)}
+.channel-opt.disabled{background:#f7f7f8}
+.channel-opt.disabled span{color:#9aa1ac}
+
+.drawer-modal{max-width:460px}
+.drawer-modal .empty-hint{font-size:12px;line-height:1.6}
+.test-result-branch li{font-size:12.5px}
+@media(max-width:560px){.modal{padding:18px}.modal-actions{flex-wrap:wrap}.modal-actions button{flex:1}}
