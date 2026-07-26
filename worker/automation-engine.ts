@@ -246,7 +246,10 @@ async function executeNode(x: ExecCtx, node: AutomationNode): Promise<NodeOutcom
         return { control: "next", next: node.next ?? null };
       }
       const actionHint = node.kind === "aiAction" && cfg.aiActionName ? `\n\nIf relevant, use the "${cfg.aiActionName}" tool to help answer this.` : "";
-      const systemPrompt = (await buildSystemPrompt(x.env.DB, x.workspaceId)) + actionHint + buildCollectLinkInstructions(cfg);
+      // Search the crawled site against what the customer just asked, so an AI reply node inside an
+      // automation grounds on the right page rather than the start of the site.
+      const askedNow = [...x.history].reverse().find((m) => m.role === "user")?.content || "";
+      const systemPrompt = (await buildSystemPrompt(x.env.DB, x.workspaceId, askedNow)) + actionHint + buildCollectLinkInstructions(cfg);
       const storedActions = node.kind === "aiAction"
         ? (await readWorkspaceState<unknown[]>(x.env.DB, x.workspaceId, "qpy-engage-assistant-actions")) || []
         : [];

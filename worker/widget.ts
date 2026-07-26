@@ -1,5 +1,5 @@
 import { callClaude, callClaudeWithActions, sanitizeChatMessages, sanitizeActions, json, corsPreflight, allowedOrigin, type ChatMessage } from "./shared";
-import { getStoredKnowledgeContent } from "./knowledge";
+import { getStoredKnowledgeContent, getRelevantKnowledgePages } from "./knowledge";
 import { saveSubmission } from "./leads";
 import { requireSession, type AuthEnv } from "./auth";
 import { runFlowForWidgetMessage, type FlowOutMessage } from "./flows";
@@ -213,14 +213,20 @@ function computeBusinessHoursStatus(hours: WorkingHours | null, now: Date): stri
   } catch { return null; }
 }
 
-export async function buildSystemPrompt(db: D1Database, workspaceId: string): Promise<string> {
+// `question` is the customer's current message. It is optional so every existing caller keeps
+// working, but passing it lets the crawled site be searched for the pages that actually answer it
+// instead of handing over whatever fits in the budget first.
+export async function buildSystemPrompt(db: D1Database, workspaceId: string, question?: string): Promise<string> {
   const config = await readWorkspaceState<{ role?: string; tone?: string; language?: string; fallback?: string }>(db, workspaceId, "qpy-engage-assistant-config-v2");
   const policies = await readWorkspaceState<{ restricted?: string }>(db, workspaceId, "qpy-engage-assistant-policies");
   const selectedSources = (await readWorkspaceState<number[]>(db, workspaceId, "qpy-engage-assistant-sources")) || [];
   const sources = (await readWorkspaceState<Array<{ id: number; name: string }>>(db, workspaceId, "qpy-engage-sources")) || [];
   const sourceNames = sources.filter((s) => selectedSources.includes(s.id)).map((s) => s.name).join(", ") || "no connected sources yet";
+  // Prefer per-page selection from a crawled site; fall back to the single stored blob for sources
+  // that predate crawling or were pasted in by hand (Document/FAQ).
+  const relevantPages = await getRelevantKnowledgePages(db, workspaceId, selectedSources, question || "", MAX_KNOWLEDGE_LENGTH);
   const knowledgeContent = await getStoredKnowledgeContent(db, workspaceId, selectedSources);
-  const knowledgeText = Object.values(knowledgeContent).join("\n\n").slice(0, MAX_KNOWLEDGE_LENGTH);
+  const knowledgeText = relevantPages || Object.values(knowledgeContent).join("\n\n").slice(0, MAX_KNOWLEDGE_LENGTH);
 
   const role = config?.role || "You are a helpful customer support assistant for this business.";
   const tone = config?.tone || "Warm & helpful";
@@ -370,7 +376,10 @@ async function answerIfUnanswered(env: WidgetEnv, workspaceId: string, sessionId
 
   const history = await getConversationHistory(env.DB, workspaceId, sessionId);
   if (!history.length) return;
-  const systemPrompt = await buildSystemPrompt(env.DB, workspaceId);
+  // This path answers a message the customer left unanswered during human takeover, so the question
+  // to search the site for is that last customer message, not a live one.
+  const unanswered = [...history].reverse().find((m) => m.role === "user")?.content || "";
+  const systemPrompt = await buildSystemPrompt(env.DB, workspaceId, unanswered);
   const storedActions = await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions");
   const actions = sanitizeActions(storedActions || []);
   const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
@@ -469,7 +478,7 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
     }
   }
 
-  const systemPrompt = await buildSystemPrompt(env.DB, workspaceId);
+  const systemPrompt = await buildSystemPrompt(env.DB, workspaceId, message);
   const storedActions = await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions");
   const actions = sanitizeActions(storedActions || []);
   const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
