@@ -45,7 +45,7 @@ export type AutomationStep = {
     notifyChannels?: string[]; notifyRecipient?: string;
     aiActionName?: string;
     escalateQueue?: string; escalatePriority?: "Normal" | "Urgent";
-    collectFields?: { key: string; label: string }[]; collectUrlTemplate?: string; collectItemIds?: string[];
+    collectFlows?: { id: string; name: string; fields: { key: string; label: string }[]; urlTemplate: string; itemIds: string[] }[];
   };
 };
 export type AutomationBranch = { id: string; label: string; color: string; steps: AutomationStep[]; split2?: AutomationStep; subBranches?: [AutomationSubBranch, AutomationSubBranch] };
@@ -350,7 +350,7 @@ export function stepIsIncomplete(step: AutomationStep): boolean {
     case "aiAction": return !(c.aiActionName || "").trim();
     case "escalate": return !(c.escalateQueue || "").trim();
     case "notify": return !(c.notifyChannels || []).length;
-    case "aiReply": return Boolean((c.collectFields || []).length) !== Boolean((c.collectUrlTemplate || "").trim()); // if either "Collect & Link" field is set, both must be
+    case "aiReply": return (c.collectFlows || []).some((f) => !f.name.trim() || !f.fields.length || !f.urlTemplate.trim()); // if either "Collect & Link" field is set, both must be
     default: return false; // wait/generic need no required field
   }
 }
@@ -697,19 +697,27 @@ async function itemsFallbackAfterConfirmation(
   return items.length ? { type: "items", items } : null;
 }
 
-// Compiles a business owner's structured "Collect & Link" step config (fields to ask for, in order,
-// plus a URL template) into the same instructions a developer would otherwise have to hand-write into
-// the assistant's role prompt — this is what lets a new business be configured entirely from the
-// Automation Builder UI, without anyone writing prose or calling the API directly.
+// Compiles a business owner's structured "Collect & Link" step config into the same instructions a
+// developer would otherwise have to hand-write into the assistant's role prompt — this is what lets
+// a new business be configured entirely from the Automation Builder UI, without anyone writing prose
+// or calling the API directly. A single step can define MULTIPLE named flows (e.g. "Room booking" and
+// "Event space booking" both under one automation) — the model is told to first work out which one
+// the customer means, then follow only that flow's own fields/keys/items, never mixing them.
 function buildCollectLinkInstructions(cfg: AutomationStep["config"]): string {
-  const fields = (cfg?.collectFields || []).filter((f) => f.key && f.label);
-  const template = cfg?.collectUrlTemplate;
-  if (!fields.length || !template) return "";
-  const order = fields.map((f, i) => `${i + 1}) ${f.label}`).join(", ");
-  const keys = fields.map((f) => f.key).join(", ");
-  return `\n\nWhen the customer wants to proceed with this request, ask for these details ONE AT A TIME, in this exact order, waiting for their answer each time (never ask for more than one thing per message): ${order}. `
-    + `After collecting all of this, in the SAME response that you summarize the details back to the customer and ask "Is that correct?", you MUST also call the set_link_params tool with these exact keys: ${keys}. Call it every time you show this summary, even before they've confirmed — this is a save-as-you-go step. `
-    + `Once they confirm, you MUST also call the show_items tool in that same response to display the relevant catalog items as cards — never write a reply that says you're showing, pulling together, or providing options unless you are actually calling show_items in that exact response, every single time, with no exceptions. Do not describe the items yourself in text, and do NOT paste any link in your text reply — pass the same linkParams to show_items too, so each card's own button reflects their exact request.`;
+  const flows = (cfg?.collectFlows || []).filter((f) => f.name.trim() && f.fields.filter((x) => x.key && x.label).length && f.urlTemplate.trim());
+  if (!flows.length) return "";
+  const flowBlocks = flows.map((flow) => {
+    const fields = flow.fields.filter((f) => f.key && f.label);
+    const order = fields.map((f, i) => `${i + 1}) ${f.label}`).join(", ");
+    const keys = fields.map((f) => f.key).join(", ");
+    return `Flow "${flow.name}": ask for these details ONE AT A TIME, in this exact order, waiting for their answer each time (never ask for more than one thing per message): ${order}. `
+      + `After collecting all of this, in the SAME response that you summarize the details back to the customer and ask "Is that correct?", you MUST also call the set_link_params tool with these exact keys: ${keys}. Call it every time you show this summary, even before they've confirmed. `
+      + `Once they confirm, you MUST also call the show_items tool in that same response to display the relevant catalog items as cards for the "${flow.name}" flow specifically — do not mix in items from a different flow.`;
+  }).join("\n\n");
+  const intro = flows.length > 1
+    ? `This business handles ${flows.length} distinct kinds of requests, each with its own separate process below. First work out which one the customer means (ask a clarifying question if it's genuinely ambiguous), then follow ONLY that flow's instructions — never combine fields or items from two different flows in the same exchange.\n\n`
+    : "";
+  return `\n\n${intro}${flowBlocks}\n\nIn every case: never write a reply that says you're showing, pulling together, or providing options unless you are actually calling show_items in that exact response, every single time, with no exceptions. Do not describe the items yourself in text, and do NOT paste any link in your text reply — pass the same linkParams to show_items too, so each card's own button reflects the customer's exact request.`;
 }
 
 // Real, pre-existing bug this fixes: evaluateSplit only ever looks at the CURRENT message's own
@@ -747,7 +755,8 @@ async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx
     if (!env.ANTHROPIC_API_KEY) { await send("Our assistant isn't fully configured yet — a team member will follow up shortly."); return "continue"; }
     const systemPrompt = (await buildSystemPrompt(env.DB, workspaceId)) + buildCollectLinkInstructions(cfg);
     const allCatalogItems = await listItemsForWorkspace(env.DB, workspaceId);
-    const catalogItems = cfg.collectItemIds?.length ? allCatalogItems.filter((it) => cfg.collectItemIds!.includes(it.id)) : allCatalogItems;
+    const collectItemIds = [...new Set((cfg.collectFlows || []).flatMap((f) => f.itemIds || []))];
+    const catalogItems = collectItemIds.length ? allCatalogItems.filter((it) => collectItemIds.includes(it.id)) : allCatalogItems;
     let shownItemIds: string[] = [];
     let shownLinkParams: Record<string, string> | undefined;
     const onSetLinkParams = ctx.persistConversationState
@@ -773,7 +782,8 @@ async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx
     const actions: AssistantActionDef[] = sanitizeActions(storedActions).filter((a) => a.name.toLowerCase() === (cfg.aiActionName || "").toLowerCase());
     const systemPrompt = (await buildSystemPrompt(env.DB, workspaceId)) + `\n\nIf relevant, use the "${cfg.aiActionName}" tool to help answer this.` + buildCollectLinkInstructions(cfg);
     const allCatalogItems = await listItemsForWorkspace(env.DB, workspaceId);
-    const catalogItems = cfg.collectItemIds?.length ? allCatalogItems.filter((it) => cfg.collectItemIds!.includes(it.id)) : allCatalogItems;
+    const collectItemIds = [...new Set((cfg.collectFlows || []).flatMap((f) => f.itemIds || []))];
+    const catalogItems = collectItemIds.length ? allCatalogItems.filter((it) => collectItemIds.includes(it.id)) : allCatalogItems;
     let shownItemIds: string[] = [];
     let shownLinkParams: Record<string, string> | undefined;
     const onSetLinkParams = ctx.persistConversationState

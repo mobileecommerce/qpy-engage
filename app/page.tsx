@@ -1319,7 +1319,7 @@ type AutoStepConfig = {
   notifyChannels?:string[]; notifyRecipient?:string;
   aiActionName?:string;
   escalateQueue?:string; escalatePriority?:"Normal"|"Urgent";
-  collectFields?:{key:string;label:string}[]; collectUrlTemplate?:string; collectItemIds?:string[];
+  collectFlows?:{id:string;name:string;fields:{key:string;label:string}[];urlTemplate:string;itemIds:string[]}[];
 };
 type AutoStep = { id:string; icon:string; title:string; subtitle:string; chip:string; kind:AutoStepKind; config?:AutoStepConfig };
 type AutoSubBranch = { id:string; label:string; color:string; steps:AutoStep[] };
@@ -1381,7 +1381,7 @@ function stepIsIncomplete(step:AutoStep):boolean{
     case "aiAction": return !(c.aiActionName||"").trim();
     case "escalate": return !(c.escalateQueue||"").trim();
     case "notify": return !(c.notifyChannels||[]).length;
-    case "aiReply": return Boolean((c.collectFields||[]).length)!==Boolean((c.collectUrlTemplate||"").trim());
+    case "aiReply": return (c.collectFlows||[]).some(f=>!f.name.trim()||!f.fields.length||!f.urlTemplate.trim());
     default: return false;
   }
 }
@@ -1784,29 +1784,34 @@ function StepDrawer({path,step,aiActions,items,onClose,onSave,onDelete}:{path:St
   const token=useAuthToken();
   const [config,setConfig]=useState<AutoStepConfig>(step.config||{});
   const update=(patch:Partial<AutoStepConfig>)=>setConfig({...config,...patch});
-  const toggleIn=(key:"channels"|"notifyChannels"|"collectItemIds",value:string)=>{
+  const toggleIn=(key:"channels"|"notifyChannels",value:string)=>{
     const current=(config[key] as string[]|undefined)||[];
     update({[key]:current.includes(value)?current.filter(v=>v!==value):[...current,value]} as Partial<AutoStepConfig>);
   };
   const save=()=>onSave(path,{...step,config});
 
-  const addField=()=>update({collectFields:[...(config.collectFields||[]),{key:"",label:""}]});
-  const updateField=(idx:number,patch:Partial<{key:string;label:string}>)=>update({collectFields:(config.collectFields||[]).map((f,i)=>i===idx?{...f,...patch}:f)});
-  const removeField=(idx:number)=>update({collectFields:(config.collectFields||[]).filter((_,i)=>i!==idx)});
+  const flows=config.collectFlows||[];
+  const updateFlow=(flowId:string,patch:Partial<{name:string;urlTemplate:string;itemIds:string[];fields:{key:string;label:string}[]}>)=>update({collectFlows:flows.map(f=>f.id===flowId?{...f,...patch}:f)});
+  const addFlow=()=>update({collectFlows:[...flows,{id:crypto.randomUUID(),name:"",fields:[],urlTemplate:"",itemIds:[]}]});
+  const removeFlow=(flowId:string)=>update({collectFlows:flows.filter(f=>f.id!==flowId)});
+  const addField=(flowId:string)=>{const flow=flows.find(f=>f.id===flowId);if(!flow)return;updateFlow(flowId,{fields:[...flow.fields,{key:"",label:""}]})};
+  const updateField=(flowId:string,idx:number,patch:Partial<{key:string;label:string}>)=>{const flow=flows.find(f=>f.id===flowId);if(!flow)return;updateFlow(flowId,{fields:flow.fields.map((f,i)=>i===idx?{...f,...patch}:f)})};
+  const removeField=(flowId:string,idx:number)=>{const flow=flows.find(f=>f.id===flowId);if(!flow)return;updateFlow(flowId,{fields:flow.fields.filter((_,i)=>i!==idx)})};
+  const toggleFlowItem=(flowId:string,itemId:string)=>{const flow=flows.find(f=>f.id===flowId);if(!flow)return;const cur=flow.itemIds||[];updateFlow(flowId,{itemIds:cur.includes(itemId)?cur.filter(x=>x!==itemId):[...cur,itemId]})};
 
-  const [testValues,setTestValues]=useState<Record<string,string>>({});
-  const [testUrl,setTestUrl]=useState<string|null>(null);
-  const [testError,setTestError]=useState<string|null>(null);
-  const runTestLink=async()=>{
-    setTestUrl(null);setTestError(null);
-    if(!token||!config.collectUrlTemplate)return;
+  const [testValues,setTestValues]=useState<Record<string,Record<string,string>>>({});
+  const [testUrl,setTestUrl]=useState<Record<string,string>>({});
+  const [testError,setTestError]=useState<Record<string,string>>({});
+  const runTestLink=async(flow:{id:string;urlTemplate:string})=>{
+    setTestUrl({...testUrl,[flow.id]:""});setTestError({...testError,[flow.id]:""});
+    if(!token||!flow.urlTemplate)return;
     try{
-      const response=await fetch(metaApi("/api/automations/test-link"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({template:config.collectUrlTemplate,values:testValues})});
+      const response=await fetch(metaApi("/api/automations/test-link"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({template:flow.urlTemplate,values:testValues[flow.id]||{}})});
       const data=await response.json() as {url?:string;error?:string};
-      if(!response.ok||!data.url){setTestError(data.error||"Could not build a preview link.");return}
-      setTestUrl(data.url);
+      if(!response.ok||!data.url){setTestError({...testError,[flow.id]:data.error||"Could not build a preview link."});return}
+      setTestUrl({...testUrl,[flow.id]:data.url});
       window.open(data.url,"_blank","noopener,noreferrer");
-    }catch{setTestError("Could not reach the server.")}
+    }catch{setTestError({...testError,[flow.id]:"Could not reach the server."})}
   };
 
   return <div className="modal-backdrop" onMouseDown={onClose}><div className="modal drawer-modal" onMouseDown={e=>e.stopPropagation()}>
@@ -1844,39 +1849,42 @@ function StepDrawer({path,step,aiActions,items,onClose,onSave,onDelete}:{path:St
       {step.kind==="escalate"&&<><label>Assign to queue<input value={config.escalateQueue||""} onChange={e=>update({escalateQueue:e.target.value})}/></label><label>Priority<select value={config.escalatePriority||"Normal"} onChange={e=>update({escalatePriority:e.target.value as AutoStepConfig["escalatePriority"]})}><option value="Normal">Normal</option><option value="Urgent">Urgent</option></select></label></>}
 
       {step.kind==="aiReply"&&<>
-        <p className="empty-hint" style={{margin:"0 0 4px"}}>This step calls your real AI assistant. Optionally configure "Collect & Link" below so it asks for specific details in order and hands out a matching link — instead of writing that logic into the assistant's prompt by hand.</p>
-        <label>Fields to collect, in order (optional)
-          <div className="flow-options-list">
-            {(config.collectFields||[]).map((f,idx)=><div className="flow-option-row" key={idx}>
-              <input placeholder="Field key (e.g. arrival)" value={f.key} onChange={e=>updateField(idx,{key:e.target.value})}/>
-              <input placeholder="Question to ask (e.g. What's your check-in date?)" value={f.label} onChange={e=>updateField(idx,{label:e.target.value})}/>
-              <button type="button" onClick={()=>removeField(idx)}>×</button>
-            </div>)}
-          </div>
-          <button type="button" className="secondary-btn" onClick={addField}>＋ Add field</button>
-        </label>
-        {!!(config.collectFields||[]).length&&<>
-          <label>Link template — use {"{key}"} placeholders matching the field keys above
-            <input value={config.collectUrlTemplate||""} onChange={e=>update({collectUrlTemplate:e.target.value})} placeholder="https://example.com/book?arrival={arrival}&rooms={rooms}"/>
+        <p className="empty-hint" style={{margin:"0 0 4px"}}>This step calls your real AI assistant. Optionally add one or more "Collect & Link" flows below — each is a distinct kind of request (e.g. "Room booking", "Event space booking", "Table reservation") with its own fields, link, and items. The assistant works out which flow a customer means and follows only that one — nothing here is fixed to any particular business type.</p>
+        {flows.map(flow=><div key={flow.id} style={{border:"1px solid var(--line)",borderRadius:"8px",padding:"12px",marginBottom:"12px"}}>
+          <label>Flow name<input placeholder="e.g. Room booking" value={flow.name} onChange={e=>updateFlow(flow.id,{name:e.target.value})}/></label>
+          <label>Fields to collect, in order
+            <div className="flow-options-list">
+              {flow.fields.map((f,idx)=><div className="flow-option-row" key={idx}>
+                <input placeholder="Field key (e.g. arrival)" value={f.key} onChange={e=>updateField(flow.id,idx,{key:e.target.value})}/>
+                <input placeholder="Question to ask (e.g. What's your check-in date?)" value={f.label} onChange={e=>updateField(flow.id,idx,{label:e.target.value})}/>
+                <button type="button" onClick={()=>removeField(flow.id,idx)}>×</button>
+              </div>)}
+            </div>
+            <button type="button" className="secondary-btn" onClick={()=>addField(flow.id)}>＋ Add field</button>
           </label>
-          <label>Catalog items to show once details are confirmed
+          <label>Link template — use {"{key}"} placeholders matching the field keys above
+            <input value={flow.urlTemplate} onChange={e=>updateFlow(flow.id,{urlTemplate:e.target.value})} placeholder="https://example.com/book?arrival={arrival}&rooms={rooms}"/>
+          </label>
+          <label>Catalog items for this flow
             <div className="parameter-list">
-              {items.map(it=><label key={it.id} style={{display:"flex",gap:"0.4rem",alignItems:"center"}}><input type="checkbox" checked={(config.collectItemIds||[]).includes(it.id)} onChange={()=>toggleIn("collectItemIds",it.id)}/> {it.name}</label>)}
+              {items.map(it=><label key={it.id} style={{display:"flex",gap:"0.4rem",alignItems:"center"}}><input type="checkbox" checked={(flow.itemIds||[]).includes(it.id)} onChange={()=>toggleFlowItem(flow.id,it.id)}/> {it.name}</label>)}
               {!items.length&&<small className="empty-hint">No items in your catalog yet — add some in the Items tab.</small>}
             </div>
           </label>
-          {!!config.collectUrlTemplate&&<label>Test this link — fill in sample values, then preview the real destination
+          {!!flow.urlTemplate&&<label>Test this link — fill in sample values, then preview the real destination
             <div className="flow-options-list">
-              {(config.collectFields||[]).map(f=>f.key?<div className="flow-option-row" key={f.key}>
+              {flow.fields.map(f=>f.key?<div className="flow-option-row" key={f.key}>
                 <span style={{minWidth:"90px"}}>{f.key}</span>
-                <input placeholder="sample value" value={testValues[f.key]||""} onChange={e=>setTestValues({...testValues,[f.key]:e.target.value})}/>
+                <input placeholder="sample value" value={testValues[flow.id]?.[f.key]||""} onChange={e=>setTestValues({...testValues,[flow.id]:{...(testValues[flow.id]||{}),[f.key]:e.target.value}})}/>
               </div>:null)}
             </div>
-            <button type="button" className="secondary-btn" onClick={runTestLink}>▷ Test this link</button>
-            {testUrl&&<small style={{display:"block",marginTop:"6px",wordBreak:"break-all"}}>Opened: {testUrl}</small>}
-            {testError&&<small style={{display:"block",marginTop:"6px",color:"#b3261e"}}>{testError}</small>}
+            <button type="button" className="secondary-btn" onClick={()=>runTestLink(flow)}>▷ Test this link</button>
+            {testUrl[flow.id]&&<small style={{display:"block",marginTop:"6px",wordBreak:"break-all"}}>Opened: {testUrl[flow.id]}</small>}
+            {testError[flow.id]&&<small style={{display:"block",marginTop:"6px",color:"#b3261e"}}>{testError[flow.id]}</small>}
           </label>}
-        </>}
+          <button type="button" className="danger-btn" style={{marginTop:"8px"}} onClick={()=>removeFlow(flow.id)}>🗑 Remove this flow</button>
+        </div>)}
+        <button type="button" className="secondary-btn" onClick={addFlow}>＋ Add a request type (flow)</button>
       </>}
       {step.kind==="generic"&&<p className="empty-hint">No configurable fields for this step.</p>}
     </div>
