@@ -1,5 +1,5 @@
 import { requireSession, type AuthEnv } from "./auth";
-import { json, corsPreflight, allowedOrigin, callClaude, callClaudeWithActions, sanitizeActions, type ChatMessage, type AssistantActionDef } from "./shared";
+import { json, corsPreflight, allowedOrigin, callClaude, callClaudeWithActions, sanitizeActions, type ChatMessage, type AssistantActionDef, type CatalogItemRef } from "./shared";
 import { readWorkspaceState, buildSystemPrompt } from "./widget";
 import { listItemsForWorkspace, getItemsByIds } from "./items";
 
@@ -653,6 +653,33 @@ async function resolveLinkParams(db: D1Database, workspaceId: string, ctx: RunCt
   return loadLinkParams(db, workspaceId, ctx.contactKey);
 }
 
+// Safety net for a separate, real failure mode than the linkParams gap above: the model can write
+// a reply that promises to show items ("take a look at these options...") without actually calling
+// show_items that turn at all — a text/tool-use mismatch, not a params problem. Detected narrowly:
+// the customer just gave a short yes/confirm reply to our own "Is that correct?" summary question
+// (the literal phrase every workspace's prompt is told to use before showing items) and no items
+// were shown. In that case, show the workspace's real catalog rather than leave the promise empty.
+function looksAffirmative(text: string): boolean {
+  return /^\s*(yes|yeah|yep|yup|correct|that'?s correct|that is correct|confirmed|sounds good|perfect|right|ok|okay)\b/i.test((text || "").trim());
+}
+
+function priorMessageAsksConfirmation(history: ChatMessage[]): boolean {
+  const prior = history[history.length - 2];
+  return Boolean(prior && prior.role === "assistant" && /is that correct/i.test(prior.content));
+}
+
+async function itemsFallbackAfterConfirmation(
+  env: AutomationsEnv, workspaceId: string, ctx: RunCtx, history: ChatMessage[], catalogItems: CatalogItemRef[],
+): Promise<AutomationOutMessage | null> {
+  if (!catalogItems.length) return null;
+  const lastUser = history[history.length - 1];
+  if (!lastUser || lastUser.role !== "user" || !looksAffirmative(lastUser.content)) return null;
+  if (!priorMessageAsksConfirmation(history)) return null;
+  const linkParams = await resolveLinkParams(env.DB, workspaceId, ctx, undefined);
+  const items = withLinkParams(await getItemsByIds(env.DB, workspaceId, catalogItems.map((it) => it.id)), linkParams);
+  return items.length ? { type: "items", items } : null;
+}
+
 async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx, automation: AutomationRow, step: AutomationStep, history: ChatMessage[], outMessages: AutomationOutMessage[]): Promise<"continue" | "waiting"> {
   const cfg = step.config || {};
   const send = async (text: string) => {
@@ -678,6 +705,9 @@ async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx
       const linkParams = await resolveLinkParams(env.DB, workspaceId, ctx, shownLinkParams);
       const items = withLinkParams(await getItemsByIds(env.DB, workspaceId, shownItemIds), linkParams);
       if (items.length) outMessages.push({ type: "items", items });
+    } else {
+      const fallback = await itemsFallbackAfterConfirmation(env, workspaceId, ctx, history, catalogItems);
+      if (fallback) outMessages.push(fallback);
     }
     return "continue";
   }
@@ -695,6 +725,9 @@ async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx
       const linkParams = await resolveLinkParams(env.DB, workspaceId, ctx, shownLinkParams);
       const items = withLinkParams(await getItemsByIds(env.DB, workspaceId, shownItemIds), linkParams);
       if (items.length) outMessages.push({ type: "items", items });
+    } else {
+      const fallback = await itemsFallbackAfterConfirmation(env, workspaceId, ctx, history, catalogItems);
+      if (fallback) outMessages.push(fallback);
     }
     return "continue";
   }
