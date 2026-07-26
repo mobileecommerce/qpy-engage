@@ -1319,6 +1319,7 @@ type AutoStepConfig = {
   notifyChannels?:string[]; notifyRecipient?:string;
   aiActionName?:string;
   escalateQueue?:string; escalatePriority?:"Normal"|"Urgent";
+  collectFields?:{key:string;label:string}[]; collectUrlTemplate?:string; collectItemIds?:string[];
 };
 type AutoStep = { id:string; icon:string; title:string; subtitle:string; chip:string; kind:AutoStepKind; config?:AutoStepConfig };
 type AutoSubBranch = { id:string; label:string; color:string; steps:AutoStep[] };
@@ -1380,6 +1381,7 @@ function stepIsIncomplete(step:AutoStep):boolean{
     case "aiAction": return !(c.aiActionName||"").trim();
     case "escalate": return !(c.escalateQueue||"").trim();
     case "notify": return !(c.notifyChannels||[]).length;
+    case "aiReply": return Boolean((c.collectFields||[]).length)!==Boolean((c.collectUrlTemplate||"").trim());
     default: return false;
   }
 }
@@ -1426,6 +1428,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
   const [activity,setActivity]=useState<ActivityRow[]>([]);
   const [activityLoading,setActivityLoading]=useState(false);
   const [aiActions,setAiActions]=useState<{name:string;description:string}[]>([]);
+  const [catalogItems,setCatalogItems]=useState<{id:string;name:string}[]>([]);
   const [renaming,setRenaming]=useState(false);
   const [nameDraft,setNameDraft]=useState("");
   const [testOpen,setTestOpen]=useState(false);
@@ -1446,7 +1449,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
     }catch{}
     finally{setLoading(false)}
   };
-  useEffect(()=>{load();loadAiActions()},[token]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(()=>{load();loadAiActions();loadCatalogItems()},[token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadActivity=async()=>{
     if(!token)return;
@@ -1575,6 +1578,15 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
     }catch{}
   };
 
+  const loadCatalogItems=async()=>{
+    if(!token)return;
+    try{
+      const response=await fetch(metaApi("/api/items"),{headers:authHeaders(token)});
+      const data=await response.json() as {items?:{id:string;name:string}[]};
+      setCatalogItems(data.items||[]);
+    }catch{}
+  };
+
   const runTest=async()=>{
     if(!selected||!token)return;
     setTesting(true);setTestResult(null);
@@ -1652,7 +1664,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
           })}
         </div>
       </div>
-      {editing&&<StepDrawer path={editing.path} step={editing.step} aiActions={aiActions} onClose={()=>setEditing(null)} onSave={saveStep} onDelete={editing.path.kind==="branchStep"||editing.path.kind==="subStep"?()=>deleteStep(editing.path):undefined}/>}
+      {editing&&<StepDrawer path={editing.path} step={editing.step} aiActions={aiActions} items={catalogItems} onClose={()=>setEditing(null)} onSave={saveStep} onDelete={editing.path.kind==="branchStep"||editing.path.kind==="subStep"?()=>deleteStep(editing.path):undefined}/>}
       {addingStepTo&&<SimpleModal title="Add a step" onClose={()=>setAddingStepTo(null)}>
         <p>Choose what this step does — you can configure the details afterward.</p>
         <div className="template-gallery">{NEW_STEP_KINDS.map(option=><button key={option.kind} onClick={()=>appendStep(addingStepTo,option)}>
@@ -1768,14 +1780,34 @@ function AutoFork({containerRef}:{containerRef:React.RefObject<HTMLDivElement|nu
   </div>;
 }
 
-function StepDrawer({path,step,aiActions,onClose,onSave,onDelete}:{path:StepPath;step:AutoStep;aiActions:{name:string;description:string}[];onClose:()=>void;onSave:(path:StepPath,next:AutoStep)=>void;onDelete?:()=>void}){
+function StepDrawer({path,step,aiActions,items,onClose,onSave,onDelete}:{path:StepPath;step:AutoStep;aiActions:{name:string;description:string}[];items:{id:string;name:string}[];onClose:()=>void;onSave:(path:StepPath,next:AutoStep)=>void;onDelete?:()=>void}){
+  const token=useAuthToken();
   const [config,setConfig]=useState<AutoStepConfig>(step.config||{});
   const update=(patch:Partial<AutoStepConfig>)=>setConfig({...config,...patch});
-  const toggleIn=(key:"channels"|"notifyChannels",value:string)=>{
-    const current=config[key]||[];
+  const toggleIn=(key:"channels"|"notifyChannels"|"collectItemIds",value:string)=>{
+    const current=(config[key] as string[]|undefined)||[];
     update({[key]:current.includes(value)?current.filter(v=>v!==value):[...current,value]} as Partial<AutoStepConfig>);
   };
   const save=()=>onSave(path,{...step,config});
+
+  const addField=()=>update({collectFields:[...(config.collectFields||[]),{key:"",label:""}]});
+  const updateField=(idx:number,patch:Partial<{key:string;label:string}>)=>update({collectFields:(config.collectFields||[]).map((f,i)=>i===idx?{...f,...patch}:f)});
+  const removeField=(idx:number)=>update({collectFields:(config.collectFields||[]).filter((_,i)=>i!==idx)});
+
+  const [testValues,setTestValues]=useState<Record<string,string>>({});
+  const [testUrl,setTestUrl]=useState<string|null>(null);
+  const [testError,setTestError]=useState<string|null>(null);
+  const runTestLink=async()=>{
+    setTestUrl(null);setTestError(null);
+    if(!token||!config.collectUrlTemplate)return;
+    try{
+      const response=await fetch(metaApi("/api/automations/test-link"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({template:config.collectUrlTemplate,values:testValues})});
+      const data=await response.json() as {url?:string;error?:string};
+      if(!response.ok||!data.url){setTestError(data.error||"Could not build a preview link.");return}
+      setTestUrl(data.url);
+      window.open(data.url,"_blank","noopener,noreferrer");
+    }catch{setTestError("Could not reach the server.")}
+  };
 
   return <div className="modal-backdrop" onMouseDown={onClose}><div className="modal drawer-modal" onMouseDown={e=>e.stopPropagation()}>
     <div className="modal-head"><h2>{step.title}</h2><button onClick={onClose}>×</button></div>
@@ -1811,7 +1843,42 @@ function StepDrawer({path,step,aiActions,onClose,onSave,onDelete}:{path:StepPath
 
       {step.kind==="escalate"&&<><label>Assign to queue<input value={config.escalateQueue||""} onChange={e=>update({escalateQueue:e.target.value})}/></label><label>Priority<select value={config.escalatePriority||"Normal"} onChange={e=>update({escalatePriority:e.target.value as AutoStepConfig["escalatePriority"]})}><option value="Normal">Normal</option><option value="Urgent">Urgent</option></select></label></>}
 
-      {(step.kind==="aiReply"||step.kind==="generic")&&<p className="empty-hint">{step.kind==="aiReply"?"This step calls your real AI assistant (its own prompt, role, and knowledge sources) — it doesn't send scripted text.":"No configurable fields for this step."}</p>}
+      {step.kind==="aiReply"&&<>
+        <p className="empty-hint" style={{margin:"0 0 4px"}}>This step calls your real AI assistant. Optionally configure "Collect & Link" below so it asks for specific details in order and hands out a matching link — instead of writing that logic into the assistant's prompt by hand.</p>
+        <label>Fields to collect, in order (optional)
+          <div className="flow-options-list">
+            {(config.collectFields||[]).map((f,idx)=><div className="flow-option-row" key={idx}>
+              <input placeholder="Field key (e.g. arrival)" value={f.key} onChange={e=>updateField(idx,{key:e.target.value})}/>
+              <input placeholder="Question to ask (e.g. What's your check-in date?)" value={f.label} onChange={e=>updateField(idx,{label:e.target.value})}/>
+              <button type="button" onClick={()=>removeField(idx)}>×</button>
+            </div>)}
+          </div>
+          <button type="button" className="secondary-btn" onClick={addField}>＋ Add field</button>
+        </label>
+        {!!(config.collectFields||[]).length&&<>
+          <label>Link template — use {"{key}"} placeholders matching the field keys above
+            <input value={config.collectUrlTemplate||""} onChange={e=>update({collectUrlTemplate:e.target.value})} placeholder="https://example.com/book?arrival={arrival}&rooms={rooms}"/>
+          </label>
+          <label>Catalog items to show once details are confirmed
+            <div className="parameter-list">
+              {items.map(it=><label key={it.id} style={{display:"flex",gap:"0.4rem",alignItems:"center"}}><input type="checkbox" checked={(config.collectItemIds||[]).includes(it.id)} onChange={()=>toggleIn("collectItemIds",it.id)}/> {it.name}</label>)}
+              {!items.length&&<small className="empty-hint">No items in your catalog yet — add some in the Items tab.</small>}
+            </div>
+          </label>
+          {!!config.collectUrlTemplate&&<label>Test this link — fill in sample values, then preview the real destination
+            <div className="flow-options-list">
+              {(config.collectFields||[]).map(f=>f.key?<div className="flow-option-row" key={f.key}>
+                <span style={{minWidth:"90px"}}>{f.key}</span>
+                <input placeholder="sample value" value={testValues[f.key]||""} onChange={e=>setTestValues({...testValues,[f.key]:e.target.value})}/>
+              </div>:null)}
+            </div>
+            <button type="button" className="secondary-btn" onClick={runTestLink}>▷ Test this link</button>
+            {testUrl&&<small style={{display:"block",marginTop:"6px",wordBreak:"break-all"}}>Opened: {testUrl}</small>}
+            {testError&&<small style={{display:"block",marginTop:"6px",color:"#b3261e"}}>{testError}</small>}
+          </label>}
+        </>}
+      </>}
+      {step.kind==="generic"&&<p className="empty-hint">No configurable fields for this step.</p>}
     </div>
     <div className="modal-actions">
       {onDelete&&<button className="danger-btn" style={{marginRight:"auto"}} onClick={onDelete}>🗑 Delete step</button>}

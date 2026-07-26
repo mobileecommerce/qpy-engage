@@ -45,6 +45,7 @@ export type AutomationStep = {
     notifyChannels?: string[]; notifyRecipient?: string;
     aiActionName?: string;
     escalateQueue?: string; escalatePriority?: "Normal" | "Urgent";
+    collectFields?: { key: string; label: string }[]; collectUrlTemplate?: string; collectItemIds?: string[];
   };
 };
 export type AutomationBranch = { id: string; label: string; color: string; steps: AutomationStep[]; split2?: AutomationStep; subBranches?: [AutomationSubBranch, AutomationSubBranch] };
@@ -349,7 +350,8 @@ export function stepIsIncomplete(step: AutomationStep): boolean {
     case "aiAction": return !(c.aiActionName || "").trim();
     case "escalate": return !(c.escalateQueue || "").trim();
     case "notify": return !(c.notifyChannels || []).length;
-    default: return false; // aiReply/wait/generic need no required field
+    case "aiReply": return Boolean((c.collectFields || []).length) !== Boolean((c.collectUrlTemplate || "").trim()); // if either "Collect & Link" field is set, both must be
+    default: return false; // wait/generic need no required field
   }
 }
 
@@ -509,6 +511,24 @@ async function listAiActions(request: Request, env: AutomationsEnv): Promise<Res
   const stored = (await readWorkspaceState<unknown[]>(env.DB, session.workspaceId, "qpy-engage-assistant-actions")) || [];
   const actions = sanitizeActions(stored).map((a) => ({ name: a.name, description: a.description }));
   return json(request, { actions });
+}
+
+// Lets a business owner verify their "Collect & Link" URL template actually works against the real
+// destination BEFORE it ever reaches a customer — real code does the substitution, same as production,
+// so the preview is exactly what a customer would get, not a guess.
+async function testLink(request: Request, env: AutomationsEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const body = await request.json() as { template?: string; values?: Record<string, unknown> };
+  const template = typeof body.template === "string" ? body.template.trim() : "";
+  if (!template) return json(request, { error: "A link template is required." }, 400);
+  const values = body.values && typeof body.values === "object" ? body.values : {};
+  const url = template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_match, key: string) => {
+    const value = values[key];
+    return encodeURIComponent(typeof value === "string" ? value : "");
+  });
+  try { new URL(url); } catch { return json(request, { error: "That template didn't produce a valid URL — check the base address." }, 400); }
+  return json(request, { url });
 }
 
 function describeStepEffect(step: AutomationStep): string {
@@ -677,6 +697,21 @@ async function itemsFallbackAfterConfirmation(
   return items.length ? { type: "items", items } : null;
 }
 
+// Compiles a business owner's structured "Collect & Link" step config (fields to ask for, in order,
+// plus a URL template) into the same instructions a developer would otherwise have to hand-write into
+// the assistant's role prompt — this is what lets a new business be configured entirely from the
+// Automation Builder UI, without anyone writing prose or calling the API directly.
+function buildCollectLinkInstructions(cfg: AutomationStep["config"]): string {
+  const fields = (cfg?.collectFields || []).filter((f) => f.key && f.label);
+  const template = cfg?.collectUrlTemplate;
+  if (!fields.length || !template) return "";
+  const order = fields.map((f, i) => `${i + 1}) ${f.label}`).join(", ");
+  const keys = fields.map((f) => f.key).join(", ");
+  return `\n\nWhen the customer wants to proceed with this request, ask for these details ONE AT A TIME, in this exact order, waiting for their answer each time (never ask for more than one thing per message): ${order}. `
+    + `After collecting all of this, in the SAME response that you summarize the details back to the customer and ask "Is that correct?", you MUST also call the set_link_params tool with these exact keys: ${keys}. Call it every time you show this summary, even before they've confirmed — this is a save-as-you-go step. `
+    + `Once they confirm, you MUST also call the show_items tool in that same response to display the relevant catalog items as cards — never write a reply that says you're showing, pulling together, or providing options unless you are actually calling show_items in that exact response, every single time, with no exceptions. Do not describe the items yourself in text, and do NOT paste any link in your text reply — pass the same linkParams to show_items too, so each card's own button reflects their exact request.`;
+}
+
 async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx, automation: AutomationRow, step: AutomationStep, history: ChatMessage[], outMessages: AutomationOutMessage[]): Promise<"continue" | "waiting"> {
   const cfg = step.config || {};
   const send = async (text: string) => {
@@ -690,8 +725,9 @@ async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx
   }
   if (step.kind === "aiReply") {
     if (!env.ANTHROPIC_API_KEY) { await send("Our assistant isn't fully configured yet — a team member will follow up shortly."); return "continue"; }
-    const systemPrompt = await buildSystemPrompt(env.DB, workspaceId);
-    const catalogItems = await listItemsForWorkspace(env.DB, workspaceId);
+    const systemPrompt = (await buildSystemPrompt(env.DB, workspaceId)) + buildCollectLinkInstructions(cfg);
+    const allCatalogItems = await listItemsForWorkspace(env.DB, workspaceId);
+    const catalogItems = cfg.collectItemIds?.length ? allCatalogItems.filter((it) => cfg.collectItemIds!.includes(it.id)) : allCatalogItems;
     let shownItemIds: string[] = [];
     let shownLinkParams: Record<string, string> | undefined;
     const onSetLinkParams = ctx.persistConversationState
@@ -715,8 +751,9 @@ async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx
     if (!env.ANTHROPIC_API_KEY) { await send("One moment — checking on that for you."); return "continue"; }
     const storedActions = (await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions")) || [];
     const actions: AssistantActionDef[] = sanitizeActions(storedActions).filter((a) => a.name.toLowerCase() === (cfg.aiActionName || "").toLowerCase());
-    const systemPrompt = await buildSystemPrompt(env.DB, workspaceId) + `\n\nIf relevant, use the "${cfg.aiActionName}" tool to help answer this.`;
-    const catalogItems = await listItemsForWorkspace(env.DB, workspaceId);
+    const systemPrompt = (await buildSystemPrompt(env.DB, workspaceId)) + `\n\nIf relevant, use the "${cfg.aiActionName}" tool to help answer this.` + buildCollectLinkInstructions(cfg);
+    const allCatalogItems = await listItemsForWorkspace(env.DB, workspaceId);
+    const catalogItems = cfg.collectItemIds?.length ? allCatalogItems.filter((it) => cfg.collectItemIds!.includes(it.id)) : allCatalogItems;
     let shownItemIds: string[] = [];
     let shownLinkParams: Record<string, string> | undefined;
     const onSetLinkParams = ctx.persistConversationState
@@ -896,6 +933,7 @@ export async function handleAutomationsRequest(request: Request, env: Automation
   if (url.pathname === "/api/automations/from-template" && request.method === "POST") return createFromTemplate(request, env);
   if (url.pathname === "/api/automations/activity" && request.method === "GET") return listActivity(request, env);
   if (url.pathname === "/api/automations/ai-actions" && request.method === "GET") return listAiActions(request, env);
+  if (url.pathname === "/api/automations/test-link" && request.method === "POST") return testLink(request, env);
   const reorderMatch = url.pathname.match(/^\/api\/automations\/([^/]+)\/reorder$/);
   if (reorderMatch && request.method === "POST") return reorderAutomation(request, env, reorderMatch[1]);
   const testMatch = url.pathname.match(/^\/api\/automations\/([^/]+)\/test$/);
