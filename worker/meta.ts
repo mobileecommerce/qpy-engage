@@ -1,7 +1,10 @@
 import { requireSession, requireRole, type AuthEnv } from "./auth";
 import { encoder, arrayBuffer, allowedOrigin, json, corsPreflight, sha256, safeEqual, bytesToBase64, base64ToBytes, type ChatMessage } from "./shared";
 import { meterMessageBalance, incrementSentCount } from "./messageBalance";
-import { runAutomations, type RunCtx } from "./automations";
+import { runAutomations, continueAfterUpload, type RunCtx } from "./automations";
+import { loadSession } from "./automation-session";
+import { toGraph } from "./automation-graph";
+import { saveDocument, validateAgainstSpec, receivedKeysAtNode, MAX_UPLOAD_BYTES } from "./documents";
 
 const DEFAULT_GRAPH_VERSION = "v25.0";
 
@@ -319,6 +322,88 @@ async function runWhatsAppAutomations(env: MetaEnv, workspaceId: string, connect
   await runAutomations(env, workspaceId, "whatsapp", ctx, message, history).catch(() => {});
 }
 
+// A WhatsApp customer just sends the file into the chat — there is no upload form and no way for
+// them to say which requested document it is. So the incoming file fills the first outstanding
+// requested slot, in the order the checklist was sent, unless the caption names one of them.
+async function handleWhatsAppMedia(env: MetaEnv, connection: ConnectionRow, fromWaId: string, media: { id: string; caption?: string; filename?: string }): Promise<void> {
+  const workspaceId = connection.workspace_id;
+  const session = await loadSession(env.DB, workspaceId, fromWaId);
+  if (!session?.nodeId || !session.automationId) return;
+
+  const row = await env.DB.prepare(`SELECT flow_json FROM automations2 WHERE id = ? AND workspace_id = ?`)
+    .bind(session.automationId, workspaceId).first<{ flow_json: string }>();
+  if (!row) return;
+  const graph = toGraph(JSON.parse(row.flow_json));
+  const node = graph.nodes[session.nodeId];
+  if (!node || node.kind !== "upload") return;
+
+  const specs = node.config?.documents || [];
+  const received = await receivedKeysAtNode(env.DB, workspaceId, fromWaId, node.id);
+  const caption = (media.caption || "").toLowerCase();
+  const target = specs.find((d) => caption && d.label.toLowerCase().includes(caption.trim()))
+    || specs.find((d) => d.required && !received.has(d.key))
+    || specs.find((d) => !received.has(d.key));
+  if (!target) return;
+
+  const bytes = await downloadWhatsAppMedia(env, connection, media.id);
+  if (!bytes) {
+    await sendWhatsAppText(env, workspaceId, connection, fromWaId, "Sorry — we could not download that file. Please try sending it again.");
+    return;
+  }
+
+  const check = validateAgainstSpec(bytes, target);
+  if (!check.ok) {
+    await sendWhatsAppText(env, workspaceId, connection, fromWaId, check.error);
+    return;
+  }
+
+  await saveDocument(env.DB, {
+    workspaceId, contactKey: fromWaId, automationId: session.automationId, nodeId: node.id,
+    docKey: target.key, docLabel: target.label,
+    fileName: media.filename || `${target.key}.${check.ext}`, mimeType: check.mime,
+    channel: "whatsapp", bytes,
+  });
+
+  const nowReceived = await receivedKeysAtNode(env.DB, workspaceId, fromWaId, node.id);
+  const outstanding = specs.filter((d) => d.required && !nowReceived.has(d.key));
+  await sendWhatsAppText(env, workspaceId, connection, fromWaId,
+    outstanding.length
+      ? `✅ Got your ${target.label}.\n\nStill needed: ${outstanding.map((d) => d.label).join(", ")}.`
+      : `✅ Got your ${target.label}.`);
+
+  if (!outstanding.length) {
+    const ctx: RunCtx = {
+      channel: "whatsapp", contactKey: fromWaId, phoneNumberId: connection.phone_number_id,
+      persistConversationState: false,
+      deliver: (text: string) => sendWhatsAppText(env, workspaceId, connection, fromWaId, text),
+    };
+    await continueAfterUpload(env, workspaceId, "whatsapp", ctx).catch(() => {});
+  }
+}
+
+// Meta media is a two-step fetch: resolve the id to a short-lived URL, then fetch that URL — both
+// calls need the access token, and the second one returns 401 without it.
+async function downloadWhatsAppMedia(env: MetaEnv, connection: ConnectionRow, mediaId: string): Promise<Uint8Array | null> {
+  if (!env.META_TOKEN_ENCRYPTION_KEY || !env.META_APP_SECRET) return null;
+  try {
+    const token = await decryptToken(connection.token_ciphertext, connection.token_iv, env.META_TOKEN_ENCRYPTION_KEY);
+    const proof = await hmacHex(env.META_APP_SECRET, token);
+    const metaResp = await fetch(`https://graph.facebook.com/${graphVersion(env)}/${encodeURIComponent(mediaId)}?appsecret_proof=${proof}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!metaResp.ok) return null;
+    const info = await metaResp.json() as { url?: string; file_size?: number };
+    if (!info.url) return null;
+    // Reject before downloading when Meta already tells us it exceeds what we can store.
+    if (typeof info.file_size === "number" && info.file_size > MAX_UPLOAD_BYTES) return null;
+
+    const fileResp = await fetch(info.url, { headers: { authorization: `Bearer ${token}` } });
+    if (!fileResp.ok) return null;
+    const buf = new Uint8Array(await fileResp.arrayBuffer());
+    return buf.length > MAX_UPLOAD_BYTES ? null : buf;
+  } catch { return null; }
+}
+
 async function verifyWebhook(request: Request, env: MetaEnv): Promise<Response> {
   const url = new URL(request.url);
   const mode = url.searchParams.get("hub.mode");
@@ -349,6 +434,7 @@ async function receiveWebhook(request: Request, env: MetaEnv): Promise<Response>
   // Inbound messages that were genuinely new this delivery (not a Meta retry) and are text — these
   // are the only ones eligible to trigger an automation, so a webhook retry never double-replies.
   const toAutomate: Array<{ connection: ConnectionRow; from: string; text: string }> = [];
+  const toStore: Array<{ connection: ConnectionRow; from: string; media: { id: string; caption?: string; filename?: string } }> = [];
   for (const entry of payload.entry || []) for (const change of entry.changes || []) {
     const value = change.value || {}; const phoneNumberId = value.metadata?.phone_number_id || null;
     const connection = await resolveConnection(phoneNumberId);
@@ -360,6 +446,12 @@ async function receiveWebhook(request: Request, env: MetaEnv): Promise<Response>
       const wasNew = (res.meta?.changes || 0) > 0;
       if (wasNew && connection && item.from && text && String(item.type) === "text") {
         toAutomate.push({ connection, from: String(item.from), text });
+      }
+      // Documents and photos are how a WhatsApp customer answers an upload step. Same
+      // new-insert-only guard as text, so a Meta retry cannot store the file twice.
+      if (wasNew && connection && item.from && (String(item.type) === "document" || String(item.type) === "image")) {
+        const media = (item.document || item.image) as { id?: string; caption?: string; filename?: string } | undefined;
+        if (media?.id) toStore.push({ connection, from: String(item.from), media: { id: String(media.id), caption: media.caption, filename: media.filename } });
       }
     }
     for (const item of value.statuses || []) {
@@ -373,6 +465,9 @@ async function receiveWebhook(request: Request, env: MetaEnv): Promise<Response>
   // matched a new insert, so a slow run + Meta retry never produces a duplicate reply.
   for (const item of toAutomate) {
     await runWhatsAppAutomations(env, item.connection.workspace_id, item.connection, item.from, item.text).catch(() => {});
+  }
+  for (const item of toStore) {
+    await handleWhatsAppMedia(env, item.connection, item.from, item.media).catch(() => {});
   }
   return new Response("EVENT_RECEIVED", { status: 200, headers: { "content-type": "text/plain" } });
 }
