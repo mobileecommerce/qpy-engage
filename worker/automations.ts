@@ -712,6 +712,26 @@ function buildCollectLinkInstructions(cfg: AutomationStep["config"]): string {
     + `Once they confirm, you MUST also call the show_items tool in that same response to display the relevant catalog items as cards — never write a reply that says you're showing, pulling together, or providing options unless you are actually calling show_items in that exact response, every single time, with no exceptions. Do not describe the items yourself in text, and do NOT paste any link in your text reply — pass the same linkParams to show_items too, so each card's own button reflects their exact request.`;
 }
 
+// Real, pre-existing bug this fixes: evaluateSplit only ever looks at the CURRENT message's own
+// text against the split's keywords — every incoming message re-classifies from scratch. A reply
+// like "yes" or "24/07/2026" almost never contains the original trigger keywords, so a multi-turn
+// conversation would silently drift to the OTHER branch after its first message, discarding whatever
+// that branch's steps (and any step-specific config, like Collect & Link fields) were doing. Fixed by
+// remembering the branch decision per session once made, instead of re-classifying every turn.
+async function loadStickyBranchMap(db: D1Database, workspaceId: string, sessionId: string): Promise<Record<string, { branchIdx: 0 | 1; subBranchIdx?: 0 | 1 }>> {
+  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN sticky_branch TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
+  const row = await db.prepare(`SELECT sticky_branch FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`).bind(workspaceId, sessionId).first<{ sticky_branch: string }>();
+  if (!row?.sticky_branch) return {};
+  try { const parsed = JSON.parse(row.sticky_branch); return parsed && typeof parsed === "object" ? parsed : {}; } catch { return {}; }
+}
+
+async function saveStickyBranch(db: D1Database, workspaceId: string, sessionId: string, automationId: string, decision: { branchIdx: 0 | 1; subBranchIdx?: 0 | 1 }): Promise<void> {
+  const map = await loadStickyBranchMap(db, workspaceId, sessionId);
+  map[automationId] = decision;
+  await db.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, sticky_branch) VALUES (?, ?, ?)
+    ON CONFLICT(workspace_id, session_id) DO UPDATE SET sticky_branch = excluded.sticky_branch`).bind(workspaceId, sessionId, JSON.stringify(map)).run();
+}
+
 async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx, automation: AutomationRow, step: AutomationStep, history: ChatMessage[], outMessages: AutomationOutMessage[]): Promise<"continue" | "waiting"> {
   const cfg = step.config || {};
   const send = async (text: string) => {
@@ -845,23 +865,31 @@ export async function runAutomations(env: AutomationsEnv, workspaceId: string, c
 
   const automation = active[0]; // first match wins — later active automations skipped for this message
   const flow = JSON.parse(automation.flow_json) as FlowTree;
-  const branchIdx = await evaluateSplit(env.DB, workspaceId, automation.id, flow.split1, message, ctx.contactKey);
+
+  const sticky = ctx.persistConversationState ? (await loadStickyBranchMap(env.DB, workspaceId, ctx.contactKey))[automation.id] : undefined;
+  const branchIdx: 0 | 1 = sticky ? sticky.branchIdx : await evaluateSplit(env.DB, workspaceId, automation.id, flow.split1, message, ctx.contactKey);
   const branch1 = flow.branches[branchIdx];
 
-  const { messages: branchMessages, waiting: waiting1 } = await runStepsFrom(env, workspaceId, ctx, automation, branch1.steps, 0, history, { branchIdx: branchIdx as 0 | 1 });
+  const { messages: branchMessages, waiting: waiting1 } = await runStepsFrom(env, workspaceId, ctx, automation, branch1.steps, 0, history, { branchIdx });
   let allMessages = branchMessages;
   let branchLabel = branch1.label;
   let waiting = waiting1;
   let executedSteps = branch1.steps;
+  let subIdxForSticky: 0 | 1 | undefined;
 
   if (!waiting1 && branch1.split2 && branch1.subBranches) {
-    const subIdx = await evaluateSplit(env.DB, workspaceId, automation.id, branch1.split2, message, ctx.contactKey);
+    const subIdx: 0 | 1 = sticky?.subBranchIdx ?? await evaluateSplit(env.DB, workspaceId, automation.id, branch1.split2, message, ctx.contactKey);
+    subIdxForSticky = subIdx;
     const subBranch = branch1.subBranches[subIdx];
-    const { messages: subMessages, waiting: waiting2 } = await runStepsFrom(env, workspaceId, ctx, automation, subBranch.steps, 0, history, { branchIdx: branchIdx as 0 | 1, subBranchIdx: subIdx as 0 | 1 });
+    const { messages: subMessages, waiting: waiting2 } = await runStepsFrom(env, workspaceId, ctx, automation, subBranch.steps, 0, history, { branchIdx, subBranchIdx: subIdx });
     allMessages = [...allMessages, ...subMessages];
     branchLabel = `${branch1.label} → ${subBranch.label}`;
     waiting = waiting2;
     executedSteps = [...branch1.steps, ...subBranch.steps];
+  }
+
+  if (ctx.persistConversationState && !sticky) {
+    await saveStickyBranch(env.DB, workspaceId, ctx.contactKey, automation.id, { branchIdx, subBranchIdx: subIdxForSticky });
   }
 
   const wasEscalated = executedSteps.some((s) => s.kind === "escalate");
