@@ -3,6 +3,7 @@ import { readWorkspaceState, buildSystemPrompt } from "./widget";
 import { listItemsForWorkspace, getItemsByIds } from "./items";
 import { toGraph, interpolate, buildUrlFromTemplate, type AutomationGraph, type AutomationNode, type NodeConfig } from "./automation-graph";
 import { loadSession, saveSession, clearCursor } from "./automation-session";
+import { receivedKeysAtNode } from "./documents";
 
 export interface EngineEnv { DB: D1Database; ANTHROPIC_API_KEY?: string }
 
@@ -13,6 +14,7 @@ function sqliteNow(): string { return new Date().toISOString().slice(0, 19).repl
 export type AutomationOutMessage =
   | { type: "text"; text: string }
   | { type: "buttons"; text: string; options: { label: string; description?: string }[] }
+  | { type: "upload"; text: string; nodeId: string; documents: { key: string; label: string; accept: string[]; maxMb: number; required: boolean; received: boolean }[] }
   | { type: "items"; text?: string; items: Array<{ id: string; name: string; title: string; description: string; price: number; currency: string; imageUrl: string; externalLink: string }> };
 
 export type RunChannel = "webchat" | "whatsapp";
@@ -204,6 +206,25 @@ async function executeNode(x: ExecCtx, node: AutomationNode): Promise<NodeOutcom
       await sendText(x, interpolate(cfg.messageText || node.title, x.vars));
       return { control: "await" };
 
+    case "upload": {
+      const specs = cfg.documents || [];
+      const received = await receivedKeysAtNode(x.env.DB, x.workspaceId, x.ctx.contactKey, node.id);
+      x.out.push({
+        type: "upload", text: interpolate(cfg.messageText || node.title, x.vars), nodeId: node.id,
+        documents: specs.map((d) => ({ ...d, received: received.has(d.key) })),
+      });
+      // WhatsApp has no upload widget — the customer just sends the file into the chat — so it gets
+      // a plain-text checklist naming each document and the formats we can accept.
+      if (!x.ctx.persistConversationState) {
+        const lines = specs.map((d) => {
+          const mark = received.has(d.key) ? "✅" : "•";
+          return `${mark} ${d.label} (${d.accept.join(", ").toUpperCase()}, max ${d.maxMb} MB)${d.required ? "" : " — optional"}`;
+        });
+        await x.ctx.deliver(`${interpolate(cfg.messageText || node.title, x.vars)}\n\n${lines.join("\n")}\n\nPlease send each one as a photo or document in this chat.`);
+      }
+      return { control: "await" };
+    }
+
     case "items": {
       const msg = await resolveItems(x, cfg.itemIds || [], cfg.urlTemplate);
       if (cfg.messageText) await sendText(x, interpolate(cfg.messageText, x.vars));
@@ -325,9 +346,23 @@ async function executeNode(x: ExecCtx, node: AutomationNode): Promise<NodeOutcom
 
 type Resolution = { startId: string | null; reprompt: AutomationNode | null; error?: string };
 
-function resolveInputAt(node: AutomationNode, message: string, vars: Record<string, string>): Resolution {
+async function resolveInputAt(x: ExecCtx, node: AutomationNode, message: string, vars: Record<string, string>): Promise<Resolution> {
   const cfg = node.config || {};
   const text = (message || "").trim();
+
+  // An upload step advances on documents arriving, not on anything the customer types. Whatever
+  // they send while documents are still outstanding gets the checklist back, naming exactly what is
+  // still missing rather than repeating the whole request.
+  if (node.kind === "upload") {
+    const specs = cfg.documents || [];
+    const received = await receivedKeysAtNode(x.env.DB, x.workspaceId, x.ctx.contactKey, node.id);
+    const outstanding = specs.filter((d) => d.required && !received.has(d.key));
+    if (!outstanding.length) {
+      if (cfg.variableKey) vars[cfg.variableKey] = specs.filter((d) => received.has(d.key)).map((d) => d.label).join(", ");
+      return { startId: node.next ?? null, reprompt: null };
+    }
+    return { startId: null, reprompt: node, error: `Still needed: ${outstanding.map((d) => d.label).join(", ")}.` };
+  }
 
   if (node.kind === "buttons") {
     const options = cfg.options || [];
@@ -413,7 +448,7 @@ export async function runAutomations(env: EngineEnv, workspaceId: string, channe
   let startId: string | null;
   if (resuming && session?.nodeId && graph.nodes[session.nodeId]) {
     const parked = graph.nodes[session.nodeId];
-    const res = resolveInputAt(parked, message, vars);
+    const res = await resolveInputAt(x, parked, message, vars);
     if (res.reprompt) {
       // Invalid answer: say why, re-ask the same node, and stay parked there.
       if (res.error) await sendText(x, res.error);
@@ -460,6 +495,37 @@ export async function runAutomationsForWidgetMessage(env: EngineEnv, workspaceId
     },
   };
   return runAutomations(env, workspaceId, "webchat", ctx, message, history);
+}
+
+// Called after a document lands, so the conversation moves on the moment the last required file is
+// in — the customer should not have to type "done" to continue a step they have already finished.
+// Returns null when documents are still outstanding, leaving the cursor where it is.
+export async function continueAfterUpload(env: EngineEnv, workspaceId: string, channel: RunChannel, ctx: RunCtx): Promise<AutomationRunResult | null> {
+  const session = await loadSession(env.DB, workspaceId, ctx.contactKey);
+  if (!session?.nodeId || !session.automationId) return null;
+
+  const automation = await env.DB.prepare(`SELECT * FROM automations2 WHERE id = ? AND workspace_id = ?`)
+    .bind(session.automationId, workspaceId).first<AutomationRow>();
+  if (!automation) return null;
+
+  const graph = toGraph(JSON.parse(automation.flow_json));
+  const node = graph.nodes[session.nodeId];
+  if (!node || node.kind !== "upload") return null;
+
+  const specs = node.config?.documents || [];
+  const received = await receivedKeysAtNode(env.DB, workspaceId, ctx.contactKey, node.id);
+  if (specs.some((d) => d.required && !received.has(d.key))) return null;
+
+  const vars = { ...(session.variables || {}) };
+  if (node.config?.variableKey) vars[node.config.variableKey] = specs.filter((d) => received.has(d.key)).map((d) => d.label).join(", ");
+
+  const out: AutomationOutMessage[] = [];
+  const x: ExecCtx = { env, workspaceId, ctx, automation, history: [], out, vars };
+  const walk = await walkFrom(x, graph, node.next ?? null);
+  if (walk.cursor) await saveSession(env.DB, workspaceId, ctx.contactKey, { automationId: automation.id, nodeId: walk.cursor, variables: vars });
+  else await clearCursor(env.DB, workspaceId, ctx.contactKey, vars);
+
+  return { handled: true, messages: out, automationName: automation.name, branchLabel: node.title };
 }
 
 export async function resumeDueAutomationWaits(env: EngineEnv, makeDeliver: (row: { workspace_id: string; channel: string; contact_key: string; phone_number_id: string }) => ((text: string) => Promise<boolean>) | null): Promise<number> {

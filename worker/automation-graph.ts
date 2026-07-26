@@ -14,6 +14,7 @@ export type NodeKind =
   | "message"   // send text (supports {{variable}} interpolation)
   | "buttons"   // send text + N tappable options, each routing to its own node; waits for a choice
   | "question"  // ask for one value, validate it, store it in a variable, then continue
+  | "upload"    // ask for one or more documents; waits until every required one has arrived
   | "items"     // show catalog item cards, with each card's link built from collected variables
   | "aiReply"   // hand the conversation to the real AI assistant
   | "aiAction"  // AI reply with one specific AI Action tool available
@@ -27,6 +28,11 @@ export type InputType = "text" | "number" | "date" | "email" | "phone";
 
 export type NodeOption = { id: string; label: string; description?: string; next: string | null };
 export type NodeCase = { id: string; label: string; match?: string; weight?: number; next: string | null };
+
+// One document the business expects at an upload node. `accept` is the list of allowed extensions;
+// it is enforced server-side against the file's real magic bytes, not just its name or the MIME type
+// the browser claims, since both of those are trivially forged.
+export type DocumentSpec = { key: string; label: string; accept: string[]; maxMb: number; required: boolean };
 export type CollectFlow = { id: string; name: string; fields: { key: string; label: string }[]; urlTemplate: string; itemIds: string[] };
 
 export type NodeConfig = {
@@ -34,6 +40,7 @@ export type NodeConfig = {
   messageText?: string;
   options?: NodeOption[];
   variableKey?: string; inputType?: InputType; required?: boolean;
+  documents?: DocumentSpec[];
   itemIds?: string[]; urlTemplate?: string;
   ruleType?: RuleType; cases?: NodeCase[]; fallbackNext?: string | null;
   activeDays?: string[]; startTime?: string; endTime?: string;
@@ -60,19 +67,26 @@ export const MAX_OPTIONS = 24;
 export const MAX_CASES = 12;
 
 // Node kinds that stop the walk and wait for the customer's next message.
-const AWAITING_KINDS = new Set<NodeKind>(["buttons", "question", "aiReply", "aiAction"]);
+const AWAITING_KINDS = new Set<NodeKind>(["buttons", "question", "upload", "aiReply", "aiAction"]);
 export function nodeAwaitsInput(kind: NodeKind): boolean { return AWAITING_KINDS.has(kind); }
 
 const DEFAULT_ICONS: Record<NodeKind, string> = {
-  trigger: "💬", message: "💬", buttons: "◉", question: "❓", items: "▤",
+  trigger: "💬", message: "💬", buttons: "◉", question: "❓", upload: "📎", items: "▤",
   aiReply: "✨", aiAction: "⚙", split: "⑂", wait: "⏱", tag: "🏷️",
   notify: "🔔", escalate: "🧑‍💼", end: "⏹",
 };
 const DEFAULT_CHIPS: Record<NodeKind, string> = {
-  trigger: "rose", message: "rose", buttons: "teal", question: "teal", items: "teal",
+  trigger: "rose", message: "rose", buttons: "teal", question: "teal", upload: "teal", items: "teal",
   aiReply: "indigo", aiAction: "indigo", split: "purple", wait: "neutral", tag: "neutral",
   notify: "purple", escalate: "human", end: "neutral",
 };
+
+// Extensions the platform can actually verify by magic bytes (see sniffFileType in documents.ts).
+// Deliberately narrow: accepting a format we cannot verify would let anything through under a
+// trusted-looking label.
+export const SUPPORTED_UPLOAD_TYPES = ["pdf", "jpg", "png", "webp", "heic"] as const;
+export const MAX_UPLOAD_MB = 5;
+export const MAX_DOCUMENTS_PER_NODE = 10;
 
 export function nodeIcon(node: AutomationNode): string { return node.icon || DEFAULT_ICONS[node.kind] || "•"; }
 export function nodeChip(node: AutomationNode): string { return node.chip || DEFAULT_CHIPS[node.kind] || "neutral"; }
@@ -101,7 +115,7 @@ export function buildUrlFromTemplate(template: string, vars: Record<string, unkn
 function str(v: unknown, max: number): string { return typeof v === "string" ? v.slice(0, max) : ""; }
 function nextOf(v: unknown): string | null { return typeof v === "string" && v ? v.slice(0, 80) : null; }
 
-const KINDS = new Set<NodeKind>(["trigger", "message", "buttons", "question", "items", "aiReply", "aiAction", "split", "wait", "tag", "notify", "escalate", "end"]);
+const KINDS = new Set<NodeKind>(["trigger", "message", "buttons", "question", "upload", "items", "aiReply", "aiAction", "split", "wait", "tag", "notify", "escalate", "end"]);
 
 function sanitizeConfig(raw: unknown): NodeConfig {
   const c = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
@@ -117,6 +131,25 @@ function sanitizeConfig(raw: unknown): NodeConfig {
   if (typeof c.variableKey === "string") cfg.variableKey = c.variableKey.replace(/[^a-zA-Z0-9_]/g, "").slice(0, 60);
   if (typeof c.inputType === "string" && ["text", "number", "date", "email", "phone"].includes(c.inputType)) cfg.inputType = c.inputType as InputType;
   if (typeof c.required === "boolean") cfg.required = c.required;
+  if (Array.isArray(c.documents)) {
+    cfg.documents = c.documents.slice(0, MAX_DOCUMENTS_PER_NODE).map((d) => {
+      const r = (d && typeof d === "object" ? d : {}) as Record<string, unknown>;
+      const accept = Array.isArray(r.accept)
+        ? r.accept.filter((x): x is string => typeof x === "string")
+            .map((x) => x.toLowerCase().replace(/^\./, ""))
+            .filter((x) => (SUPPORTED_UPLOAD_TYPES as readonly string[]).includes(x))
+        : [];
+      return {
+        // The key names the document in stored records and in {{variables}}, so it has to be a
+        // stable identifier rather than the human label, which the business may reword later.
+        key: str(r.key, 60).replace(/[^a-zA-Z0-9_]/g, "") || `doc_${Math.random().toString(36).slice(2, 8)}`,
+        label: str(r.label, 120) || "Document",
+        accept: accept.length ? accept : [...SUPPORTED_UPLOAD_TYPES],
+        maxMb: typeof r.maxMb === "number" ? Math.max(1, Math.min(MAX_UPLOAD_MB, Math.round(r.maxMb))) : MAX_UPLOAD_MB,
+        required: r.required !== false,
+      };
+    }).filter((d) => d.label);
+  }
   if (Array.isArray(c.itemIds)) cfg.itemIds = c.itemIds.filter((x): x is string => typeof x === "string").slice(0, 40);
   if (typeof c.urlTemplate === "string") cfg.urlTemplate = c.urlTemplate.slice(0, 2000);
   if (typeof c.ruleType === "string" && ["conditional", "ab", "time", "freq"].includes(c.ruleType)) cfg.ruleType = c.ruleType as RuleType;
@@ -204,6 +237,7 @@ export function nodeIsIncomplete(node: AutomationNode): boolean {
     case "message": return !(c.messageText || "").trim();
     case "buttons": return !(c.messageText || "").trim() || !(c.options || []).length || (c.options || []).some((o) => !o.label.trim());
     case "question": return !(c.messageText || "").trim() || !(c.variableKey || "").trim();
+    case "upload": return !(c.messageText || "").trim() || !(c.documents || []).length || (c.documents || []).some((d) => !d.label.trim() || !d.accept.length);
     case "items": return !(c.itemIds || []).length;
     case "split": return (c.ruleType || "conditional") === "conditional"
       ? !(c.cases || []).length || (c.cases || []).some((k) => !(k.match || "").trim())

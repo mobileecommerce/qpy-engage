@@ -52,7 +52,7 @@
     root.style.setProperty("--qpy-glow", hexToRgba(color, 0.45));
 
     var style = document.createElement("style");
-    style.textContent = "#qpy-engage-widget{position:fixed;right:22px;bottom:22px;z-index:2147483647;font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#20232b}#qpy-engage-widget.qpy-left{right:auto;left:22px}.qpy-launch{width:54px;height:54px;border:0;border-radius:50%;background:var(--qpy-color,#4c50ee);color:#fff;font-size:20px;font-weight:800;box-shadow:0 10px 30px #0003;display:grid;place-items:center}.qpy-launch[hidden]{display:none}.qpy-launch img{width:28px;height:28px;border-radius:50%;object-fit:cover}.qpy-launch.effect-pulse{animation:qpy-pulse 2.2s infinite}.qpy-launch.effect-bounce{animation:qpy-bounce 2.6s infinite}@keyframes qpy-pulse{0%,100%{box-shadow:0 10px 30px #0003,0 0 0 0 var(--qpy-glow,rgba(76,80,238,.45))}50%{box-shadow:0 10px 30px #0003,0 0 0 14px rgba(0,0,0,0)}}@keyframes qpy-bounce{0%,20%,50%,80%,100%{transform:translateY(0)}40%{transform:translateY(-10px)}60%{transform:translateY(-5px)}}.qpy-panel{position:absolute;right:0;bottom:66px;width:min(340px,calc(100vw - 28px));height:440px;background:#fff;border:1px solid #e1e3e8;border-radius:16px;box-shadow:0 18px 60px #0003;overflow:hidden;display:flex;flex-direction:column}.qpy-panel[hidden]{display:none}#qpy-engage-widget.qpy-left .qpy-panel{right:auto;left:0}.qpy-panel header{height:60px;padding:0 15px;background:#171923;color:#fff;display:grid;grid-template-columns:1fr auto;align-content:center;flex:none}.qpy-panel header strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.qpy-panel header small{grid-column:1;color:#b9bec8;font-size:11px}.qpy-panel header button{grid-column:2;grid-row:1/3;border:0;background:transparent;color:#fff;font-size:24px}.qpy-panel main{flex:1;padding:14px;background:#f5f6f8;overflow:auto}.qpy-panel main p{max-width:78%;padding:9px 11px;border-radius:10px;line-height:1.45;margin:7px 0;white-space:pre-line}.qpy-ai{background:#fff}.qpy-user{background:var(--qpy-color,#4c50ee);color:#fff;margin-left:auto!important}.qpy-system{background:transparent!important;color:#8d94a1;font-size:11px;text-align:center;max-width:100%!important;margin:4px auto!important}.qpy-typing{display:flex;align-items:center;gap:6px;padding:9px 11px!important}.qpy-typing em{font-style:normal;font-size:11px;color:#69707e}.qpy-typing span{width:6px;height:6px;border-radius:50%;background:#9aa1af;animation:qpy-typing-bounce 1.2s infinite;flex:none}.qpy-typing span:nth-child(3){animation-delay:.2s}.qpy-typing span:nth-child(4){animation-delay:.4s}@keyframes qpy-typing-bounce{0%,60%,100%{transform:translateY(0);opacity:.5}30%{transform:translateY(-4px);opacity:1}}.qpy-panel form{height:64px;display:flex;gap:7px;padding:10px;border-top:1px solid #e1e3e8;flex:none}.qpy-panel input{flex:1;min-width:0;border:1px solid #d9dce3;border-radius:8px;padding:0 10px}.qpy-panel form button{width:42px;border:0;border-radius:8px;background:var(--qpy-color,#4c50ee);color:#fff}.qpy-panel form button:disabled{opacity:.5}.qpy-buttons{display:flex;flex-direction:column;gap:6px;max-width:88%;margin:7px 0 12px}.qpy-buttons button{border:1px solid var(--qpy-color,#4c50ee);background:#fff;color:var(--qpy-color,#4c50ee);border-radius:20px;padding:8px 14px;font-size:12.5px;font-weight:600;text-align:center}.qpy-buttons button:disabled{opacity:.5}.qpy-buttons button small{display:block;font-size:10.5px;font-weight:400;opacity:.75;margin-top:2px}.qpy-items{display:flex;gap:10px;overflow-x:auto;margin:7px 0 12px;padding-bottom:4px}.qpy-item-card{flex:0 0 auto;width:170px;border:1px solid #e1e3e8;border-radius:10px;overflow:hidden;background:#fff;display:flex;flex-direction:column}.qpy-item-card img{width:100%;height:90px;object-fit:cover;background:#eef0f4}.qpy-item-card .qpy-item-body{padding:8px 9px;display:flex;flex-direction:column;gap:4px;flex:1}.qpy-item-card strong{font-size:12px;line-height:1.3}.qpy-item-card small{font-size:10.5px;color:#6b7280}.qpy-item-card .qpy-item-price{font-size:12px;font-weight:700;color:var(--qpy-color,#4c50ee)}.qpy-item-card a{margin-top:auto;display:block;text-align:center;border:0;background:var(--qpy-color,#4c50ee);color:#fff;border-radius:7px;padding:6px;font-size:11.5px;font-weight:700;text-decoration:none}";
+    style.textContent = "#qpy-engage-widget{position:fixed;right:22px;bottom:22px;z-index:2147483647;font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#20232b}#qpy-engage-widget.qpy-left{right:auto;left:22px}.qpy-launch{width:54px;height:54px;border:0;border-radius:50%;background:var(--qpy-color,#4c50ee);color:#fff;font-size:20px;font-weight:800;box-shadow:0 10px 30px #0003;display:grid;place-items:center}.qpy-launch[hidden]{display:none}.qpy-launch img{width:28px;height:28px;border-radius:50%;object-fit:cover}.qpy-launch.effect-pulse{animation:qpy-pulse 2.2s infinite}.qpy-launch.effect-bounce{animation:qpy-bounce 2.6s infinite}@keyframes qpy-pulse{0%,100%{box-shadow:0 10px 30px #0003,0 0 0 0 var(--qpy-glow,rgba(76,80,238,.45))}50%{box-shadow:0 10px 30px #0003,0 0 0 14px rgba(0,0,0,0)}}@keyframes qpy-bounce{0%,20%,50%,80%,100%{transform:translateY(0)}40%{transform:translateY(-10px)}60%{transform:translateY(-5px)}}.qpy-panel{position:absolute;right:0;bottom:66px;width:min(340px,calc(100vw - 28px));height:440px;background:#fff;border:1px solid #e1e3e8;border-radius:16px;box-shadow:0 18px 60px #0003;overflow:hidden;display:flex;flex-direction:column}.qpy-panel[hidden]{display:none}#qpy-engage-widget.qpy-left .qpy-panel{right:auto;left:0}.qpy-panel header{height:60px;padding:0 15px;background:#171923;color:#fff;display:grid;grid-template-columns:1fr auto;align-content:center;flex:none}.qpy-panel header strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.qpy-panel header small{grid-column:1;color:#b9bec8;font-size:11px}.qpy-panel header button{grid-column:2;grid-row:1/3;border:0;background:transparent;color:#fff;font-size:24px}.qpy-panel main{flex:1;padding:14px;background:#f5f6f8;overflow:auto}.qpy-panel main p{max-width:78%;padding:9px 11px;border-radius:10px;line-height:1.45;margin:7px 0;white-space:pre-line}.qpy-ai{background:#fff}.qpy-user{background:var(--qpy-color,#4c50ee);color:#fff;margin-left:auto!important}.qpy-system{background:transparent!important;color:#8d94a1;font-size:11px;text-align:center;max-width:100%!important;margin:4px auto!important}.qpy-typing{display:flex;align-items:center;gap:6px;padding:9px 11px!important}.qpy-typing em{font-style:normal;font-size:11px;color:#69707e}.qpy-typing span{width:6px;height:6px;border-radius:50%;background:#9aa1af;animation:qpy-typing-bounce 1.2s infinite;flex:none}.qpy-typing span:nth-child(3){animation-delay:.2s}.qpy-typing span:nth-child(4){animation-delay:.4s}@keyframes qpy-typing-bounce{0%,60%,100%{transform:translateY(0);opacity:.5}30%{transform:translateY(-4px);opacity:1}}.qpy-panel form{height:64px;display:flex;gap:7px;padding:10px;border-top:1px solid #e1e3e8;flex:none}.qpy-panel input{flex:1;min-width:0;border:1px solid #d9dce3;border-radius:8px;padding:0 10px}.qpy-panel form button{width:42px;border:0;border-radius:8px;background:var(--qpy-color,#4c50ee);color:#fff}.qpy-panel form button:disabled{opacity:.5}.qpy-buttons{display:flex;flex-direction:column;gap:6px;max-width:88%;margin:7px 0 12px}.qpy-buttons button{border:1px solid var(--qpy-color,#4c50ee);background:#fff;color:var(--qpy-color,#4c50ee);border-radius:20px;padding:8px 14px;font-size:12.5px;font-weight:600;text-align:center}.qpy-buttons button:disabled{opacity:.5}.qpy-buttons button small{display:block;font-size:10.5px;font-weight:400;opacity:.75;margin-top:2px}.qpy-uploads{display:flex;flex-direction:column;gap:8px;max-width:88%;margin:7px 0 12px}.qpy-upload-row{border:1px solid #d9dce3;border-radius:10px;background:#fff;padding:9px 10px;display:flex;flex-direction:column;gap:5px}.qpy-upload-row.done{border-color:#39a06a;background:#f3fbf6}.qpy-upload-row.error{border-color:#d2544a;background:#fdf4f3}.qpy-upload-row strong{font-size:12px}.qpy-upload-row small{font-size:10.5px;color:#6b7280}.qpy-upload-row em{font-style:normal;font-size:10.5px;color:#6b7280;word-break:break-word}.qpy-upload-row.error em{color:#b8332a}.qpy-upload-row.done em{color:#2f7d54}.qpy-upload-pick{display:inline-block;text-align:center;border:1px solid var(--qpy-color,#4c50ee);color:var(--qpy-color,#4c50ee);border-radius:8px;padding:6px 12px;font-size:11.5px;font-weight:700;cursor:pointer}.qpy-upload-pick[disabled]{opacity:.5;cursor:progress}.qpy-upload-pick input{display:none}.qpy-items{display:flex;gap:10px;overflow-x:auto;margin:7px 0 12px;padding-bottom:4px}.qpy-item-card{flex:0 0 auto;width:170px;border:1px solid #e1e3e8;border-radius:10px;overflow:hidden;background:#fff;display:flex;flex-direction:column}.qpy-item-card img{width:100%;height:90px;object-fit:cover;background:#eef0f4}.qpy-item-card .qpy-item-body{padding:8px 9px;display:flex;flex-direction:column;gap:4px;flex:1}.qpy-item-card strong{font-size:12px;line-height:1.3}.qpy-item-card small{font-size:10.5px;color:#6b7280}.qpy-item-card .qpy-item-price{font-size:12px;font-weight:700;color:var(--qpy-color,#4c50ee)}.qpy-item-card a{margin-top:auto;display:block;text-align:center;border:0;background:var(--qpy-color,#4c50ee);color:#fff;border-radius:7px;padding:6px;font-size:11.5px;font-weight:700;text-decoration:none}";
     document.head.appendChild(style);
     document.body.appendChild(root);
 
@@ -183,9 +183,88 @@
       messages.scrollTop = messages.scrollHeight;
     }
 
+    // An upload step renders one row per requested document. Each row uploads on its own as soon as
+    // a file is chosen, so a customer sending three documents gets three independent successes or
+    // failures rather than one all-or-nothing submit.
+    function appendUpload(text, nodeId, documents) {
+      hideTyping();
+      if (text) appendMessage("qpy-ai", text);
+      var wrap = document.createElement("div");
+      wrap.className = "qpy-uploads";
+
+      (documents || []).forEach(function (doc) {
+        var row = document.createElement("div");
+        row.className = "qpy-upload-row" + (doc.received ? " done" : "");
+
+        var label = document.createElement("strong");
+        label.textContent = doc.label + (doc.required ? "" : " (optional)");
+        var hint = document.createElement("small");
+        hint.textContent = (doc.accept || []).join(", ").toUpperCase() + " • max " + doc.maxMb + " MB";
+
+        var pick = document.createElement("label");
+        pick.className = "qpy-upload-pick";
+        pick.textContent = doc.received ? "✓ Received — replace" : "Choose file";
+        var input = document.createElement("input");
+        input.type = "file";
+        input.accept = (doc.accept || []).map(function (a) { return "." + a; }).join(",");
+
+        var status = document.createElement("em");
+
+        input.onchange = function () {
+          var file = input.files && input.files[0];
+          if (!file) return;
+          row.classList.remove("error");
+          status.textContent = "Uploading " + file.name + "…";
+          pick.setAttribute("disabled", "true");
+
+          var form = new FormData();
+          form.append("workspaceId", workspaceId);
+          form.append("sessionId", sessionId);
+          form.append("docKey", doc.key);
+          form.append("file", file);
+
+          fetch(API_ORIGIN + "/api/widget/upload", { method: "POST", body: form })
+            .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+            .then(function (res) {
+              pick.removeAttribute("disabled");
+              if (!res.ok || res.data.error) {
+                row.classList.add("error");
+                // The server's message names the real reason (wrong format, too large), so show it
+                // rather than a generic failure the customer can't act on.
+                status.textContent = res.data.error || "That upload did not go through.";
+                input.value = "";
+                return;
+              }
+              row.classList.add("done");
+              pick.textContent = "✓ Received — replace";
+              status.textContent = file.name;
+              appendMessage("qpy-user", "📎 " + doc.label + ": " + file.name);
+              if (res.data.messages && res.data.messages.length) renderFlowMessages(res.data.messages);
+            })
+            .catch(function () {
+              pick.removeAttribute("disabled");
+              row.classList.add("error");
+              status.textContent = "Upload failed — please check your connection and try again.";
+              input.value = "";
+            });
+        };
+
+        pick.appendChild(input);
+        row.appendChild(label);
+        row.appendChild(hint);
+        row.appendChild(pick);
+        row.appendChild(status);
+        wrap.appendChild(row);
+      });
+
+      messages.appendChild(wrap);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
     function renderFlowMessages(list) {
       (list || []).forEach(function (m) {
         if (m.type === "buttons") appendButtons(m.text, m.options || []);
+        else if (m.type === "upload") appendUpload(m.text, m.nodeId, m.documents || []);
         else if (m.type === "items") appendItems(m.text, m.items || []);
         else appendMessage("qpy-ai", m.text);
       });

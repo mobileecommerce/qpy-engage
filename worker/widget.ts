@@ -3,7 +3,10 @@ import { getStoredKnowledgeContent } from "./knowledge";
 import { saveSubmission } from "./leads";
 import { requireSession, type AuthEnv } from "./auth";
 import { runFlowForWidgetMessage, type FlowOutMessage } from "./flows";
-import { runAutomationsForWidgetMessage } from "./automations";
+import { runAutomationsForWidgetMessage, continueAfterUpload } from "./automations";
+import { loadSession } from "./automation-session";
+import { toGraph } from "./automation-graph";
+import { saveDocument, validateAgainstSpec, listDocumentsForContact, readDocument, receivedKeysAtNode, MAX_UPLOAD_BYTES } from "./documents";
 
 export interface WidgetEnv extends AuthEnv {
   DB: D1Database;
@@ -685,14 +688,118 @@ async function addNote(request: Request, env: WidgetEnv): Promise<Response> {
   return json(request, { ok: true, authorName });
 }
 
+// Public document upload. The guard that matters is not the file itself but the context: a file is
+// only accepted when this visitor's conversation is genuinely parked at an upload node that is
+// asking for this exact document key. Without that check the endpoint would be an open write into
+// any workspace's database for anyone who knows a workspace id.
+async function uploadDocument(request: Request, env: WidgetEnv): Promise<Response> {
+  let form: FormData;
+  try { form = await request.formData(); }
+  catch { return widgetJson({ error: "Could not read the uploaded file." }, 400); }
+
+  const workspaceId = String(form.get("workspaceId") || "").trim();
+  const sessionId = String(form.get("sessionId") || "").trim().slice(0, 80);
+  const docKey = String(form.get("docKey") || "").trim().slice(0, 60);
+  const file = form.get("file");
+
+  if (!workspaceId || !sessionId || !docKey) return widgetJson({ error: "Missing upload details." }, 400);
+  if (!(file instanceof File)) return widgetJson({ error: "No file was attached." }, 400);
+  if (file.size > MAX_UPLOAD_BYTES) return widgetJson({ error: "That file is too large." }, 413);
+
+  const workspace = await env.DB.prepare("SELECT id, status FROM workspaces WHERE id = ?").bind(workspaceId).first<{ id: string; status: string | null }>();
+  if (!workspace) return widgetJson({ error: "Unknown workspace." }, 404);
+  if (workspace.status === "disabled") return widgetJson({ error: "This chat is temporarily unavailable." }, 503);
+
+  await ensureWidgetSchema(env.DB);
+  if (!(await withinRateLimit(env.DB, workspaceId, sessionId))) {
+    return widgetJson({ error: "Too many uploads right now. Please try again shortly." }, 429);
+  }
+
+  const session = await loadSession(env.DB, workspaceId, sessionId);
+  if (!session?.nodeId || !session.automationId) return widgetJson({ error: "This conversation is not expecting a document." }, 409);
+
+  const row = await env.DB.prepare(`SELECT flow_json FROM automations2 WHERE id = ? AND workspace_id = ?`)
+    .bind(session.automationId, workspaceId).first<{ flow_json: string }>();
+  if (!row) return widgetJson({ error: "This conversation is not expecting a document." }, 409);
+
+  const graph = toGraph(JSON.parse(row.flow_json));
+  const node = graph.nodes[session.nodeId];
+  if (!node || node.kind !== "upload") return widgetJson({ error: "This conversation is not expecting a document." }, 409);
+
+  const spec = (node.config?.documents || []).find((d) => d.key === docKey);
+  if (!spec) return widgetJson({ error: "That document is not being requested here." }, 409);
+
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const check = validateAgainstSpec(bytes, spec);
+  if (!check.ok) return widgetJson({ error: check.error }, 415);
+
+  await saveDocument(env.DB, {
+    workspaceId, contactKey: sessionId, automationId: session.automationId, nodeId: node.id,
+    docKey: spec.key, docLabel: spec.label, fileName: file.name || `${spec.key}.${check.ext}`,
+    mimeType: check.mime, channel: "webchat", bytes,
+  });
+
+  const received = await receivedKeysAtNode(env.DB, workspaceId, sessionId, node.id);
+  const outstanding = (node.config?.documents || []).filter((d) => d.required && !received.has(d.key));
+
+  // Record the upload in the transcript so the agent reviewing this conversation in Inbox can see
+  // what arrived and when, in order, rather than only a separate documents list.
+  await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'user', ?, ?)`)
+    .bind(workspaceId, sessionId, `📎 Uploaded ${spec.label}: ${file.name}`, sqliteNow()).run();
+
+  const followUp = outstanding.length === 0
+    ? await continueAfterUpload(env, workspaceId, "webchat", {
+        channel: "webchat", contactKey: sessionId, persistConversationState: true,
+        deliver: async (text: string) => {
+          await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`)
+            .bind(workspaceId, sessionId, text, sqliteNow()).run();
+          return true;
+        },
+      })
+    : null;
+
+  return widgetJson({
+    ok: true, docKey: spec.key, fileName: file.name, sizeBytes: bytes.length,
+    outstanding: outstanding.map((d) => ({ key: d.key, label: d.label })),
+    complete: outstanding.length === 0,
+    messages: followUp?.messages || [],
+  });
+}
+
+async function listConversationDocuments(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const contactKey = new URL(request.url).searchParams.get("contactKey") || "";
+  if (!contactKey) return json(request, { error: "Missing contactKey" }, 400);
+  return json(request, { documents: await listDocumentsForContact(env.DB, session.workspaceId, contactKey) });
+}
+
+async function downloadDocument(request: Request, env: WidgetEnv, id: string): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const found = await readDocument(env.DB, session.workspaceId, id);
+  if (!found) return json(request, { error: "Not found" }, 404);
+  return new Response(found.bytes.buffer as ArrayBuffer, {
+    headers: {
+      "content-type": found.meta.mimeType || "application/octet-stream",
+      // attachment, never inline: a customer-supplied file must not be rendered in the dashboard's
+      // own origin where it could script against a logged-in agent's session.
+      "content-disposition": `attachment; filename="${found.meta.fileName.replace(/["\\]/g, "")}"`,
+      "content-security-policy": "default-src 'none'",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
 export async function handleWidgetRequest(request: Request, env: WidgetEnv): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/widget/")) return null;
 
   // Public, unauthenticated widget endpoints — wildcard CORS, since any customer site embeds these.
-  if (url.pathname === "/api/widget/respond" || url.pathname === "/api/widget/config" || url.pathname === "/api/widget/poll" || url.pathname === "/api/widget/history") {
+  if (url.pathname === "/api/widget/respond" || url.pathname === "/api/widget/config" || url.pathname === "/api/widget/poll" || url.pathname === "/api/widget/history" || url.pathname === "/api/widget/upload") {
     if (request.method === "OPTIONS") return widgetCorsPreflight();
     if (url.pathname === "/api/widget/respond" && request.method === "POST") return respond(request, env);
+    if (url.pathname === "/api/widget/upload" && request.method === "POST") return uploadDocument(request, env);
     if (url.pathname === "/api/widget/config" && request.method === "GET") return getConfig(request, env);
     if (url.pathname === "/api/widget/poll" && request.method === "GET") return pollMessages(request, env);
     if (url.pathname === "/api/widget/history" && request.method === "GET") return getHistory(request, env);
@@ -710,5 +817,9 @@ export async function handleWidgetRequest(request: Request, env: WidgetEnv): Pro
   if (url.pathname === "/api/widget/typing" && request.method === "POST") return setAgentTyping(request, env);
   if (url.pathname === "/api/widget/notes" && request.method === "GET") return listNotes(request, env);
   if (url.pathname === "/api/widget/notes" && request.method === "POST") return addNote(request, env);
+  if (url.pathname === "/api/widget/documents" && request.method === "GET") return listConversationDocuments(request, env);
+  if (url.pathname.startsWith("/api/widget/documents/") && request.method === "GET") {
+    return downloadDocument(request, env, url.pathname.slice("/api/widget/documents/".length));
+  }
   return json(request, { error: "Not found" }, 404);
 }

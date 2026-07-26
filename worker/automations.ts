@@ -654,6 +654,7 @@ async function dryRunAutomation(request: Request, env: AutomationsEnv, id: strin
 export {
   runAutomations,
   runAutomationsForWidgetMessage,
+  continueAfterUpload,
   resumeDueAutomationWaits,
   type RunCtx,
   type RunChannel,

@@ -1309,14 +1309,19 @@ const automationTemplates:{name:string;trigger:string;action:string}[]=[{name:"W
 // ── v2 automation graph (mirrors worker/automation-graph.ts) ──
 // Any node can point at any node, so a wide menu tree, a deep linear chain, and a loop back to a
 // main menu are all just edges — no shape is privileged the way v1's fixed 2-branch tree was.
-type AutoNodeKind = "trigger"|"message"|"buttons"|"question"|"items"|"aiReply"|"aiAction"|"split"|"wait"|"tag"|"notify"|"escalate"|"end";
+type AutoNodeKind = "trigger"|"message"|"buttons"|"question"|"upload"|"items"|"aiReply"|"aiAction"|"split"|"wait"|"tag"|"notify"|"escalate"|"end";
 type AutoNodeOption = { id:string; label:string; description?:string; next:string|null };
 type AutoNodeCase = { id:string; label:string; match?:string; weight?:number; next:string|null };
+type AutoDocumentSpec = { key:string; label:string; accept:string[]; maxMb:number; required:boolean };
+// Kept in step with SUPPORTED_UPLOAD_TYPES in worker/automation-graph.ts — the server only accepts
+// formats it can verify by magic bytes, so the picker must not offer any others.
+const UPLOAD_TYPES=["pdf","jpg","png","webp","heic"] as const;
 type AutoStepConfig = {
   channels?:string[];
   messageText?:string;
   options?:AutoNodeOption[];
   variableKey?:string; inputType?:"text"|"number"|"date"|"email"|"phone"; required?:boolean;
+  documents?:AutoDocumentSpec[];
   itemIds?:string[]; urlTemplate?:string;
   ruleType?:"conditional"|"ab"|"time"|"freq"; cases?:AutoNodeCase[]; fallbackNext?:string|null;
   activeDays?:string[]; startTime?:string; endTime?:string;
@@ -1346,6 +1351,7 @@ const AUTO_NODE_META:Record<AutoNodeKind,{icon:string;chip:string;label:string}>
   message:{icon:"💬",chip:"rose",label:"Send message"},
   buttons:{icon:"◉",chip:"teal",label:"Ask with options"},
   question:{icon:"❓",chip:"teal",label:"Ask & store answer"},
+  upload:{icon:"📎",chip:"teal",label:"Request documents"},
   items:{icon:"▤",chip:"teal",label:"Show catalog items"},
   aiReply:{icon:"✨",chip:"indigo",label:"AI reply"},
   aiAction:{icon:"⚙",chip:"indigo",label:"AI reply + action"},
@@ -1357,7 +1363,7 @@ const AUTO_NODE_META:Record<AutoNodeKind,{icon:string;chip:string;label:string}>
   end:{icon:"⏹",chip:"neutral",label:"End"},
 };
 
-const NEW_NODE_KINDS:AutoNodeKind[]=["message","buttons","question","items","aiReply","aiAction","split","wait","tag","notify","escalate","end"];
+const NEW_NODE_KINDS:AutoNodeKind[]=["message","buttons","question","upload","items","aiReply","aiAction","split","wait","tag","notify","escalate","end"];
 
 function defaultConfigFor(kind:AutoNodeKind):AutoStepConfig{
   switch(kind){
@@ -1365,6 +1371,7 @@ function defaultConfigFor(kind:AutoNodeKind):AutoStepConfig{
     case "message": return {messageText:""};
     case "buttons": return {messageText:"",options:[]};
     case "question": return {messageText:"",variableKey:"",inputType:"text"};
+    case "upload": return {messageText:"",documents:[{key:"document_1",label:"",accept:["pdf","jpg","png"],maxMb:5,required:true}]};
     case "items": return {itemIds:[],urlTemplate:""};
     case "split": return {ruleType:"conditional",cases:[{id:crypto.randomUUID(),label:"Matches",match:"",next:null}],fallbackNext:null};
     case "wait": return {waitAmount:1,waitUnit:"hours"};
@@ -1446,6 +1453,7 @@ function nodeIsIncomplete(node:AutoNode):boolean{
     case "message": return !(c.messageText||"").trim();
     case "buttons": return !(c.messageText||"").trim()||!(c.options||[]).length||(c.options||[]).some(o=>!o.label.trim());
     case "question": return !(c.messageText||"").trim()||!(c.variableKey||"").trim();
+    case "upload": return !(c.messageText||"").trim()||!(c.documents||[]).length||(c.documents||[]).some(d=>!d.label.trim()||!d.accept.length);
     case "items": return !(c.itemIds||[]).length;
     case "split": return (c.ruleType||"conditional")==="conditional"
       ? !(c.cases||[]).length||(c.cases||[]).some(k=>!(k.match||"").trim())
@@ -1763,7 +1771,7 @@ function AutoNodeCard({node,onClick,onDelete}:{node:AutoNode;onClick:()=>void;on
   const incomplete=nodeIsIncomplete(node);
   const meta=AUTO_NODE_META[node.kind];
   const cfg=node.config||{};
-  const preview=node.kind==="buttons"||node.kind==="message"||node.kind==="question"
+  const preview=node.kind==="buttons"||node.kind==="message"||node.kind==="question"||node.kind==="upload"
     ? (cfg.messageText||"").slice(0,70)
     : node.kind==="items" ? `${(cfg.itemIds||[]).length} item(s)`
     : node.kind==="tag" ? cfg.tagName||""
@@ -1840,6 +1848,26 @@ function StepDrawer({node,graph,aiActions,items,onClose,onSave,onDelete}:{node:A
   const addOption=()=>update({options:[...options,{id:crypto.randomUUID(),label:"",description:"",next:null}]});
   const updateOption=(id:string,patch:Partial<AutoNodeOption>)=>update({options:options.map(o=>o.id===id?{...o,...patch}:o)});
   const removeOption=(id:string)=>update({options:options.filter(o=>o.id!==id)});
+
+  // Documents (upload node). The key is generated from the label once and then left alone: it is
+  // what stored files are filed under, so renaming the label later must not orphan them.
+  const documents=config.documents||[];
+  const updateDocument=(i:number,patch:Partial<AutoDocumentSpec>)=>update({documents:documents.map((d,j)=>{
+    if(j!==i)return d;
+    const merged={...d,...patch};
+    if(patch.label!==undefined&&!d.key.trim()){
+      merged.key=patch.label.toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"").slice(0,60)||`document_${i+1}`;
+    }
+    return merged;
+  })});
+  const addDocument=()=>update({documents:[...documents,{key:`document_${documents.length+1}`,label:"",accept:["pdf","jpg","png"],maxMb:5,required:true}]});
+  const removeDocument=(i:number)=>update({documents:documents.filter((_,j)=>j!==i)});
+  const toggleDocFormat=(i:number,t:string)=>{
+    const current=documents[i]?.accept||[];
+    const next=current.includes(t)?current.filter(x=>x!==t):[...current,t];
+    // Never let the list empty out — a document accepting nothing could never be satisfied.
+    if(next.length)updateDocument(i,{accept:next});
+  };
 
   // Cases (split node) — N-way keyword/weight branching, was hardcoded binary in v1.
   const cases=config.cases||[];
@@ -1919,6 +1947,31 @@ function StepDrawer({node,graph,aiActions,items,onClose,onSave,onDelete}:{node:A
         <label>Expected answer<select value={config.inputType||"text"} onChange={e=>update({inputType:e.target.value as AutoStepConfig["inputType"]})}>
           <option value="text">Any text</option><option value="number">A number</option><option value="date">A date</option><option value="email">An email address</option><option value="phone">A phone number</option>
         </select><small style={{fontWeight:400,color:"#8b93a1"}}>Anything that doesn&apos;t fit is rejected and the question is asked again.</small></label>
+      </>}
+
+      {draft.kind==="upload"&&<>
+        <label>What to ask for<textarea rows={2} value={config.messageText||""} onChange={e=>update({messageText:e.target.value})} placeholder="Please upload the documents for your permit renewal."/></label>
+        <label>Documents requested — the step waits until every required one has arrived
+          <div className="flow-options-list">
+            {documents.map((d,i)=><div className="doc-spec-row" key={d.key||i}>
+              <input placeholder="Document name (e.g. Passport copy)" value={d.label} onChange={e=>updateDocument(i,{label:e.target.value})}/>
+              <div className="doc-spec-formats">
+                {UPLOAD_TYPES.map(t=><label key={t} className={d.accept.includes(t)?"on":""}>
+                  <input type="checkbox" checked={d.accept.includes(t)} onChange={()=>toggleDocFormat(i,t)}/>{t.toUpperCase()}
+                </label>)}
+              </div>
+              <div className="doc-spec-meta">
+                <label>Max size<select value={d.maxMb} onChange={e=>updateDocument(i,{maxMb:Number(e.target.value)})}>
+                  {[1,2,3,5].map(mb=><option key={mb} value={mb}>{mb} MB</option>)}
+                </select></label>
+                <label className="doc-spec-required"><input type="checkbox" checked={d.required} onChange={e=>updateDocument(i,{required:e.target.checked})}/> Required</label>
+                <button type="button" onClick={()=>removeDocument(i)} disabled={documents.length<=1}>Remove</button>
+              </div>
+            </div>)}
+          </div>
+          <button type="button" className="secondary-btn" onClick={addDocument}>＋ Add document</button>
+          <small style={{fontWeight:400,color:"#8b93a1"}}>Files are checked by their real contents, not their name — a renamed file of the wrong type is rejected. This confirms the format only; it can&apos;t confirm the document is genuine.</small>
+        </label>
       </>}
 
       {draft.kind==="items"&&<>

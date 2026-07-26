@@ -32,6 +32,10 @@ yarn-error.log*
 .env*
 !.env.example
 
+# wrangler local secrets — real API keys live here during `vinext dev`
+.dev.vars
+.dev.vars.*
+
 # vercel
 .vercel
 
