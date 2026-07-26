@@ -656,26 +656,23 @@ async function resolveLinkParams(db: D1Database, workspaceId: string, ctx: RunCt
 // Safety net for a separate, real failure mode than the linkParams gap above: the model can write
 // a reply that promises to show items ("take a look at these options...") without actually calling
 // show_items that turn at all — a text/tool-use mismatch, not a params problem. Detected narrowly:
-// the customer just gave a short yes/confirm reply to our own "Is that correct?" summary question
-// (the literal phrase every workspace's prompt is told to use before showing items) and no items
-// were shown. In that case, show the workspace's real catalog rather than leave the promise empty.
+// the customer just gave a short affirmative-sounding reply AND we already have real, previously
+// persisted values for this session (saved independently via set_link_params — see resolveLinkParams)
+// — i.e. we're clearly mid-booking-flow — but no items were shown. Deliberately does NOT require the
+// prior assistant message to contain an exact phrase like "Is that correct?": that literal-phrase
+// check proved too brittle, since the model doesn't always use the exact wording its prompt asks for.
 function looksAffirmative(text: string): boolean {
-  return /^\s*(yes|yeah|yep|yup|correct|that'?s correct|that is correct|confirmed|sounds good|perfect|right|ok|okay)\b/i.test((text || "").trim());
-}
-
-function priorMessageAsksConfirmation(history: ChatMessage[]): boolean {
-  const prior = history[history.length - 2];
-  return Boolean(prior && prior.role === "assistant" && /is that correct/i.test(prior.content));
+  return /^\s*(yes|yeah|yep|yup|correct|that'?s correct|that is correct|confirmed|sounds good|perfect|right|ok|okay|looks? good|that works)\b/i.test((text || "").trim());
 }
 
 async function itemsFallbackAfterConfirmation(
   env: AutomationsEnv, workspaceId: string, ctx: RunCtx, history: ChatMessage[], catalogItems: CatalogItemRef[],
 ): Promise<AutomationOutMessage | null> {
-  if (!catalogItems.length) return null;
+  if (!catalogItems.length || !ctx.persistConversationState) return null;
   const lastUser = history[history.length - 1];
   if (!lastUser || lastUser.role !== "user" || !looksAffirmative(lastUser.content)) return null;
-  if (!priorMessageAsksConfirmation(history)) return null;
-  const linkParams = await resolveLinkParams(env.DB, workspaceId, ctx, undefined);
+  const linkParams = await loadLinkParams(env.DB, workspaceId, ctx.contactKey);
+  if (!linkParams) return null;
   const items = withLinkParams(await getItemsByIds(env.DB, workspaceId, catalogItems.map((it) => it.id)), linkParams);
   return items.length ? { type: "items", items } : null;
 }
@@ -697,17 +694,20 @@ async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx
     const catalogItems = await listItemsForWorkspace(env.DB, workspaceId);
     let shownItemIds: string[] = [];
     let shownLinkParams: Record<string, string> | undefined;
+    const onSetLinkParams = ctx.persistConversationState
+      ? async (params: Record<string, string>) => { await saveLinkParams(env.DB, workspaceId, ctx.contactKey, params); }
+      : undefined;
     const result = catalogItems.length
-      ? await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, [], undefined, undefined, undefined, catalogItems, async (ids, linkParams) => { shownItemIds = ids; shownLinkParams = linkParams; })
+      ? await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, [], undefined, undefined, undefined, catalogItems, async (ids, linkParams) => { shownItemIds = ids; shownLinkParams = linkParams; }, onSetLinkParams)
       : await callClaude(env.ANTHROPIC_API_KEY, systemPrompt, history);
-    await send(result.reply || "Thanks for reaching out — a team member will follow up shortly.");
+    const fallback = shownItemIds.length ? null : await itemsFallbackAfterConfirmation(env, workspaceId, ctx, history, catalogItems);
+    await send(result.reply || (fallback ? "Here are some options that might work for you — tap a card's button to see more and continue." : "Thanks for reaching out — a team member will follow up shortly."));
     if (shownItemIds.length) {
       const linkParams = await resolveLinkParams(env.DB, workspaceId, ctx, shownLinkParams);
       const items = withLinkParams(await getItemsByIds(env.DB, workspaceId, shownItemIds), linkParams);
       if (items.length) outMessages.push({ type: "items", items });
-    } else {
-      const fallback = await itemsFallbackAfterConfirmation(env, workspaceId, ctx, history, catalogItems);
-      if (fallback) outMessages.push(fallback);
+    } else if (fallback) {
+      outMessages.push(fallback);
     }
     return "continue";
   }
@@ -719,15 +719,18 @@ async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx
     const catalogItems = await listItemsForWorkspace(env.DB, workspaceId);
     let shownItemIds: string[] = [];
     let shownLinkParams: Record<string, string> | undefined;
-    const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions, undefined, undefined, undefined, catalogItems, async (ids, linkParams) => { shownItemIds = ids; shownLinkParams = linkParams; });
-    await send(result.reply || "Let me look into that and get back to you.");
+    const onSetLinkParams = ctx.persistConversationState
+      ? async (params: Record<string, string>) => { await saveLinkParams(env.DB, workspaceId, ctx.contactKey, params); }
+      : undefined;
+    const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions, undefined, undefined, undefined, catalogItems, async (ids, linkParams) => { shownItemIds = ids; shownLinkParams = linkParams; }, onSetLinkParams);
+    const fallback = shownItemIds.length ? null : await itemsFallbackAfterConfirmation(env, workspaceId, ctx, history, catalogItems);
+    await send(result.reply || (fallback ? "Here are some options that might work for you — tap a card's button to see more and continue." : "Let me look into that and get back to you."));
     if (shownItemIds.length) {
       const linkParams = await resolveLinkParams(env.DB, workspaceId, ctx, shownLinkParams);
       const items = withLinkParams(await getItemsByIds(env.DB, workspaceId, shownItemIds), linkParams);
       if (items.length) outMessages.push({ type: "items", items });
-    } else {
-      const fallback = await itemsFallbackAfterConfirmation(env, workspaceId, ctx, history, catalogItems);
-      if (fallback) outMessages.push(fallback);
+    } else if (fallback) {
+      outMessages.push(fallback);
     }
     return "continue";
   }

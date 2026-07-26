@@ -120,7 +120,7 @@ const MAX_ACTIONS = 10;
 const MAX_ACTION_PARAMETERS = 12;
 const ACTION_TIMEOUT_MS = 8000;
 const MAX_TOOL_RESULT_LENGTH = 2000;
-const MAX_TOOL_ITERATIONS = 3;
+const MAX_TOOL_ITERATIONS = 5;
 
 export function sanitizeActions(raw: unknown): AssistantActionDef[] {
   if (!Array.isArray(raw)) return [];
@@ -224,6 +224,7 @@ type AnthropicMessage = { role: "user" | "assistant"; content: string | Anthropi
 const NAME_TOOL_NAME = "record_customer_name";
 const NEEDS_HUMAN_TOOL_NAME = "flag_for_human";
 const SHOW_ITEMS_TOOL_NAME = "show_items";
+const SET_LINK_PARAMS_TOOL_NAME = "set_link_params";
 
 export type CatalogItemRef = { id: string; name: string; price: number; currency: string };
 
@@ -234,6 +235,7 @@ export async function callClaudeWithActions(
   onNeedsHuman?: (reason: string) => Promise<void>,
   catalogItems?: CatalogItemRef[],
   onShowItems?: (itemIds: string[], linkParams?: Record<string, string>) => Promise<void>,
+  onSetLinkParams?: (linkParams: Record<string, string>) => Promise<void>,
 ): Promise<{ reply?: string; error?: string; status?: number }> {
   if (!actions.length && !onCustomerName && !onNeedsHuman && !catalogItems?.length) return callClaude(apiKey, systemPrompt, messages);
 
@@ -267,6 +269,17 @@ export async function callClaudeWithActions(
           linkParams: { type: "object", additionalProperties: { type: "string" }, description: "Optional URL query parameters to append to each shown item's link, if this business's instructions specify which parameter names to use and what conversation values to fill them with." },
         },
         required: ["itemIds"],
+      },
+    });
+  }
+  if (onSetLinkParams) {
+    tools.push({
+      name: SET_LINK_PARAMS_TOOL_NAME,
+      description: "Call this the moment you state a summary of collected details back to the customer (before they've even confirmed it), if your instructions define URL parameter names for a booking/search link. This saves the values immediately so they're not lost even if something later goes wrong — call it in addition to, not instead of, anything else your instructions say to do with these values.",
+      input_schema: {
+        type: "object",
+        properties: { linkParams: { type: "object", additionalProperties: { type: "string" }, description: "The parameter names and values your instructions define, filled in with what the customer told you." } },
+        required: ["linkParams"],
       },
     });
   }
@@ -328,6 +341,16 @@ export async function callClaudeWithActions(
         }
         if (itemIds.length && onShowItems) { try { await onShowItems(itemIds, Object.keys(linkParams).length ? linkParams : undefined); } catch { /* don't let a storage failure break the reply */ } }
         results.push({ type: "tool_result", tool_use_id: toolUse.id, content: "Shown to the customer as cards with their own link/button — do not repeat their details or paste a link in text." });
+        continue;
+      }
+      if (toolUse.name === SET_LINK_PARAMS_TOOL_NAME) {
+        const raw = toolUse.input?.linkParams;
+        const params: Record<string, string> = {};
+        if (raw && typeof raw === "object") {
+          for (const [k, v] of Object.entries(raw as Record<string, unknown>)) if (typeof v === "string" && v) params[k] = v;
+        }
+        if (Object.keys(params).length && onSetLinkParams) { try { await onSetLinkParams(params); } catch { /* don't let a storage failure break the reply */ } }
+        results.push({ type: "tool_result", tool_use_id: toolUse.id, content: "Noted." });
         continue;
       }
       const action = nameToAction.get(toolUse.name);
