@@ -1411,9 +1411,13 @@ function getEdgeTarget(graph:AutoGraph, edge:EdgeRef):string|null{
 // for a conversation to reach it.
 function addNodeAtEdge(graph:AutoGraph, edge:EdgeRef, kind:AutoNodeKind):{graph:AutoGraph;node:AutoNode}{
   const node=makeNode(kind);
-  // Preserve whatever the edge pointed at by chaining it after the new node where that makes sense.
+  // Preserve whatever the edge pointed at by chaining it after the new node, so inserting a block
+  // into a path that already leads somewhere never strands the rest of the flow. Branching kinds
+  // have no single "next", so they keep the old path as their unmatched/fallback route instead.
+  // "End" is the one kind with nowhere to chain to — that's what choosing it means.
   const previousTarget=getEdgeTarget(graph,edge);
   if(previousTarget&&kind!=="buttons"&&kind!=="split"&&kind!=="end")node.next=previousTarget;
+  if(previousTarget&&(kind==="buttons"||kind==="split"))node.config={...(node.config||{}),fallbackNext:previousTarget};
   let next=setNode(graph,node);
   next=setEdge(next,edge,node.id);
   return {graph:next,node};
@@ -1691,13 +1695,18 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
         />
       </div>
       {editing&&<StepDrawer node={editing} graph={flow} aiActions={aiActions} items={catalogItems} onClose={()=>setEditing(null)} onSave={saveNode} onDelete={editing.id===flow.entryId?undefined:()=>removeNode(editing.id)}/>}
-      {addingAtEdge&&<SimpleModal title="Add a block here" onClose={()=>setAddingAtEdge(null)}>
+      {addingAtEdge&&(()=>{
+        const displaced=getEdgeTarget(flow,addingAtEdge);
+        const displacedNode=displaced?flow.nodes[displaced]:null;
+        return <SimpleModal title={displacedNode?"Insert a block here":"Add a block here"} onClose={()=>setAddingAtEdge(null)}>
         <p>Choose what this block does — you can configure the details next.</p>
+        {displacedNode&&<p className="empty-hint">It goes in front of <strong>“{displacedNode.title}”</strong>, which stays connected after it. Picking “End” is the exception — that finishes the conversation here instead.</p>}
         <div className="template-gallery">{NEW_NODE_KINDS.map(kind=><button key={kind} onClick={()=>addNodeHere(addingAtEdge,kind)}>
           <span className={`auto-node-icon ${AUTO_CHIP_CLASS[AUTO_NODE_META[kind].chip]||"chip-neutral"}`} style={{display:"inline-grid",placeItems:"center",width:28,height:28,borderRadius:8}}>{AUTO_NODE_META[kind].icon}</span>
           <strong>{AUTO_NODE_META[kind].label}</strong>
         </button>)}</div>
-      </SimpleModal>}
+      </SimpleModal>;
+      })()}
       {linkingEdge&&<SimpleModal title="Connect to an existing block" onClose={()=>setLinkingEdge(null)}>
         <p>Point this path at a block that already exists — this is how you send someone back to a main menu, or reuse one shared step from several places.</p>
         <div className="template-gallery">{Object.values(flow.nodes).filter(n=>n.id!==linkingEdge.nodeId).map(n=><button key={n.id} onClick={()=>linkEdgeTo(linkingEdge,n.id)}>
@@ -1798,6 +1807,9 @@ function AutoGraphTree({graph,nodeId,seen,onEdit,onAddAt,onLinkAt}:{
         const targetNode=target?graph.nodes[target]:null;
         return <div className="graph-edge" key={`${edge.kind}-${"optionId" in edge?edge.optionId:"caseId" in edge?edge.caseId:edge.kind}`}>
           <span className="graph-edge-label">{label}</span>
+          {/* A path that already leads somewhere still needs a way to grow: without this you had to
+              disconnect the path, add the block, then reconnect the old target by hand. */}
+          {targetNode&&<button className="graph-insert-btn" onClick={()=>onAddAt(edge)} title={`Insert a block before “${targetNode.title}”`}>＋ Insert before “{targetNode.title}”</button>}
           {loops&&targetNode
             ? <button className="graph-loop-chip" onClick={()=>onEdit(targetNode)} title="This path goes back to a block shown above">↩ back to “{targetNode.title}”</button>
             : target

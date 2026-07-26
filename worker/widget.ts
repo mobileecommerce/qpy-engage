@@ -29,7 +29,8 @@ function sanitizeWidgetReply(text: string): string {
     .trim();
 }
 
-const RATE_LIMIT_PER_MINUTE = 20;
+const RATE_LIMIT_PER_MINUTE = 20;             // per visitor — a human tapping buttons stays well under
+const WORKSPACE_RATE_LIMIT_PER_MINUTE = 600;  // whole-workspace backstop, ~30 concurrent conversations
 const MAX_MESSAGE_LENGTH = 4000;
 const MAX_KNOWLEDGE_LENGTH = 12000;
 
@@ -89,6 +90,17 @@ async function ensureWidgetSchema(db: D1Database): Promise<void> {
       count INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (workspace_id, window_start)
     )`),
+    // Replaces widget_rate_limits above, which is no longer written to (its CREATE stays so an
+    // older Worker build can still roll back onto it). That table keyed on workspace alone, so it
+    // could not tell a busy business apart from one abusive visitor. A new table rather than an
+    // ALTER because SQLite cannot add a column to a primary key in place.
+    db.prepare(`CREATE TABLE IF NOT EXISTS widget_rate_buckets (
+      workspace_id TEXT NOT NULL,
+      bucket TEXT NOT NULL,
+      window_start INTEGER NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (workspace_id, bucket, window_start)
+    )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS widget_messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       workspace_id TEXT NOT NULL,
@@ -141,12 +153,27 @@ async function isAiActive(db: D1Database, workspaceId: string, sessionId: string
   return row ? row.ai_active === 1 : true;
 }
 
-async function withinRateLimit(db: D1Database, workspaceId: string): Promise<boolean> {
+async function bumpBucket(db: D1Database, workspaceId: string, bucket: string, windowStart: number): Promise<number> {
+  await db.prepare(`INSERT INTO widget_rate_buckets (workspace_id, bucket, window_start, count) VALUES (?, ?, ?, 1)
+    ON CONFLICT(workspace_id, bucket, window_start) DO UPDATE SET count = count + 1`).bind(workspaceId, bucket, windowStart).run();
+  const row = await db.prepare("SELECT count FROM widget_rate_buckets WHERE workspace_id = ? AND bucket = ? AND window_start = ?")
+    .bind(workspaceId, bucket, windowStart).first<{ count: number }>();
+  return row?.count || 0;
+}
+
+// Abuse protection has to distinguish "one visitor hammering us" from "we're busy". Counting only
+// per workspace conflated the two: a menu-tree automation spends ~5-8 messages walking one customer
+// through it, so three or four people chatting at once used up the entire allowance and everybody
+// started getting "too many messages" — the business was punished for having customers. The per
+// visitor cap is now the real guard, with a much higher workspace ceiling left as a runaway backstop.
+async function withinRateLimit(db: D1Database, workspaceId: string, sessionId: string): Promise<boolean> {
   const windowStart = Math.floor(Date.now() / 60000);
-  await db.prepare(`INSERT INTO widget_rate_limits (workspace_id, window_start, count) VALUES (?, ?, 1)
-    ON CONFLICT(workspace_id, window_start) DO UPDATE SET count = count + 1`).bind(workspaceId, windowStart).run();
-  const row = await db.prepare("SELECT count FROM widget_rate_limits WHERE workspace_id = ? AND window_start = ?").bind(workspaceId, windowStart).first<{ count: number }>();
-  return (row?.count || 0) <= RATE_LIMIT_PER_MINUTE;
+  if (sessionId) {
+    const perVisitor = await bumpBucket(db, workspaceId, `s:${sessionId}`, windowStart);
+    if (perVisitor > RATE_LIMIT_PER_MINUTE) return false;
+  }
+  const perWorkspace = await bumpBucket(db, workspaceId, "", windowStart);
+  return perWorkspace <= WORKSPACE_RATE_LIMIT_PER_MINUTE;
 }
 
 export async function readWorkspaceState<T>(db: D1Database, workspaceId: string, key: string): Promise<T | null> {
@@ -391,7 +418,7 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   if (workspace.status === "disabled") return widgetJson({ error: "This chat is temporarily unavailable." }, 503);
 
   await ensureWidgetSchema(env.DB);
-  if (!(await withinRateLimit(env.DB, workspaceId))) return widgetJson({ error: "This chat is receiving too many messages right now. Please try again shortly." }, 429);
+  if (!(await withinRateLimit(env.DB, workspaceId, sessionId))) return widgetJson({ error: "This chat is receiving too many messages right now. Please try again shortly." }, 429);
 
   const message = (body.message || "").trim().slice(0, MAX_MESSAGE_LENGTH);
   if (!message) return widgetJson({ error: "No message to respond to." }, 400);
