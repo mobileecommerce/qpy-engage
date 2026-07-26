@@ -211,6 +211,9 @@ export async function buildSystemPrompt(db: D1Database, workspaceId: string): Pr
     : " You were not given their actual content, so never claim a specific fact, price, or policy came from them.";
   prompt += "\n\nKeep replies concise and helpful. Never invent prices, availability, order details, or policies you were not given. You are chatting with a website visitor, not through WhatsApp.";
 
+  const todayIso = new Date().toISOString().slice(0, 10);
+  prompt += `\n\nToday's real date is ${todayIso} (YYYY-MM-DD). Use this to correctly resolve any date the customer gives you that omits a year or is relative (e.g. "the 4th of August", "next Friday", "in two weeks") — always resolve to the nearest occurrence on or after today, never a past date, and never guess a year without reasoning from this real date.`;
+
   const workingHours = await readWorkspaceState<WorkingHours>(db, workspaceId, "qpy-engage-working-hours");
   const hoursStatus = computeBusinessHoursStatus(workingHours, new Date());
   if (hoursStatus) prompt += `\n\nBusiness hours status: ${hoursStatus}`;
