@@ -322,3 +322,21 @@
 .drawer-modal .empty-hint{font-size:12px;line-height:1.6}
 .test-result-branch li{font-size:12.5px}
 @media(max-width:560px){.modal{padding:18px}.modal-actions{flex-wrap:wrap}.modal-actions button{flex:1}}
+
+/* ── Graph canvas: indented tree for the v2 node graph ── */
+.automation-canvas.graph-canvas{align-items:flex-start;padding:22px 18px 34px}
+.graph-node{display:flex;flex-direction:column;gap:0}
+.graph-edges{display:flex;flex-direction:column;gap:10px;margin:6px 0 0 22px;padding-left:20px;border-left:2px solid oklch(88% 0.005 90)}
+.graph-edge{position:relative;display:flex;flex-direction:column;gap:5px}
+.graph-edge:before{content:"";position:absolute;left:-20px;top:13px;width:16px;height:2px;background:oklch(88% 0.005 90)}
+.graph-edge-label{font-size:9.5px;font-weight:700;letter-spacing:.02em;color:#7b8494;background:oklch(96% 0.004 90);border:1px solid oklch(91% 0.005 90);border-radius:20px;padding:2px 9px;align-self:flex-start}
+.graph-edge-empty{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.graph-link-btn{border:1px dashed oklch(80% 0.02 265);background:#fff;color:oklch(52% 0.16 265);border-radius:8px;padding:7px 11px;font-size:10.5px;font-weight:600;cursor:pointer}
+.graph-link-btn:hover{border-style:solid;background:oklch(97% 0.02 265)}
+.graph-loop-chip{border:1px solid oklch(85% 0.05 300);background:oklch(97% 0.02 300);color:oklch(45% 0.13 300);border-radius:8px;padding:7px 11px;font-size:10.5px;font-weight:600;cursor:pointer;align-self:flex-start}
+.graph-loop-chip:hover{border-color:oklch(60% 0.15 300)}
+.auto-node-warn{margin-left:auto;font-style:normal;color:oklch(62% 0.14 60);font-size:13px;flex:none}
+.auto-node-remove{position:absolute;top:-8px;right:-8px;width:22px;height:22px;border-radius:50%;border:1px solid oklch(90% 0.005 90);background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.15);color:oklch(55% 0.16 15);font-size:14px;line-height:1;cursor:pointer;display:grid;place-items:center;opacity:0;transition:opacity .12s}
+.auto-node-wrap:hover .auto-node-remove{opacity:1}
+.auto-node-remove:hover{background:oklch(95% 0.03 15);border-color:oklch(55% 0.16 15)}
+@media(max-width:640px){.graph-edges{margin-left:10px;padding-left:14px}.graph-edge:before{left:-14px;width:12px}}

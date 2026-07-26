@@ -1,7 +1,12 @@
 import { requireSession, type AuthEnv } from "./auth";
-import { json, corsPreflight, allowedOrigin, callClaude, callClaudeWithActions, sanitizeActions, type ChatMessage, type AssistantActionDef, type CatalogItemRef } from "./shared";
-import { readWorkspaceState, buildSystemPrompt } from "./widget";
-import { listItemsForWorkspace, getItemsByIds } from "./items";
+import { json, corsPreflight, allowedOrigin, sanitizeActions } from "./shared";
+import { readWorkspaceState } from "./widget";
+import {
+  toGraph, sanitizeGraph, buildUrlFromTemplate, graphNeedsConfig, nodeAwaitsInput,
+  type AutomationGraph, type AutomationNode,
+} from "./automation-graph";
+import { ensureSessionSchema } from "./automation-session";
+import { evaluateSplit } from "./automation-engine";
 
 export interface AutomationsEnv extends AuthEnv {
   DB: D1Database;
@@ -9,49 +14,20 @@ export interface AutomationsEnv extends AuthEnv {
 }
 
 function uid(): string { return crypto.randomUUID(); }
-function sqliteNow(): string { return new Date().toISOString().slice(0, 19).replace("T", " "); }
 
-// Lets an AI reply/AI action step give each shown item card a conversation-specific link (e.g.
-// the guest's actual dates/guest count) instead of the AI having to paste a URL in its text reply.
-function withLinkParams<T extends { externalLink: string }>(items: T[], linkParams?: Record<string, string>): T[] {
-  if (!linkParams || !Object.keys(linkParams).length) return items;
-  return items.map((item) => {
-    if (!item.externalLink) return item;
-    try {
-      const url = new URL(item.externalLink);
-      for (const [k, v] of Object.entries(linkParams)) url.searchParams.set(k, v);
-      return { ...item, externalLink: url.toString() };
-    } catch { return item; }
-  });
-}
+// ── Types ──
+// The stored/served shape is now the v2 node graph (worker/automation-graph.ts). The v1 tree types
+// below survive only as the authoring format for the built-in sector templates, which are converted
+// through the same migrateV1ToV2 path as legacy stored automations.
 
-// ── Types (mirrors the design's tree shape exactly: trigger -> split1 -> 2 branches -> optional
-// split2 -> 2 sub-branches -> exit) ──
+export type { AutomationGraph, AutomationNode, NodeConfig, NodeKind } from "./automation-graph";
+export type Automation = { id: string; name: string; sectorKey: string; status: "active" | "draft" | "inactive"; priority: number; needsConfig: boolean; flow: AutomationGraph; createdAt?: string; updatedAt?: string };
 
-export type StepKind = "trigger" | "split" | "aiReply" | "message" | "wait" | "tag" | "notify" | "aiAction" | "escalate" | "generic";
-export type RuleType = "conditional" | "ab" | "time" | "freq";
-
-export type AutomationStep = {
-  id: string; icon: string; title: string; subtitle: string; chip: string; kind: StepKind;
-  config?: {
-    channels?: string[];
-    ruleType?: RuleType; condition?: string; matchLanguage?: string;
-    abWeightA?: number;
-    activeDays?: string[]; startTime?: string; endTime?: string;
-    freqMax?: number; freqPeriod?: "hour" | "day" | "week";
-    messageChannel?: "whatsapp" | "webchat"; messageText?: string;
-    waitAmount?: number; waitUnit?: "minutes" | "hours" | "days";
-    tagName?: string;
-    notifyChannels?: string[]; notifyRecipient?: string;
-    aiActionName?: string;
-    escalateQueue?: string; escalatePriority?: "Normal" | "Urgent";
-    collectFlows?: { id: string; name: string; fields: { key: string; label: string }[]; urlTemplate: string; itemIds: string[] }[];
-  };
-};
-export type AutomationBranch = { id: string; label: string; color: string; steps: AutomationStep[]; split2?: AutomationStep; subBranches?: [AutomationSubBranch, AutomationSubBranch] };
-export type AutomationSubBranch = { id: string; label: string; color: string; steps: AutomationStep[] };
-export type FlowTree = { trigger: AutomationStep; split1: AutomationStep; branches: [AutomationBranch, AutomationBranch] };
-export type Automation = { id: string; name: string; sectorKey: string; status: "active" | "draft" | "inactive"; priority: number; needsConfig: boolean; flow: FlowTree; createdAt?: string; updatedAt?: string };
+type StepKind = "trigger" | "split" | "aiReply" | "message" | "wait" | "tag" | "notify" | "aiAction" | "escalate" | "generic";
+type TemplateStep = { id: string; icon: string; title: string; subtitle: string; chip: string; kind: StepKind; config?: Record<string, unknown> };
+type TemplateSub = { id: string; label: string; color: string; steps: TemplateStep[] };
+type TemplateBranch = TemplateSub & { split2?: TemplateStep; subBranches?: [TemplateSub, TemplateSub] };
+type TemplateFlow = { trigger: TemplateStep; split1: TemplateStep; branches: [TemplateBranch, TemplateBranch] };
 
 // ── Schema ──
 
@@ -112,6 +88,7 @@ async function ensureAutomationsSchema(db: D1Database): Promise<void> {
   ]);
   // phone_number_id lets a resumed WhatsApp wait step still reach the right Cloud API number.
   try { await db.prepare(`ALTER TABLE automation_waits ADD COLUMN phone_number_id TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
+  await ensureSessionSchema(db);
   automationsSchemaEnsured = true;
 }
 
@@ -120,22 +97,112 @@ async function ensureAutomationsSchema(db: D1Database): Promise<void> {
 // title text at render time; here it's assigned once, directly, since this drives real
 // execution behavior, not just which config-drawer fields to show). ──
 
-function step(icon: string, title: string, subtitle: string, chip: string, kind: StepKind, config?: AutomationStep["config"]): AutomationStep {
+function step(icon: string, title: string, subtitle: string, chip: string, kind: StepKind, config?: Record<string, unknown>): TemplateStep {
   return { id: uid(), icon, title, subtitle, chip, kind, config };
 }
-function splitStep(title: string, subtitle: string, config?: AutomationStep["config"]): AutomationStep {
+function splitStep(title: string, subtitle: string, config?: Record<string, unknown>): TemplateStep {
   return { id: uid(), icon: "⑂", title, subtitle, chip: "purple", kind: "split", config: { ruleType: "conditional", ...config } };
 }
-function branch(label: string, color: string, steps: AutomationStep[], split2?: AutomationStep, subBranches?: [AutomationSubBranch, AutomationSubBranch]): AutomationBranch {
+function branch(label: string, color: string, steps: TemplateStep[], split2?: TemplateStep, subBranches?: [TemplateSub, TemplateSub]): TemplateBranch {
   return { id: uid(), label, color, steps, split2, subBranches };
 }
-function sub(label: string, color: string, steps: AutomationStep[]): AutomationSubBranch {
+function sub(label: string, color: string, steps: TemplateStep[]): TemplateSub {
   return { id: uid(), label, color, steps };
 }
 
-function sectorFlows(): Record<string, { name: string; icon: string; desc: string; flow: FlowTree }> {
-  const trigger = (subtitle: string): AutomationStep => step("💬", "New message received", subtitle, "rose", "trigger", { channels: ["whatsapp", "webchat"] });
+// A menu-tree template authored directly in the v2 graph shape — this is the pattern that v1 simply
+// could not express: one prompt fanning out to many options, each option owning its own sub-tree, and
+// a "Main menu" option looping all the way back to the top.
+function serviceDeskGraph(): AutomationGraph {
+  const n = (id: string, node: Omit<AutomationNode, "id">): [string, AutomationNode] => [id, { id, ...node }];
+  const nodes = Object.fromEntries([
+    n("sd-trigger", { kind: "trigger", title: "New message received", subtitle: "Any inbound message starts the menu", next: "sd-main", config: { channels: ["webchat"] } }),
+    n("sd-main", {
+      kind: "buttons", title: "Main menu", subtitle: "Top-level choice",
+      config: {
+        messageText: "Hello, how may we help you?",
+        options: [
+          { id: "o1", label: "Our Services", next: "sd-services" },
+          { id: "o2", label: "General Information", next: "sd-info" },
+          { id: "o3", label: "Speak to an Agent", next: "sd-agent" },
+        ],
+      },
+    }),
+    n("sd-services", {
+      kind: "buttons", title: "Service list", subtitle: "As many options as the business needs",
+      config: {
+        messageText: "Please select a service:",
+        options: [
+          { id: "s1", label: "New Application", description: "Start a fresh application", next: "sd-apply-type" },
+          { id: "s2", label: "Renewal", description: "Renew an existing licence or permit", next: "sd-renewal" },
+          { id: "s3", label: "Fees & Payments", next: "sd-fees" },
+          { id: "s4", label: "Track a Request", next: "sd-track" },
+          { id: "s5", label: "Main Menu", next: "sd-main" },
+        ],
+      },
+    }),
+    n("sd-apply-type", {
+      kind: "buttons", title: "Application category", subtitle: "A sub-menu under one option",
+      config: {
+        messageText: "Which category applies to you?",
+        options: [
+          { id: "a1", label: "Individual", next: "sd-apply-info" },
+          { id: "a2", label: "Company", next: "sd-apply-info" },
+          { id: "a3", label: "Back", next: "sd-services" },
+        ],
+      },
+    }),
+    n("sd-apply-info", {
+      kind: "message", title: "Requirements", subtitle: "Static info block",
+      next: "sd-apply-next",
+      config: { messageText: "Requirements:\n\nPassport copy\nPersonal photo with a white background\nProof of address\nCompleted application form" },
+    }),
+    n("sd-apply-next", {
+      kind: "buttons", title: "Next step", subtitle: "Where the customer goes from here",
+      config: {
+        messageText: "Please choose one of the below options:",
+        options: [
+          { id: "n1", label: "Submit Application", next: "sd-collect-name" },
+          { id: "n2", label: "Speak to an Agent", next: "sd-agent" },
+          { id: "n3", label: "Main Menu", next: "sd-main" },
+        ],
+      },
+    }),
+    n("sd-collect-name", { kind: "question", title: "Ask for name", next: "sd-collect-email", config: { messageText: "What name should the application be filed under?", variableKey: "applicant_name", inputType: "text" } }),
+    n("sd-collect-email", { kind: "question", title: "Ask for email", next: "sd-collect-done", config: { messageText: "And the best email to send updates to?", variableKey: "applicant_email", inputType: "email" } }),
+    n("sd-collect-done", { kind: "message", title: "Confirm receipt", next: "sd-agent", config: { messageText: "Thank you {{applicant_name}} — we have your details and will send updates to {{applicant_email}}." } }),
+    n("sd-renewal", { kind: "message", title: "Renewal info", next: "sd-apply-next", config: { messageText: "Renewals open 30 days before expiry. You'll need your existing licence number and a valid payment method." } }),
+    n("sd-fees", { kind: "message", title: "Fees info", next: "sd-apply-next", config: { messageText: "Fees depend on the service and category. An agent can confirm the exact amount for your case." } }),
+    n("sd-track", { kind: "question", title: "Ask for reference", next: "sd-track-handoff", config: { messageText: "Please send your request reference number.", variableKey: "reference", inputType: "text" } }),
+    n("sd-track-handoff", { kind: "message", title: "Tracking handoff", next: "sd-agent", config: { messageText: "Thanks — checking reference {{reference}} for you now." } }),
+    n("sd-agent", { kind: "escalate", title: "Transfer to a human", next: "sd-agent-msg", config: { escalateQueue: "Support queue", escalatePriority: "Normal" } }),
+    n("sd-agent-msg", { kind: "message", title: "Handoff notice", next: "sd-end", config: { messageText: "You are being transferred to one of our team now. Please wait, we will respond as soon as possible." } }),
+    n("sd-info", {
+      kind: "buttons", title: "General information",
+      config: {
+        messageText: "What would you like to know?",
+        options: [
+          { id: "g1", label: "Working Hours", next: "sd-hours" },
+          { id: "g2", label: "Location", next: "sd-location" },
+          { id: "g3", label: "Main Menu", next: "sd-main" },
+        ],
+      },
+    }),
+    n("sd-hours", { kind: "message", title: "Working hours", next: "sd-info", config: { messageText: "We're open Monday to Friday, 8am to 6pm." } }),
+    n("sd-location", { kind: "message", title: "Location", next: "sd-info", config: { messageText: "Share your address here, or point customers at a map link." } }),
+    n("sd-end", { kind: "end", title: "End of flow" }),
+  ]);
+  return { version: 2, entryId: "sd-trigger", nodes };
+}
+
+function sectorFlows(): Record<string, { name: string; icon: string; desc: string; flow: TemplateFlow | AutomationGraph }> {
+  const trigger = (subtitle: string): TemplateStep => step("💬", "New message received", subtitle, "rose", "trigger", { channels: ["whatsapp", "webchat"] });
   return {
+    servicedesk: {
+      name: "Service Desk Menu", icon: "▤",
+      desc: "A tappable menu tree — many options per prompt, nested sub-menus, loop-back to the main menu, and a real human handoff. No AI required.",
+      flow: serviceDeskGraph(),
+    },
     general: {
       name: "General Support", icon: "🤖",
       desc: "Default WhatsApp + web chat triage: escalate on request, else let AI reply and follow up.",
@@ -334,36 +401,14 @@ function sectorFlows(): Record<string, { name: string; icon: string; desc: strin
   };
 }
 
-export const SECTOR_ORDER = ["general", "fnb", "hotels", "grocery", "realestate", "healthcare", "schools", "universities"];
+export const SECTOR_ORDER = ["servicedesk", "general", "fnb", "hotels", "grocery", "realestate", "healthcare", "schools", "universities"];
 
 // ── CRUD ──
 
-// A step is "incomplete" when the field that makes it actually do something is still blank.
-// Shared by needsConfig (automation-level badge) and the per-node attention markers in the UI.
-export function stepIsIncomplete(step: AutomationStep): boolean {
-  const c = step.config || {};
-  switch (step.kind) {
-    case "trigger": return !(c.channels || []).length;
-    case "split": return (c.ruleType || "conditional") === "conditional" && !(c.condition || "").trim();
-    case "message": return !(c.messageText || "").trim();
-    case "tag": return !(c.tagName || "").trim();
-    case "aiAction": return !(c.aiActionName || "").trim();
-    case "escalate": return !(c.escalateQueue || "").trim();
-    case "notify": return !(c.notifyChannels || []).length;
-    case "aiReply": return (c.collectFlows || []).some((f) => !f.name.trim() || !f.fields.length || !f.urlTemplate.trim()); // if either "Collect & Link" field is set, both must be
-    default: return false; // wait/generic need no required field
-  }
-}
-
-export function flowNeedsConfig(flow: FlowTree): boolean {
-  if (stepIsIncomplete(flow.trigger) || stepIsIncomplete(flow.split1)) return true;
-  for (const branch of flow.branches) {
-    if (branch.steps.some(stepIsIncomplete)) return true;
-    if (branch.split2 && stepIsIncomplete(branch.split2)) return true;
-    if (branch.subBranches) for (const sub of branch.subBranches) if (sub.steps.some(stepIsIncomplete)) return true;
-  }
-  return false;
-}
+// Node completeness now lives in worker/automation-graph.ts (nodeIsIncomplete / graphNeedsConfig)
+// so the engine, the API and the dashboard all judge it the same way. Re-exported under the old
+// names too, since the dashboard's mirror imports them.
+export { nodeIsIncomplete, graphNeedsConfig } from "./automation-graph";
 
 type AutomationRow = { id: string; name: string; sector_key: string; status: string; priority: number; needs_config: number; flow_json: string; created_at: string; updated_at: string };
 
@@ -372,7 +417,7 @@ function rowToAutomation(row: AutomationRow): Automation {
     id: row.id, name: row.name, sectorKey: row.sector_key,
     status: row.status === "active" ? "active" : row.status === "inactive" ? "inactive" : "draft",
     priority: row.priority, needsConfig: Boolean(row.needs_config),
-    flow: JSON.parse(row.flow_json) as FlowTree,
+    flow: toGraph(JSON.parse(row.flow_json)),
     createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }
@@ -393,14 +438,18 @@ async function listSectors(request: Request, env: AutomationsEnv): Promise<Respo
   return json(request, { sectors });
 }
 
-function blankFlow(): FlowTree {
+// A brand-new automation starts as the smallest useful real graph: a trigger into a menu the owner
+// can immediately extend, since "add an option" is now the primitive that grows the tree.
+function blankGraph(): AutomationGraph {
+  const triggerId = uid();
+  const menuId = uid();
   return {
-    trigger: step("💬", "New message received", "Click to choose which channels trigger this automation", "rose", "trigger", { channels: ["webchat"] }),
-    split1: splitStep("Conditional split", "Click to set the keywords that decide the branch", { condition: "" }),
-    branches: [
-      branch("Matches", "green", [step("💬", "Send message", "Click to write what gets sent", "rose", "message", { messageChannel: "webchat", messageText: "" })]),
-      branch("No match", "blue", [step("💬", "Send message", "Click to write what gets sent", "rose", "message", { messageChannel: "webchat", messageText: "" })]),
-    ],
+    version: 2,
+    entryId: triggerId,
+    nodes: {
+      [triggerId]: { id: triggerId, kind: "trigger", title: "New message received", subtitle: "Click to choose which channels trigger this automation", next: menuId, config: { channels: ["webchat"] } },
+      [menuId]: { id: menuId, kind: "buttons", title: "Ask a question", subtitle: "Click to write the prompt and its options", next: null, config: { messageText: "", options: [] } },
+    },
   };
 }
 
@@ -413,9 +462,9 @@ async function createBlank(request: Request, env: AutomationsEnv): Promise<Respo
   const priority = (maxPriority?.m ?? -1) + 1;
   const id = uid();
   const name = (body.name || "New automation").trim().slice(0, 120) || "New automation";
-  const flow = blankFlow();
+  const graph = blankGraph();
   await env.DB.prepare(`INSERT INTO automations2 (id, workspace_id, name, sector_key, status, priority, needs_config, flow_json) VALUES (?, ?, ?, 'custom', 'draft', ?, ?, ?)`)
-    .bind(id, session.workspaceId, name, priority, flowNeedsConfig(flow) ? 1 : 0, JSON.stringify(flow)).run();
+    .bind(id, session.workspaceId, name, priority, graphNeedsConfig(graph) ? 1 : 0, JSON.stringify(graph)).run();
   const row = await env.DB.prepare(`SELECT * FROM automations2 WHERE id = ?`).bind(id).first<AutomationRow>();
   return json(request, { automation: row ? rowToAutomation(row) : null });
 }
@@ -432,8 +481,9 @@ async function createFromTemplate(request: Request, env: AutomationsEnv): Promis
   const priority = (maxPriority?.m ?? -1) + 1;
   const id = uid();
   const name = (body.name || `${template.name} automation`).slice(0, 120);
+  const graph = toGraph(template.flow);
   await env.DB.prepare(`INSERT INTO automations2 (id, workspace_id, name, sector_key, status, priority, needs_config, flow_json) VALUES (?, ?, ?, ?, 'draft', ?, ?, ?)`)
-    .bind(id, session.workspaceId, name, sectorKey, priority, flowNeedsConfig(template.flow) ? 1 : 0, JSON.stringify(template.flow)).run();
+    .bind(id, session.workspaceId, name, sectorKey, priority, graphNeedsConfig(graph) ? 1 : 0, JSON.stringify(graph)).run();
   const row = await env.DB.prepare(`SELECT * FROM automations2 WHERE id = ?`).bind(id).first<AutomationRow>();
   return json(request, { automation: row ? rowToAutomation(row) : null });
 }
@@ -444,14 +494,14 @@ async function updateAutomation(request: Request, env: AutomationsEnv, id: strin
   await ensureAutomationsSchema(env.DB);
   const existing = await env.DB.prepare(`SELECT * FROM automations2 WHERE id = ? AND workspace_id = ?`).bind(id, session.workspaceId).first<AutomationRow>();
   if (!existing) return json(request, { error: "Automation not found." }, 404);
-  const body = await request.json() as { name?: string; status?: string; flow?: FlowTree; needsConfig?: boolean };
+  const body = await request.json() as { name?: string; status?: string; flow?: unknown; needsConfig?: boolean };
   const name = body.name !== undefined ? body.name.trim().slice(0, 120) || existing.name : existing.name;
   const status = body.status !== undefined && ["active", "draft", "inactive"].includes(body.status) ? body.status : existing.status;
-  const flow = body.flow !== undefined ? body.flow : JSON.parse(existing.flow_json) as FlowTree;
-  const flowJson = JSON.stringify(flow);
+  const graph = body.flow !== undefined ? (sanitizeGraph(body.flow) || toGraph(body.flow)) : toGraph(JSON.parse(existing.flow_json));
+  const flowJson = JSON.stringify(graph);
   // needsConfig is always derived from the flow's real completeness — the badge clears itself once
   // every step's required field is filled in, and reappears if something is emptied.
-  const needsConfig = flowNeedsConfig(flow) ? 1 : 0;
+  const needsConfig = graphNeedsConfig(graph) ? 1 : 0;
   await env.DB.prepare(`UPDATE automations2 SET name = ?, status = ?, flow_json = ?, needs_config = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
     .bind(name, status, flowJson, needsConfig, id).run();
   const row = await env.DB.prepare(`SELECT * FROM automations2 WHERE id = ?`).bind(id).first<AutomationRow>();
@@ -523,32 +573,35 @@ async function testLink(request: Request, env: AutomationsEnv): Promise<Response
   const template = typeof body.template === "string" ? body.template.trim() : "";
   if (!template) return json(request, { error: "A link template is required." }, 400);
   const values = body.values && typeof body.values === "object" ? body.values : {};
-  const url = template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_match, key: string) => {
-    const value = values[key];
-    return encodeURIComponent(typeof value === "string" ? value : "");
-  });
+  const url = buildUrlFromTemplate(template, values as Record<string, unknown>);
   try { new URL(url); } catch { return json(request, { error: "That template didn't produce a valid URL — check the base address." }, 400); }
   return json(request, { url });
 }
 
-function describeStepEffect(step: AutomationStep): string {
-  const c = step.config || {};
-  switch (step.kind) {
+function describeNodeEffect(node: AutomationNode): string {
+  const c = node.config || {};
+  switch (node.kind) {
+    case "trigger": return `Trigger on: ${(c.channels || []).join(" + ") || "(no channels)"}`;
     case "message": return `Send message: "${(c.messageText || "").slice(0, 80) || "(empty)"}"`;
-    case "aiReply": return "Send a live AI assistant reply";
-    case "aiAction": return `Run AI Action: ${c.aiActionName || "(none selected)"}`;
+    case "buttons": return `Ask "${(c.messageText || "").slice(0, 50)}" with options: ${(c.options || []).map((o) => o.label).join(" / ") || "(none)"}`;
+    case "question": return `Ask "${(c.messageText || "").slice(0, 50)}" → store as {${c.variableKey || "?"}}`;
+    case "items": return `Show ${(c.itemIds || []).length} catalog item card(s)`;
+    case "aiReply": return "Hand the conversation to the AI assistant";
+    case "aiAction": return `AI reply with action: ${c.aiActionName || "(none selected)"}`;
+    case "split": return `Branch on ${c.ruleType || "conditional"} rule`;
     case "wait": return `Wait ${c.waitAmount ?? 1} ${c.waitUnit || "hours"} (then continue)`;
     case "tag": return `Add tag: ${c.tagName || "(none)"}`;
     case "notify": return `Notify via ${(c.notifyChannels || []).join(" + ") || "(none)"}`;
     case "escalate": return `Escalate to ${c.escalateQueue || "Support queue"} (${c.escalatePriority || "Normal"})`;
-    default: return step.title;
+    case "end": return "End the conversation flow";
   }
+  return node.title;
 }
 
-// Dry-run: walk the tree for a sample message, reporting which branch(es) it takes and the actions
-// that would run — without sending anything or writing any side effects. Conditional/time splits
-// are evaluated for real; A/B and frequency-cap splits are inherently non-deterministic, so the
-// result flags that.
+// Dry-run: walk the real graph for a sample message and report the exact node sequence it would take
+// until it stops to wait for the customer — with no sends and no side effects. Split rules are
+// evaluated for real; A/B and frequency splits are inherently non-deterministic, so those are noted
+// rather than presented as the one true answer.
 async function dryRunAutomation(request: Request, env: AutomationsEnv, id: string): Promise<Response> {
   const session = await requireSession(request, env);
   if (session instanceof Response) return session;
@@ -557,406 +610,56 @@ async function dryRunAutomation(request: Request, env: AutomationsEnv, id: strin
   if (!row) return json(request, { error: "Automation not found." }, 404);
   const body = await request.json().catch(() => ({})) as { message?: string };
   const message = (body.message || "").trim();
-  const flow = JSON.parse(row.flow_json) as FlowTree;
+  const graph = toGraph(JSON.parse(row.flow_json));
 
-  const describeSplit = (split: AutomationStep): { note: string } => {
-    const rt = split.config?.ruleType || "conditional";
-    if (rt === "ab") return { note: "A/B split — branch chosen at random per message" };
-    if (rt === "freq") return { note: "Frequency cap — branch depends on this contact's recent send count" };
-    if (rt === "time") return { note: "Time window — branch depends on current day/time" };
-    return { note: `Matches if message contains: ${split.config?.condition || "(no keywords set)"}` };
+  const noteFor = (node: AutomationNode): string | undefined => {
+    if (node.kind !== "split") return undefined;
+    const rt = node.config?.ruleType || "conditional";
+    if (rt === "ab") return "A/B split — the branch is chosen at random per message";
+    if (rt === "freq") return "Frequency cap — depends on this contact's recent send count";
+    if (rt === "time") return "Time window — depends on the current day/time";
+    return `Cases: ${(node.config?.cases || []).map((k) => `${k.label} if message contains "${k.match || ""}"`).join("; ") || "(none set)"}`;
   };
 
-  const branchIdx = await evaluateSplit(env.DB, session.workspaceId, row.id, flow.split1, message, "dry-run");
-  const branch = flow.branches[branchIdx];
   const path: Array<{ label: string; note?: string; steps: string[] }> = [];
-  path.push({ label: branch.label, note: describeSplit(flow.split1).note, steps: branch.steps.map(describeStepEffect) });
+  const seen = new Set<string>();
+  let currentId: string | null = graph.entryId;
+  let guard = 0;
 
-  if (branch.split2 && branch.subBranches) {
-    const subIdx = await evaluateSplit(env.DB, session.workspaceId, row.id, branch.split2, message, "dry-run");
-    const sub = branch.subBranches[subIdx];
-    path.push({ label: sub.label, note: describeSplit(branch.split2).note, steps: sub.steps.map(describeStepEffect) });
-  }
+  while (currentId && guard++ < 40) {
+    const node: AutomationNode | undefined = graph.nodes[currentId];
+    if (!node) break;
+    path.push({ label: node.title, note: noteFor(node), steps: [describeNodeEffect(node)] });
+    // A cycle is legal at runtime (a customer taps "Main menu" again) but a trace must not loop.
+    if (seen.has(node.id)) { path.push({ label: "↩ Loops back", note: "This path returns to a node already shown above", steps: [] }); break; }
+    seen.add(node.id);
 
-  return json(request, { branchIdx, path });
-}
-
-// ── Real execution engine ──
-
-function withinTimeWindow(activeDays: string[] | undefined, startTime: string | undefined, endTime: string | undefined, now: Date): boolean {
-  const dayKeys = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
-  const today = dayKeys[now.getUTCDay()];
-  if (activeDays && activeDays.length && !activeDays.includes(today)) return false;
-  if (!startTime || !endTime) return true;
-  const minutesNow = now.getUTCHours() * 60 + now.getUTCMinutes();
-  const [sh, sm] = startTime.split(":").map(Number);
-  const [eh, em] = endTime.split(":").map(Number);
-  const startMin = sh * 60 + sm; const endMin = eh * 60 + em;
-  return minutesNow >= startMin && minutesNow <= endMin;
-}
-
-async function evaluateSplit(db: D1Database, workspaceId: string, automationId: string, split: AutomationStep, message: string, contactKey: string): Promise<0 | 1> {
-  const cfg = split.config || {};
-  const ruleType = cfg.ruleType || "conditional";
-  if (ruleType === "conditional") {
-    const keywords = (cfg.condition || "").split(",").map((k) => k.trim().toLowerCase()).filter(Boolean);
-    const lower = message.toLowerCase();
-    return keywords.some((k) => lower.includes(k)) ? 0 : 1;
-  }
-  if (ruleType === "ab") {
-    const weightA = cfg.abWeightA ?? 50;
-    return Math.random() * 100 < weightA ? 0 : 1;
-  }
-  if (ruleType === "time") {
-    return withinTimeWindow(cfg.activeDays, cfg.startTime, cfg.endTime, new Date()) ? 0 : 1;
-  }
-  if (ruleType === "freq") {
-    const max = cfg.freqMax ?? 3;
-    const periodMs = cfg.freqPeriod === "hour" ? 3600_000 : cfg.freqPeriod === "week" ? 7 * 86400_000 : 86400_000;
-    const since = new Date(Date.now() - periodMs).toISOString().slice(0, 19).replace("T", " ");
-    const count = await db.prepare(`SELECT COUNT(*) as c FROM automation_sends WHERE workspace_id = ? AND automation_id = ? AND contact_key = ? AND sent_at > ?`)
-      .bind(workspaceId, automationId, contactKey, since).first<{ c: number }>();
-    return (count?.c || 0) < max ? 0 : 1;
-  }
-  return 1;
-}
-
-export type AutomationOutMessage =
-  | { type: "text"; text: string }
-  | { type: "items"; text?: string; items: Array<{ id: string; name: string; title: string; description: string; price: number; currency: string; imageUrl: string; externalLink: string }> };
-
-// Delivery is channel-specific and injected by the caller: the Web chat widget records an
-// assistant row in widget_messages; the WhatsApp webhook (worker/meta.ts) sends a real Cloud API
-// message and meters a Service credit. The engine itself stays delivery-agnostic so both channels
-// share the exact same branch/step logic. `deliver` returns false if the send failed.
-export type RunChannel = "webchat" | "whatsapp";
-export interface RunCtx {
-  channel: RunChannel;
-  contactKey: string;            // widget session_id, or the customer's WhatsApp number
-  phoneNumberId?: string;        // whatsapp only — persisted so a resumed wait can still deliver
-  deliver: (text: string) => Promise<boolean>;
-  persistConversationState: boolean; // web chat has an Inbox surface for tags/escalation; whatsapp doesn't (yet)
-}
-
-async function sendSlackNotification(webhookUrl: string, text: string): Promise<void> {
-  try { await fetch(webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) }); } catch { /* best-effort */ }
-}
-
-// Item link params (e.g. a guest's confirmed dates/guest count) are collected by the AI over
-// several turns but only actually supplied on the turn it calls show_items — a later turn in the
-// same conversation (e.g. "show me other options") may re-call show_items without re-supplying
-// them, since nothing forces the model to repeat itself. Persisting the last-known set per
-// session and falling back to it closes that gap without relying on the model to remember.
-async function loadLinkParams(db: D1Database, workspaceId: string, sessionId: string): Promise<Record<string, string> | undefined> {
-  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN link_params TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
-  const row = await db.prepare(`SELECT link_params FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`).bind(workspaceId, sessionId).first<{ link_params: string }>();
-  if (!row?.link_params) return undefined;
-  try { const parsed = JSON.parse(row.link_params); return parsed && typeof parsed === "object" ? parsed : undefined; } catch { return undefined; }
-}
-
-async function saveLinkParams(db: D1Database, workspaceId: string, sessionId: string, linkParams: Record<string, string>): Promise<void> {
-  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN link_params TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
-  await db.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, link_params) VALUES (?, ?, ?)
-    ON CONFLICT(workspace_id, session_id) DO UPDATE SET link_params = excluded.link_params`).bind(workspaceId, sessionId, JSON.stringify(linkParams)).run();
-}
-
-// If the model supplied linkParams this turn, that's the freshest/most authoritative set — persist
-// it for later turns in the same session. If it didn't (e.g. it re-showed items without repeating
-// itself), fall back to whatever was last persisted, instead of sending a bare, param-less link.
-// Only applies to web chat, which has the conversation-state surface this relies on (persistConversationState).
-async function resolveLinkParams(db: D1Database, workspaceId: string, ctx: RunCtx, freshLinkParams?: Record<string, string>): Promise<Record<string, string> | undefined> {
-  if (!ctx.persistConversationState) return freshLinkParams;
-  if (freshLinkParams && Object.keys(freshLinkParams).length) {
-    await saveLinkParams(db, workspaceId, ctx.contactKey, freshLinkParams);
-    return freshLinkParams;
-  }
-  return loadLinkParams(db, workspaceId, ctx.contactKey);
-}
-
-// Safety net for a separate, real failure mode than the linkParams gap above: the model can write
-// a reply that promises to show items ("take a look at these options...") without actually calling
-// show_items that turn at all — a text/tool-use mismatch, not a params problem. Detected narrowly:
-// the customer just gave a short affirmative-sounding reply AND we already have real, previously
-// persisted values for this session (saved independently via set_link_params — see resolveLinkParams)
-// — i.e. we're clearly mid-booking-flow — but no items were shown. Deliberately does NOT require the
-// prior assistant message to contain an exact phrase like "Is that correct?": that literal-phrase
-// check proved too brittle, since the model doesn't always use the exact wording its prompt asks for.
-function looksAffirmative(text: string): boolean {
-  return /^\s*(yes|yeah|yep|yup|correct|that'?s correct|that is correct|confirmed|sounds good|perfect|right|ok|okay|looks? good|that works)\b/i.test((text || "").trim());
-}
-
-async function itemsFallbackAfterConfirmation(
-  env: AutomationsEnv, workspaceId: string, ctx: RunCtx, history: ChatMessage[], catalogItems: CatalogItemRef[],
-): Promise<AutomationOutMessage | null> {
-  if (!catalogItems.length || !ctx.persistConversationState) return null;
-  const lastUser = history[history.length - 1];
-  if (!lastUser || lastUser.role !== "user" || !looksAffirmative(lastUser.content)) return null;
-  const linkParams = await loadLinkParams(env.DB, workspaceId, ctx.contactKey);
-  if (!linkParams) return null;
-  const items = withLinkParams(await getItemsByIds(env.DB, workspaceId, catalogItems.map((it) => it.id)), linkParams);
-  return items.length ? { type: "items", items } : null;
-}
-
-// Compiles a business owner's structured "Collect & Link" step config into the same instructions a
-// developer would otherwise have to hand-write into the assistant's role prompt — this is what lets
-// a new business be configured entirely from the Automation Builder UI, without anyone writing prose
-// or calling the API directly. A single step can define MULTIPLE named flows (e.g. "Room booking" and
-// "Event space booking" both under one automation) — the model is told to first work out which one
-// the customer means, then follow only that flow's own fields/keys/items, never mixing them.
-function buildCollectLinkInstructions(cfg: AutomationStep["config"]): string {
-  const flows = (cfg?.collectFlows || []).filter((f) => f.name.trim() && f.fields.filter((x) => x.key && x.label).length && f.urlTemplate.trim());
-  if (!flows.length) return "";
-  const flowBlocks = flows.map((flow) => {
-    const fields = flow.fields.filter((f) => f.key && f.label);
-    const order = fields.map((f, i) => `${i + 1}) ${f.label}`).join(", ");
-    const keys = fields.map((f) => f.key).join(", ");
-    return `Flow "${flow.name}": ask for these details ONE AT A TIME, in this exact order, waiting for their answer each time (never ask for more than one thing per message): ${order}. `
-      + `After collecting all of this, in the SAME response that you summarize the details back to the customer and ask "Is that correct?", you MUST also call the set_link_params tool with these exact keys: ${keys}. Call it every time you show this summary, even before they've confirmed. `
-      + `Once they confirm, you MUST also call the show_items tool in that same response to display the relevant catalog items as cards for the "${flow.name}" flow specifically — do not mix in items from a different flow.`;
-  }).join("\n\n");
-  const intro = flows.length > 1
-    ? `This business handles ${flows.length} distinct kinds of requests, each with its own separate process below. First work out which one the customer means (ask a clarifying question if it's genuinely ambiguous), then follow ONLY that flow's instructions — never combine fields or items from two different flows in the same exchange.\n\n`
-    : "";
-  return `\n\n${intro}${flowBlocks}\n\nIn every case: never write a reply that says you're showing, pulling together, or providing options unless you are actually calling show_items in that exact response, every single time, with no exceptions. Do not describe the items yourself in text, and do NOT paste any link in your text reply — pass the same linkParams to show_items too, so each card's own button reflects the customer's exact request.`;
-}
-
-// Real, pre-existing bug this fixes: evaluateSplit only ever looks at the CURRENT message's own
-// text against the split's keywords — every incoming message re-classifies from scratch. A reply
-// like "yes" or "24/07/2026" almost never contains the original trigger keywords, so a multi-turn
-// conversation would silently drift to the OTHER branch after its first message, discarding whatever
-// that branch's steps (and any step-specific config, like Collect & Link fields) were doing. Fixed by
-// remembering the branch decision per session once made, instead of re-classifying every turn.
-async function loadStickyBranchMap(db: D1Database, workspaceId: string, sessionId: string): Promise<Record<string, { branchIdx: 0 | 1; subBranchIdx?: 0 | 1 }>> {
-  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN sticky_branch TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
-  const row = await db.prepare(`SELECT sticky_branch FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`).bind(workspaceId, sessionId).first<{ sticky_branch: string }>();
-  if (!row?.sticky_branch) return {};
-  try { const parsed = JSON.parse(row.sticky_branch); return parsed && typeof parsed === "object" ? parsed : {}; } catch { return {}; }
-}
-
-async function saveStickyBranch(db: D1Database, workspaceId: string, sessionId: string, automationId: string, decision: { branchIdx: 0 | 1; subBranchIdx?: 0 | 1 }): Promise<void> {
-  const map = await loadStickyBranchMap(db, workspaceId, sessionId);
-  map[automationId] = decision;
-  await db.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, sticky_branch) VALUES (?, ?, ?)
-    ON CONFLICT(workspace_id, session_id) DO UPDATE SET sticky_branch = excluded.sticky_branch`).bind(workspaceId, sessionId, JSON.stringify(map)).run();
-}
-
-async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx, automation: AutomationRow, step: AutomationStep, history: ChatMessage[], outMessages: AutomationOutMessage[]): Promise<"continue" | "waiting"> {
-  const cfg = step.config || {};
-  const send = async (text: string) => {
-    outMessages.push({ type: "text", text });
-    await ctx.deliver(text);
-    await env.DB.prepare(`INSERT INTO automation_sends (workspace_id, automation_id, contact_key) VALUES (?, ?, ?)`).bind(workspaceId, automation.id, ctx.contactKey).run();
-  };
-  if (step.kind === "message") {
-    await send(cfg.messageText || step.subtitle);
-    return "continue";
-  }
-  if (step.kind === "aiReply") {
-    if (!env.ANTHROPIC_API_KEY) { await send("Our assistant isn't fully configured yet — a team member will follow up shortly."); return "continue"; }
-    const systemPrompt = (await buildSystemPrompt(env.DB, workspaceId)) + buildCollectLinkInstructions(cfg);
-    const allCatalogItems = await listItemsForWorkspace(env.DB, workspaceId);
-    const collectItemIds = [...new Set((cfg.collectFlows || []).flatMap((f) => f.itemIds || []))];
-    const catalogItems = collectItemIds.length ? allCatalogItems.filter((it) => collectItemIds.includes(it.id)) : allCatalogItems;
-    let shownItemIds: string[] = [];
-    let shownLinkParams: Record<string, string> | undefined;
-    const onSetLinkParams = ctx.persistConversationState
-      ? async (params: Record<string, string>) => { await saveLinkParams(env.DB, workspaceId, ctx.contactKey, params); }
-      : undefined;
-    const result = catalogItems.length
-      ? await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, [], undefined, undefined, undefined, catalogItems, async (ids, linkParams) => { shownItemIds = ids; shownLinkParams = linkParams; }, onSetLinkParams)
-      : await callClaude(env.ANTHROPIC_API_KEY, systemPrompt, history);
-    const fallback = shownItemIds.length ? null : await itemsFallbackAfterConfirmation(env, workspaceId, ctx, history, catalogItems);
-    await send(result.reply || (fallback ? "Here are some options that might work for you — tap a card's button to see more and continue." : "Thanks for reaching out — a team member will follow up shortly."));
-    if (shownItemIds.length) {
-      const linkParams = await resolveLinkParams(env.DB, workspaceId, ctx, shownLinkParams);
-      const items = withLinkParams(await getItemsByIds(env.DB, workspaceId, shownItemIds), linkParams);
-      if (items.length) outMessages.push({ type: "items", items });
-    } else if (fallback) {
-      outMessages.push(fallback);
+    if (node.kind === "split") { currentId = (await evaluateSplit(env.DB, session.workspaceId, row.id, node, message, "dry-run")).next; continue; }
+    if (nodeAwaitsInput(node.kind)) {
+      const waitLabel = node.kind === "buttons" ? "Waits for the customer to pick an option" : node.kind === "question" ? "Waits for the customer's answer" : "Waits for the customer's next message";
+      path.push({ label: `⏸ ${waitLabel}`, steps: [] });
+      break;
     }
-    return "continue";
+    if (node.kind === "end") break;
+    currentId = node.next ?? null;
   }
-  if (step.kind === "aiAction") {
-    if (!env.ANTHROPIC_API_KEY) { await send("One moment — checking on that for you."); return "continue"; }
-    const storedActions = (await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions")) || [];
-    const actions: AssistantActionDef[] = sanitizeActions(storedActions).filter((a) => a.name.toLowerCase() === (cfg.aiActionName || "").toLowerCase());
-    const systemPrompt = (await buildSystemPrompt(env.DB, workspaceId)) + `\n\nIf relevant, use the "${cfg.aiActionName}" tool to help answer this.` + buildCollectLinkInstructions(cfg);
-    const allCatalogItems = await listItemsForWorkspace(env.DB, workspaceId);
-    const collectItemIds = [...new Set((cfg.collectFlows || []).flatMap((f) => f.itemIds || []))];
-    const catalogItems = collectItemIds.length ? allCatalogItems.filter((it) => collectItemIds.includes(it.id)) : allCatalogItems;
-    let shownItemIds: string[] = [];
-    let shownLinkParams: Record<string, string> | undefined;
-    const onSetLinkParams = ctx.persistConversationState
-      ? async (params: Record<string, string>) => { await saveLinkParams(env.DB, workspaceId, ctx.contactKey, params); }
-      : undefined;
-    const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions, undefined, undefined, undefined, catalogItems, async (ids, linkParams) => { shownItemIds = ids; shownLinkParams = linkParams; }, onSetLinkParams);
-    const fallback = shownItemIds.length ? null : await itemsFallbackAfterConfirmation(env, workspaceId, ctx, history, catalogItems);
-    await send(result.reply || (fallback ? "Here are some options that might work for you — tap a card's button to see more and continue." : "Let me look into that and get back to you."));
-    if (shownItemIds.length) {
-      const linkParams = await resolveLinkParams(env.DB, workspaceId, ctx, shownLinkParams);
-      const items = withLinkParams(await getItemsByIds(env.DB, workspaceId, shownItemIds), linkParams);
-      if (items.length) outMessages.push({ type: "items", items });
-    } else if (fallback) {
-      outMessages.push(fallback);
-    }
-    return "continue";
-  }
-  if (step.kind === "tag" && ctx.persistConversationState) {
-    try { await env.DB.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN tags TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
-    const existing = await env.DB.prepare(`SELECT tags FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`).bind(workspaceId, ctx.contactKey).first<{ tags: string }>();
-    const tags = new Set((existing?.tags || "").split(",").map((t) => t.trim()).filter(Boolean));
-    if (cfg.tagName) tags.add(cfg.tagName);
-    await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, tags) VALUES (?, ?, ?)
-      ON CONFLICT(workspace_id, session_id) DO UPDATE SET tags = excluded.tags`).bind(workspaceId, ctx.contactKey, [...tags].join(",")).run();
-    return "continue";
-  }
-  if (step.kind === "escalate" && ctx.persistConversationState) {
-    try { await env.DB.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN queue_name TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
-    try { await env.DB.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN queue_priority TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
-    await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, needs_attention, attention_reason, queue_name, queue_priority) VALUES (?, ?, 1, ?, ?, ?)
-      ON CONFLICT(workspace_id, session_id) DO UPDATE SET needs_attention = 1, attention_reason = excluded.attention_reason, queue_name = excluded.queue_name, queue_priority = excluded.queue_priority`)
-      .bind(workspaceId, ctx.contactKey, `Automation: ${automation.name}`, cfg.escalateQueue || "Support queue", cfg.escalatePriority || "Normal").run();
-    return "continue";
-  }
-  if (step.kind === "notify") {
-    const workspaceSettings = await readWorkspaceState<{ slackWebhookUrl?: string }>(env.DB, workspaceId, "qpy-engage-automation-settings");
-    if ((cfg.notifyChannels || []).includes("slack") && workspaceSettings?.slackWebhookUrl) {
-      await sendSlackNotification(workspaceSettings.slackWebhookUrl, `[${automation.name}] ${step.subtitle}`);
-    }
-    // Email delivery requires a connected provider — honestly not wired up yet (no SMTP/Resend
-    // credentials exist in this project). The notification intent is still recorded for real
-    // via the Activity log entry the caller writes after this step runs.
-    return "continue";
-  }
-  if (step.kind === "wait") {
-    return "waiting";
-  }
-  // tag/escalate on a channel without a conversation-state surface (whatsapp), or generic/trigger/split.
-  return "continue";
+
+  return json(request, { path });
 }
 
-function waitDueDate(cfg: AutomationStep["config"]): string {
-  const amount = cfg?.waitAmount ?? 1;
-  const unit = cfg?.waitUnit ?? "hours";
-  const ms = unit === "minutes" ? amount * 60_000 : unit === "days" ? amount * 86_400_000 : amount * 3_600_000;
-  return new Date(Date.now() + ms).toISOString().slice(0, 19).replace("T", " ");
-}
-
-type ResumePath = { branchIdx: 0 | 1; subBranchIdx?: 0 | 1; stepIdx: number };
-
-async function runStepsFrom(env: AutomationsEnv, workspaceId: string, ctx: RunCtx, automation: AutomationRow, steps: AutomationStep[], startIdx: number, history: ChatMessage[], resumePathBase: Omit<ResumePath, "stepIdx">): Promise<{ messages: AutomationOutMessage[]; waiting: boolean }> {
-  const messages: AutomationOutMessage[] = [];
-  for (let i = startIdx; i < steps.length; i++) {
-    const outcome = await executeStep(env, workspaceId, ctx, automation, steps[i], history, messages);
-    if (outcome === "waiting") {
-      const dueAt = waitDueDate(steps[i].config);
-      const resumePath: ResumePath = { ...resumePathBase, stepIdx: i + 1 };
-      await env.DB.prepare(`INSERT INTO automation_waits (workspace_id, automation_id, session_id, contact_key, channel, phone_number_id, resume_path, due_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind(workspaceId, automation.id, ctx.contactKey, ctx.contactKey, ctx.channel, ctx.phoneNumberId || "", JSON.stringify(resumePath), dueAt).run();
-      return { messages, waiting: true };
-    }
-  }
-  return { messages, waiting: false };
-}
-
-export interface AutomationRunResult { handled: boolean; messages: AutomationOutMessage[]; automationName?: string; branchLabel?: string }
-
-// Channel-agnostic core: selects the first active automation whose trigger includes this channel,
-// evaluates the split(s), runs the matching branch's steps, and writes an Activity-log row. All
-// delivery goes through ctx.deliver so Web chat and WhatsApp share this identical logic.
-export async function runAutomations(env: AutomationsEnv, workspaceId: string, channel: RunChannel, ctx: RunCtx, message: string, history: ChatMessage[]): Promise<AutomationRunResult> {
-  await ensureAutomationsSchema(env.DB);
-  const result = await env.DB.prepare(`SELECT * FROM automations2 WHERE workspace_id = ? AND status = 'active' ORDER BY priority ASC`).bind(workspaceId).all<AutomationRow>();
-  const active = (result.results || []).filter((a) => {
-    const flow = JSON.parse(a.flow_json) as FlowTree;
-    return (flow.trigger.config?.channels || []).includes(channel);
-  });
-  if (!active.length) return { handled: false, messages: [] };
-
-  const automation = active[0]; // first match wins — later active automations skipped for this message
-  const flow = JSON.parse(automation.flow_json) as FlowTree;
-
-  const sticky = ctx.persistConversationState ? (await loadStickyBranchMap(env.DB, workspaceId, ctx.contactKey))[automation.id] : undefined;
-  const branchIdx: 0 | 1 = sticky ? sticky.branchIdx : await evaluateSplit(env.DB, workspaceId, automation.id, flow.split1, message, ctx.contactKey);
-  const branch1 = flow.branches[branchIdx];
-
-  const { messages: branchMessages, waiting: waiting1 } = await runStepsFrom(env, workspaceId, ctx, automation, branch1.steps, 0, history, { branchIdx });
-  let allMessages = branchMessages;
-  let branchLabel = branch1.label;
-  let waiting = waiting1;
-  let executedSteps = branch1.steps;
-  let subIdxForSticky: 0 | 1 | undefined;
-
-  if (!waiting1 && branch1.split2 && branch1.subBranches) {
-    const subIdx: 0 | 1 = sticky?.subBranchIdx ?? await evaluateSplit(env.DB, workspaceId, automation.id, branch1.split2, message, ctx.contactKey);
-    subIdxForSticky = subIdx;
-    const subBranch = branch1.subBranches[subIdx];
-    const { messages: subMessages, waiting: waiting2 } = await runStepsFrom(env, workspaceId, ctx, automation, subBranch.steps, 0, history, { branchIdx, subBranchIdx: subIdx });
-    allMessages = [...allMessages, ...subMessages];
-    branchLabel = `${branch1.label} → ${subBranch.label}`;
-    waiting = waiting2;
-    executedSteps = [...branch1.steps, ...subBranch.steps];
-  }
-
-  if (ctx.persistConversationState && !sticky) {
-    await saveStickyBranch(env.DB, workspaceId, ctx.contactKey, automation.id, { branchIdx, subBranchIdx: subIdxForSticky });
-  }
-
-  const wasEscalated = executedSteps.some((s) => s.kind === "escalate");
-  const outcome = waiting ? "Waiting" : wasEscalated ? "Escalated" : "Resolved by AI";
-  const outcomeType = outcome === "Escalated" ? "warn" : "good";
-  const channelLabel = channel === "whatsapp" ? "WhatsApp" : "Web chat";
-  await env.DB.prepare(`INSERT INTO automation_runs (workspace_id, automation_id, automation_name, contact, channel, branch_label, outcome, outcome_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(workspaceId, automation.id, automation.name, ctx.contactKey.slice(0, 14), channelLabel, branchLabel, outcome, outcomeType).run();
-
-  return { handled: true, messages: allMessages, automationName: automation.name, branchLabel };
-}
-
-// Web chat wrapper: delivery records an assistant row in widget_messages (the widget's poll loop
-// then shows it). Called from worker/widget.ts's respond() before the bare-AI fallback.
-export async function runAutomationsForWidgetMessage(env: AutomationsEnv, workspaceId: string, sessionId: string, message: string, history: ChatMessage[]): Promise<AutomationRunResult> {
-  const ctx: RunCtx = {
-    channel: "webchat",
-    contactKey: sessionId,
-    persistConversationState: true,
-    deliver: async (text: string) => {
-      await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`).bind(workspaceId, sessionId, text, sqliteNow()).run();
-      return true;
-    },
-  };
-  return runAutomations(env, workspaceId, "webchat", ctx, message, history);
-}
-
-// Resumes any due "wait" steps — called from the scheduled (cron) handler. `makeDeliver` lets the
-// caller supply a channel-appropriate sender (worker/index.ts builds a WhatsApp one when needed),
-// since delivering from a background tick needs the same channel plumbing as a live message.
-export async function resumeDueAutomationWaits(env: AutomationsEnv, makeDeliver: (row: { workspace_id: string; channel: string; contact_key: string; phone_number_id: string }) => ((text: string) => Promise<boolean>) | null): Promise<number> {
-  await ensureAutomationsSchema(env.DB);
-  const now = sqliteNow();
-  const due = await env.DB.prepare(`SELECT * FROM automation_waits WHERE due_at <= ? LIMIT 25`).bind(now).all<{ id: number; workspace_id: string; automation_id: string; session_id: string; contact_key: string; channel: string; phone_number_id: string; resume_path: string }>();
-  let resumed = 0;
-  for (const row of due.results || []) {
-    const automationRow = await env.DB.prepare(`SELECT * FROM automations2 WHERE id = ?`).bind(row.automation_id).first<AutomationRow>();
-    await env.DB.prepare(`DELETE FROM automation_waits WHERE id = ?`).bind(row.id).run();
-    if (!automationRow) continue;
-    const deliver = makeDeliver({ workspace_id: row.workspace_id, channel: row.channel, contact_key: row.contact_key || row.session_id, phone_number_id: row.phone_number_id });
-    if (!deliver) continue; // channel no longer deliverable (e.g. WhatsApp disconnected) — drop the resume
-    const ctx: RunCtx = {
-      channel: row.channel === "whatsapp" ? "whatsapp" : "webchat",
-      contactKey: row.contact_key || row.session_id,
-      phoneNumberId: row.phone_number_id || undefined,
-      persistConversationState: row.channel !== "whatsapp",
-      deliver,
-    };
-    const flow = JSON.parse(automationRow.flow_json) as FlowTree;
-    const path = JSON.parse(row.resume_path) as ResumePath;
-    const branch = flow.branches[path.branchIdx];
-    const steps = path.subBranchIdx !== undefined && branch.subBranches ? branch.subBranches[path.subBranchIdx].steps : branch.steps;
-    await runStepsFrom(env, row.workspace_id, ctx, automationRow, steps, path.stepIdx, [], { branchIdx: path.branchIdx, subBranchIdx: path.subBranchIdx });
-    resumed++;
-  }
-  return resumed;
-}
+// ── Execution engine ──
+// The engine now lives in worker/automation-engine.ts (graph walk, node execution, session cursor).
+// Re-exported here so existing importers (worker/index.ts, worker/meta.ts, worker/widget.ts) keep
+// working against the same module they always did.
+export {
+  runAutomations,
+  runAutomationsForWidgetMessage,
+  resumeDueAutomationWaits,
+  type RunCtx,
+  type RunChannel,
+  type AutomationOutMessage,
+  type AutomationRunResult,
+} from "./automation-engine";
 
 export async function handleAutomationsRequest(request: Request, env: AutomationsEnv): Promise<Response | null> {
   const url = new URL(request.url);

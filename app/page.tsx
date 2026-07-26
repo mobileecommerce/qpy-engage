@@ -1306,14 +1306,21 @@ const automationTemplates:{name:string;trigger:string;action:string}[]=[{name:"W
 
 // ── Automation Builder: real tree-based automation engine (see worker/automations.ts) ──
 
-type AutoStepKind = "trigger"|"split"|"aiReply"|"message"|"wait"|"tag"|"notify"|"aiAction"|"escalate"|"generic";
+// ── v2 automation graph (mirrors worker/automation-graph.ts) ──
+// Any node can point at any node, so a wide menu tree, a deep linear chain, and a loop back to a
+// main menu are all just edges — no shape is privileged the way v1's fixed 2-branch tree was.
+type AutoNodeKind = "trigger"|"message"|"buttons"|"question"|"items"|"aiReply"|"aiAction"|"split"|"wait"|"tag"|"notify"|"escalate"|"end";
+type AutoNodeOption = { id:string; label:string; description?:string; next:string|null };
+type AutoNodeCase = { id:string; label:string; match?:string; weight?:number; next:string|null };
 type AutoStepConfig = {
   channels?:string[];
-  ruleType?:"conditional"|"ab"|"time"|"freq"; condition?:string;
-  abWeightA?:number;
+  messageText?:string;
+  options?:AutoNodeOption[];
+  variableKey?:string; inputType?:"text"|"number"|"date"|"email"|"phone"; required?:boolean;
+  itemIds?:string[]; urlTemplate?:string;
+  ruleType?:"conditional"|"ab"|"time"|"freq"; cases?:AutoNodeCase[]; fallbackNext?:string|null;
   activeDays?:string[]; startTime?:string; endTime?:string;
   freqMax?:number; freqPeriod?:"hour"|"day"|"week";
-  messageChannel?:string; messageText?:string;
   waitAmount?:number; waitUnit?:"minutes"|"hours"|"days";
   tagName?:string;
   notifyChannels?:string[]; notifyRecipient?:string;
@@ -1321,62 +1328,124 @@ type AutoStepConfig = {
   escalateQueue?:string; escalatePriority?:"Normal"|"Urgent";
   collectFlows?:{id:string;name:string;fields:{key:string;label:string}[];urlTemplate:string;itemIds:string[]}[];
 };
-type AutoStep = { id:string; icon:string; title:string; subtitle:string; chip:string; kind:AutoStepKind; config?:AutoStepConfig };
-type AutoSubBranch = { id:string; label:string; color:string; steps:AutoStep[] };
-type AutoBranch = { id:string; label:string; color:string; steps:AutoStep[]; split2?:AutoStep; subBranches?:[AutoSubBranch,AutoSubBranch] };
-type AutoFlow = { trigger:AutoStep; split1:AutoStep; branches:[AutoBranch,AutoBranch] };
-type AutomationDef = { id:string; name:string; sectorKey:string; status:"active"|"draft"|"inactive"; priority:number; needsConfig:boolean; flow:AutoFlow; createdAt?:string; updatedAt?:string };
+type AutoNode = { id:string; kind:AutoNodeKind; title:string; subtitle?:string; icon?:string; chip?:string; next?:string|null; config?:AutoStepConfig };
+type AutoGraph = { version:2; entryId:string; nodes:Record<string,AutoNode> };
+type AutomationDef = { id:string; name:string; sectorKey:string; status:"active"|"draft"|"inactive"; priority:number; needsConfig:boolean; flow:AutoGraph; createdAt?:string; updatedAt?:string };
 type SectorInfo = { key:string; name:string; icon:string; desc:string };
 type ActivityRow = { id:number; automationId:string; automationName:string; contact:string; channel:string; branch:string; outcome:string; outcomeType:string; createdAt:string };
 
-type StepPath =
-  | { kind:"trigger" }
-  | { kind:"split1" }
-  | { kind:"branchStep"; branchIdx:0|1; stepIdx:number }
-  | { kind:"split2"; branchIdx:0|1 }
-  | { kind:"subStep"; branchIdx:0|1; subIdx:0|1; stepIdx:number };
+// Where an edge lives, so "add a node here" / "point this somewhere else" can address any slot.
+type EdgeRef =
+  | { kind:"next"; nodeId:string }
+  | { kind:"option"; nodeId:string; optionId:string }
+  | { kind:"case"; nodeId:string; caseId:string }
+  | { kind:"fallback"; nodeId:string };
 
-function getStepAtPath(flow:AutoFlow, path:StepPath): AutoStep {
-  if(path.kind==="trigger")return flow.trigger;
-  if(path.kind==="split1")return flow.split1;
-  if(path.kind==="branchStep")return flow.branches[path.branchIdx].steps[path.stepIdx];
-  if(path.kind==="split2")return flow.branches[path.branchIdx].split2!;
-  return flow.branches[path.branchIdx].subBranches![path.subIdx].steps[path.stepIdx];
-}
-function setStepAtPath(flow:AutoFlow, path:StepPath, next:AutoStep): AutoFlow {
-  const branches:[AutoBranch,AutoBranch]=[{...flow.branches[0]},{...flow.branches[1]}];
-  if(path.kind==="trigger")return {...flow,trigger:next};
-  if(path.kind==="split1")return {...flow,split1:next};
-  if(path.kind==="branchStep"){const b=branches[path.branchIdx];b.steps=b.steps.map((s,i)=>i===path.stepIdx?next:s);return {...flow,branches};}
-  if(path.kind==="split2"){branches[path.branchIdx].split2=next;return {...flow,branches};}
-  const b=branches[path.branchIdx];const subs=[...b.subBranches!] as [AutoSubBranch,AutoSubBranch];subs[path.subIdx]={...subs[path.subIdx],steps:subs[path.subIdx].steps.map((s,i)=>i===path.stepIdx?next:s)};b.subBranches=subs;
-  return {...flow,branches};
-}
-function deleteStepAtPath(flow:AutoFlow, path:StepPath): AutoFlow {
-  const branches:[AutoBranch,AutoBranch]=[{...flow.branches[0]},{...flow.branches[1]}];
-  if(path.kind==="branchStep"){const b=branches[path.branchIdx];b.steps=b.steps.filter((_,i)=>i!==path.stepIdx);return {...flow,branches};}
-  if(path.kind==="subStep"){const b=branches[path.branchIdx];const subs=[...b.subBranches!] as [AutoSubBranch,AutoSubBranch];subs[path.subIdx]={...subs[path.subIdx],steps:subs[path.subIdx].steps.filter((_,i)=>i!==path.stepIdx)};b.subBranches=subs;return {...flow,branches};}
-  return flow;
+const AUTO_NODE_META:Record<AutoNodeKind,{icon:string;chip:string;label:string}>={
+  trigger:{icon:"💬",chip:"rose",label:"Trigger"},
+  message:{icon:"💬",chip:"rose",label:"Send message"},
+  buttons:{icon:"◉",chip:"teal",label:"Ask with options"},
+  question:{icon:"❓",chip:"teal",label:"Ask & store answer"},
+  items:{icon:"▤",chip:"teal",label:"Show catalog items"},
+  aiReply:{icon:"✨",chip:"indigo",label:"AI reply"},
+  aiAction:{icon:"⚙",chip:"indigo",label:"AI reply + action"},
+  split:{icon:"⑂",chip:"purple",label:"Rule branch"},
+  wait:{icon:"⏱",chip:"neutral",label:"Wait"},
+  tag:{icon:"🏷️",chip:"neutral",label:"Add tag"},
+  notify:{icon:"🔔",chip:"purple",label:"Notify team"},
+  escalate:{icon:"🧑‍💼",chip:"human",label:"Escalate to human"},
+  end:{icon:"⏹",chip:"neutral",label:"End"},
+};
+
+const NEW_NODE_KINDS:AutoNodeKind[]=["message","buttons","question","items","aiReply","aiAction","split","wait","tag","notify","escalate","end"];
+
+function defaultConfigFor(kind:AutoNodeKind):AutoStepConfig{
+  switch(kind){
+    case "trigger": return {channels:["webchat"]};
+    case "message": return {messageText:""};
+    case "buttons": return {messageText:"",options:[]};
+    case "question": return {messageText:"",variableKey:"",inputType:"text"};
+    case "items": return {itemIds:[],urlTemplate:""};
+    case "split": return {ruleType:"conditional",cases:[{id:crypto.randomUUID(),label:"Matches",match:"",next:null}],fallbackNext:null};
+    case "wait": return {waitAmount:1,waitUnit:"hours"};
+    case "tag": return {tagName:""};
+    case "notify": return {notifyChannels:["slack"],notifyRecipient:""};
+    case "escalate": return {escalateQueue:"",escalatePriority:"Normal"};
+    default: return {};
+  }
 }
 
-type StepTarget = { branchIdx:0|1; subIdx?:0|1 };
-
-function appendStepAtTarget(flow:AutoFlow, target:StepTarget, newStep:AutoStep): AutoFlow {
-  const branches:[AutoBranch,AutoBranch]=[{...flow.branches[0]},{...flow.branches[1]}];
-  const b=branches[target.branchIdx];
-  if(target.subIdx===undefined){b.steps=[...b.steps,newStep]}
-  else{const subs=[...b.subBranches!] as [AutoSubBranch,AutoSubBranch];subs[target.subIdx]={...subs[target.subIdx],steps:[...subs[target.subIdx].steps,newStep]};b.subBranches=subs}
-  return {...flow,branches};
+function makeNode(kind:AutoNodeKind):AutoNode{
+  const meta=AUTO_NODE_META[kind];
+  return {id:crypto.randomUUID(),kind,title:meta.label,subtitle:"",icon:meta.icon,chip:meta.chip,next:null,config:defaultConfigFor(kind)};
 }
 
-// Mirror of the backend flowNeedsConfig / stepIsIncomplete logic so the canvas can flag exactly
-// which blocks still need a required field, before the user even saves.
-function stepIsIncomplete(step:AutoStep):boolean{
-  const c=step.config||{};
-  switch(step.kind){
+// ── Immutable graph edits ──
+
+function setNode(graph:AutoGraph, node:AutoNode):AutoGraph{
+  return {...graph,nodes:{...graph.nodes,[node.id]:node}};
+}
+
+function setEdge(graph:AutoGraph, edge:EdgeRef, target:string|null):AutoGraph{
+  const node=graph.nodes[edge.nodeId];
+  if(!node)return graph;
+  if(edge.kind==="next")return setNode(graph,{...node,next:target});
+  const cfg={...(node.config||{})};
+  if(edge.kind==="option")cfg.options=(cfg.options||[]).map(o=>o.id===edge.optionId?{...o,next:target}:o);
+  if(edge.kind==="case")cfg.cases=(cfg.cases||[]).map(c=>c.id===edge.caseId?{...c,next:target}:c);
+  if(edge.kind==="fallback")cfg.fallbackNext=target;
+  return setNode(graph,{...node,config:cfg});
+}
+
+function getEdgeTarget(graph:AutoGraph, edge:EdgeRef):string|null{
+  const node=graph.nodes[edge.nodeId];
+  if(!node)return null;
+  if(edge.kind==="next")return node.next??null;
+  const cfg=node.config||{};
+  if(edge.kind==="option")return (cfg.options||[]).find(o=>o.id===edge.optionId)?.next??null;
+  if(edge.kind==="case")return (cfg.cases||[]).find(c=>c.id===edge.caseId)?.next??null;
+  return cfg.fallbackNext??null;
+}
+
+// Adding a node always happens *through* an edge, so a new block is never left floating with no way
+// for a conversation to reach it.
+function addNodeAtEdge(graph:AutoGraph, edge:EdgeRef, kind:AutoNodeKind):{graph:AutoGraph;node:AutoNode}{
+  const node=makeNode(kind);
+  // Preserve whatever the edge pointed at by chaining it after the new node where that makes sense.
+  const previousTarget=getEdgeTarget(graph,edge);
+  if(previousTarget&&kind!=="buttons"&&kind!=="split"&&kind!=="end")node.next=previousTarget;
+  let next=setNode(graph,node);
+  next=setEdge(next,edge,node.id);
+  return {graph:next,node};
+}
+
+// Deleting a node also clears every edge that pointed at it, so no dangling reference survives.
+function deleteNode(graph:AutoGraph, nodeId:string):AutoGraph{
+  if(nodeId===graph.entryId)return graph;
+  const nodes:Record<string,AutoNode>={};
+  for(const [id,n] of Object.entries(graph.nodes)){
+    if(id===nodeId)continue;
+    const cfg={...(n.config||{})};
+    if(cfg.options)cfg.options=cfg.options.map(o=>o.next===nodeId?{...o,next:null}:o);
+    if(cfg.cases)cfg.cases=cfg.cases.map(c=>c.next===nodeId?{...c,next:null}:c);
+    if(cfg.fallbackNext===nodeId)cfg.fallbackNext=null;
+    nodes[id]={...n,next:n.next===nodeId?null:n.next,config:cfg};
+  }
+  return {...graph,nodes};
+}
+
+// Mirror of the backend nodeIsIncomplete so the canvas can flag a block before anything is saved.
+function nodeIsIncomplete(node:AutoNode):boolean{
+  const c=node.config||{};
+  switch(node.kind){
     case "trigger": return !(c.channels||[]).length;
-    case "split": return (c.ruleType||"conditional")==="conditional" && !(c.condition||"").trim();
     case "message": return !(c.messageText||"").trim();
+    case "buttons": return !(c.messageText||"").trim()||!(c.options||[]).length||(c.options||[]).some(o=>!o.label.trim());
+    case "question": return !(c.messageText||"").trim()||!(c.variableKey||"").trim();
+    case "items": return !(c.itemIds||[]).length;
+    case "split": return (c.ruleType||"conditional")==="conditional"
+      ? !(c.cases||[]).length||(c.cases||[]).some(k=>!(k.match||"").trim())
+      : !(c.cases||[]).length;
     case "tag": return !(c.tagName||"").trim();
     case "aiAction": return !(c.aiActionName||"").trim();
     case "escalate": return !(c.escalateQueue||"").trim();
@@ -1386,32 +1455,17 @@ function stepIsIncomplete(step:AutoStep):boolean{
   }
 }
 
-function addSplitToBranch(flow:AutoFlow, branchIdx:0|1): AutoFlow {
-  const branches:[AutoBranch,AutoBranch]=[{...flow.branches[0]},{...flow.branches[1]}];
-  const b=branches[branchIdx];
-  b.split2={id:crypto.randomUUID(),icon:"⑂",title:"Conditional split",subtitle:"Click to set the keywords that decide the branch",chip:"purple",kind:"split",config:{ruleType:"conditional",condition:""}};
-  b.subBranches=[
-    {id:crypto.randomUUID(),label:"Matches",color:"green",steps:[{id:crypto.randomUUID(),icon:"💬",title:"Send message",subtitle:"Click to write what gets sent",chip:"rose",kind:"message",config:{messageChannel:"webchat",messageText:""}}]},
-    {id:crypto.randomUUID(),label:"No match",color:"blue",steps:[{id:crypto.randomUUID(),icon:"💬",title:"Send message",subtitle:"Click to write what gets sent",chip:"rose",kind:"message",config:{messageChannel:"webchat",messageText:""}}]},
+// Every outgoing edge of a node, labelled the way the customer experiences it.
+function outgoingEdges(node:AutoNode):{edge:EdgeRef;label:string;target:string|null}[]{
+  const cfg=node.config||{};
+  if(node.kind==="buttons")return (cfg.options||[]).map(o=>({edge:{kind:"option" as const,nodeId:node.id,optionId:o.id},label:o.label||"(unnamed option)",target:o.next}));
+  if(node.kind==="split")return [
+    ...(cfg.cases||[]).map(c=>({edge:{kind:"case" as const,nodeId:node.id,caseId:c.id},label:c.label||"(case)",target:c.next})),
+    {edge:{kind:"fallback" as const,nodeId:node.id},label:"Otherwise",target:cfg.fallbackNext??null},
   ];
-  return {...flow,branches};
+  if(node.kind==="end")return [];
+  return [{edge:{kind:"next" as const,nodeId:node.id},label:"then",target:node.next??null}];
 }
-function removeSplitFromBranch(flow:AutoFlow, branchIdx:0|1): AutoFlow {
-  const branches:[AutoBranch,AutoBranch]=[{...flow.branches[0]},{...flow.branches[1]}];
-  const b=branches[branchIdx];
-  delete b.split2; delete b.subBranches;
-  return {...flow,branches};
-}
-
-const NEW_STEP_KINDS:{kind:AutoStepKind;icon:string;title:string;chip:string;config:AutoStepConfig}[]=[
-  {kind:"message",icon:"💬",title:"Send message",chip:"rose",config:{messageChannel:"webchat",messageText:""}},
-  {kind:"aiReply",icon:"✨",title:"Send AI reply",chip:"indigo",config:{}},
-  {kind:"aiAction",icon:"📅",title:"AI Action",chip:"indigo",config:{aiActionName:""}},
-  {kind:"wait",icon:"⏱",title:"Wait",chip:"neutral",config:{waitAmount:1,waitUnit:"hours"}},
-  {kind:"tag",icon:"🏷️",title:"Add tag",chip:"neutral",config:{tagName:""}},
-  {kind:"notify",icon:"🔔",title:"Notify team",chip:"purple",config:{notifyChannels:["slack"],notifyRecipient:""}},
-  {kind:"escalate",icon:"🧑‍💼",title:"Escalate to human",chip:"human",config:{escalateQueue:"",escalatePriority:"Normal"}},
-];
 
 const AUTO_CHIP_CLASS:Record<string,string>={rose:"chip-rose",green:"chip-green",blue:"chip-blue",purple:"chip-purple",indigo:"chip-indigo",human:"chip-human",neutral:"chip-neutral",teal:"chip-teal"};
 
@@ -1423,8 +1477,9 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
   const [selected,setSelected]=useState<AutomationDef|null>(null);
   const [sectors,setSectors]=useState<SectorInfo[]>([]);
   const [showTemplates,setShowTemplates]=useState(false);
-  const [editing,setEditing]=useState<{path:StepPath;step:AutoStep}|null>(null);
-  const [addingStepTo,setAddingStepTo]=useState<StepTarget|null>(null);
+  const [editing,setEditing]=useState<AutoNode|null>(null);
+  const [addingAtEdge,setAddingAtEdge]=useState<EdgeRef|null>(null);
+  const [linkingEdge,setLinkingEdge]=useState<EdgeRef|null>(null);
   const [activity,setActivity]=useState<ActivityRow[]>([]);
   const [activityLoading,setActivityLoading]=useState(false);
   const [aiActions,setAiActions]=useState<{name:string;description:string}[]>([]);
@@ -1435,9 +1490,6 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
   const [testMessage,setTestMessage]=useState("");
   const [testResult,setTestResult]=useState<{path:{label:string;note?:string;steps:string[]}[]}|null>(null);
   const [testing,setTesting]=useState(false);
-  const topBranchesRef=useRef<HTMLDivElement>(null);
-  const nestedBranchesRef0=useRef<HTMLDivElement>(null);
-  const nestedBranchesRef1=useRef<HTMLDivElement>(null);
 
   const load=async()=>{
     if(!token){setLoading(false);return}
@@ -1496,7 +1548,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
     notify("Automation created from template");
   };
 
-  const patchAutomation=async(id:string,patch:Partial<{name:string;status:string;flow:AutoFlow;needsConfig:boolean}>)=>{
+  const patchAutomation=async(id:string,patch:Partial<{name:string;status:string;flow:AutoGraph;needsConfig:boolean}>)=>{
     if(!token)return null;
     const response=await fetch(metaApi(`/api/automations/${id}`),{method:"PATCH",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify(patch)});
     const result=await response.json() as {automation?:AutomationDef;error?:string};
@@ -1526,39 +1578,41 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
     notify("Automation deleted");
   };
 
-  const saveStep=async(path:StepPath,next:AutoStep)=>{
-    if(!selected)return;
-    const flow=setStepAtPath(selected.flow,path,next);
-    const saved=await patchAutomation(selected.id,{flow});
-    if(saved){setEditing(null);notify("Step saved")}
-  };
-  const deleteStep=async(path:StepPath)=>{
-    if(!selected)return;
-    if(!window.confirm("Delete this step?"))return;
-    const flow=deleteStepAtPath(selected.flow,path);
-    const saved=await patchAutomation(selected.id,{flow});
-    if(saved){setEditing(null);notify("Step deleted")}
+  const commitGraph=async(graph:AutoGraph, message:string)=>{
+    if(!selected)return null;
+    const saved=await patchAutomation(selected.id,{flow:graph});
+    if(saved&&message)notify(message);
+    return saved;
   };
 
-  const appendStep=async(target:StepTarget,option:typeof NEW_STEP_KINDS[number])=>{
+  const saveNode=async(node:AutoNode)=>{
     if(!selected)return;
-    const newStep:AutoStep={id:crypto.randomUUID(),icon:option.icon,title:option.title,subtitle:"Click to configure this step",chip:option.chip,kind:option.kind,config:option.config};
-    const flow=appendStepAtTarget(selected.flow,target,newStep);
-    const saved=await patchAutomation(selected.id,{flow});
-    setAddingStepTo(null);
-    if(saved){notify("Step added");setEditing({path:target.subIdx===undefined?{kind:"branchStep",branchIdx:target.branchIdx,stepIdx:saved.flow.branches[target.branchIdx].steps.length-1}:{kind:"subStep",branchIdx:target.branchIdx,subIdx:target.subIdx,stepIdx:saved.flow.branches[target.branchIdx].subBranches![target.subIdx].steps.length-1},step:newStep})}
+    const saved=await commitGraph(setNode(selected.flow,node),"Block saved");
+    if(saved)setEditing(null);
   };
 
-  const addNestedSplit=async(branchIdx:0|1)=>{
+  const removeNode=async(nodeId:string)=>{
     if(!selected)return;
-    const saved=await patchAutomation(selected.id,{flow:addSplitToBranch(selected.flow,branchIdx)});
-    if(saved)notify("Condition split added — click it to set the keywords");
+    if(!window.confirm("Delete this block? Anything pointing at it will become unconnected."))return;
+    const saved=await commitGraph(deleteNode(selected.flow,nodeId),"Block deleted");
+    if(saved)setEditing(null);
   };
-  const removeNestedSplit=async(branchIdx:0|1)=>{
+
+  // Adding always goes through an edge slot, so a new block is immediately reachable.
+  const addNodeHere=async(edge:EdgeRef, kind:AutoNodeKind)=>{
     if(!selected)return;
-    if(!window.confirm("Remove this condition split and its two sub-branches?"))return;
-    const saved=await patchAutomation(selected.id,{flow:removeSplitFromBranch(selected.flow,branchIdx)});
-    if(saved)notify("Condition split removed");
+    const {graph,node}=addNodeAtEdge(selected.flow,edge,kind);
+    const saved=await commitGraph(graph,"Block added");
+    setAddingAtEdge(null);
+    if(saved)setEditing(node);
+  };
+
+  // Pointing an edge at a block that already exists is what makes "Main menu" style loop-backs
+  // possible — the same capability v1 had no way to express.
+  const linkEdgeTo=async(edge:EdgeRef, targetId:string|null)=>{
+    if(!selected)return;
+    await commitGraph(setEdge(selected.flow,edge,targetId),targetId?"Connected":"Disconnected");
+    setLinkingEdge(null);
   };
 
   const startRename=()=>{if(selected){setNameDraft(selected.name);setRenaming(true)}};
@@ -1608,7 +1662,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
     return <>
       <PageHeader title="Automation activity" description="Real executions of your automations, most recent first." action={<button className="secondary-btn" onClick={()=>setView("list")}>← Back to automations</button>}/>
       <div className="data-card">
-        {activityLoading?<p className="empty-hint">Loading…</p>:!activity.length?<div className="empty-state"><span>⌁</span><h3>No activity yet</h3><p>Once a customer message matches an active automation's trigger, it'll show up here.</p></div>:
+        {activityLoading?<p className="empty-hint">Loading…</p>:!activity.length?<div className="empty-state"><span>⌁</span><h3>No activity yet</h3><p>Once a customer message matches an active automation&apos;s trigger, it&apos;ll show up here.</p></div>:
         <table><thead><tr><th>Contact</th><th>Channel</th><th>Automation</th><th>Branch</th><th>Outcome</th><th>When</th></tr></thead>
         <tbody>{activity.map(row=><tr key={row.id}><td>{row.contact}</td><td>{row.channel}</td><td><strong>{row.automationName}</strong></td><td>{row.branch}</td><td><b className={row.outcomeType==="warn"?"":"positive"} style={row.outcomeType==="warn"?{color:"#b66b26"}:undefined}>{row.outcome}</b></td><td>{row.createdAt}</td></tr>)}</tbody></table>}
       </div>
@@ -1626,51 +1680,32 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
         <button className="secondary-btn" onClick={()=>{setTestOpen(true);setTestResult(null)}}>▷ Test</button>
         <button className={`toggle ${selected.status==="active"?"on":""}`} onClick={()=>toggleStatus(selected)} title={selected.status==="active"?"Active — click to deactivate":"Inactive — click to activate"}><i/></button>
       </div></div>
-      <div className="automation-canvas">
-        <AutoNode step={flow.trigger} onClick={()=>setEditing({path:{kind:"trigger"},step:flow.trigger})}/>
-        <div className="auto-conn"/>
-        <AutoNode step={flow.split1} onClick={()=>setEditing({path:{kind:"split1"},step:flow.split1})}/>
-        <AutoFork containerRef={topBranchesRef}/>
-        <div className="auto-branches" ref={topBranchesRef}>
-          {flow.branches.map((branch,branchIdx)=>{
-            const bi=branchIdx as 0|1;
-            const nestedRef=bi===0?nestedBranchesRef0:nestedBranchesRef1;
-            return <div className="auto-branch-col" key={branch.id}>
-              <span className={`auto-branch-label ${AUTO_CHIP_CLASS[branch.color]||"chip-neutral"}`}>{branch.label}</span>
-              {branch.steps.map((step,stepIdx)=><Fragment key={step.id}>
-                <AutoNode step={step} onClick={()=>setEditing({path:{kind:"branchStep",branchIdx:bi,stepIdx},step})} onDelete={()=>deleteStep({kind:"branchStep",branchIdx:bi,stepIdx})}/>
-                <div className="auto-conn"/>
-              </Fragment>)}
-              <button className="auto-add-step" onClick={()=>setAddingStepTo({branchIdx:bi})}>＋ Add step</button>
-              {branch.split2&&branch.subBranches?<>
-                <div className="auto-conn"/>
-                <AutoNode step={branch.split2} onClick={()=>setEditing({path:{kind:"split2",branchIdx:bi},step:branch.split2!})} onDelete={()=>removeNestedSplit(bi)}/>
-                <AutoFork containerRef={nestedRef}/>
-                <div className="auto-branches" ref={nestedRef}>
-                  {branch.subBranches.map((sub,subIdx)=>{
-                    const si=subIdx as 0|1;
-                    return <div className="auto-branch-col" key={sub.id}>
-                      <span className={`auto-branch-label ${AUTO_CHIP_CLASS[sub.color]||"chip-neutral"}`}>{sub.label}</span>
-                      {sub.steps.map((step,stepIdx)=><Fragment key={step.id}>
-                        <AutoNode step={step} onClick={()=>setEditing({path:{kind:"subStep",branchIdx:bi,subIdx:si,stepIdx},step})} onDelete={()=>deleteStep({kind:"subStep",branchIdx:bi,subIdx:si,stepIdx})}/>
-                        <div className="auto-conn"/>
-                      </Fragment>)}
-                      <button className="auto-add-step" onClick={()=>setAddingStepTo({branchIdx:bi,subIdx:si})}>＋ Add step</button>
-                    </div>;
-                  })}
-                </div>
-              </>:<><div className="auto-conn"/><button className="auto-add-step auto-add-split" onClick={()=>addNestedSplit(bi)}>⑂ Add a condition split</button></>}
-            </div>;
-          })}
-        </div>
+      <div className="automation-canvas graph-canvas">
+        <AutoGraphTree
+          graph={flow}
+          nodeId={flow.entryId}
+          seen={[]}
+          onEdit={setEditing}
+          onAddAt={setAddingAtEdge}
+          onLinkAt={setLinkingEdge}
+        />
       </div>
-      {editing&&<StepDrawer path={editing.path} step={editing.step} aiActions={aiActions} items={catalogItems} onClose={()=>setEditing(null)} onSave={saveStep} onDelete={editing.path.kind==="branchStep"||editing.path.kind==="subStep"?()=>deleteStep(editing.path):undefined}/>}
-      {addingStepTo&&<SimpleModal title="Add a step" onClose={()=>setAddingStepTo(null)}>
-        <p>Choose what this step does — you can configure the details afterward.</p>
-        <div className="template-gallery">{NEW_STEP_KINDS.map(option=><button key={option.kind} onClick={()=>appendStep(addingStepTo,option)}>
-          <span className={`auto-node-icon ${AUTO_CHIP_CLASS[option.chip]||"chip-neutral"}`} style={{display:"inline-grid",placeItems:"center",width:28,height:28,borderRadius:8}}>{option.icon}</span>
-          <strong>{option.title}</strong>
+      {editing&&<StepDrawer node={editing} graph={flow} aiActions={aiActions} items={catalogItems} onClose={()=>setEditing(null)} onSave={saveNode} onDelete={editing.id===flow.entryId?undefined:()=>removeNode(editing.id)}/>}
+      {addingAtEdge&&<SimpleModal title="Add a block here" onClose={()=>setAddingAtEdge(null)}>
+        <p>Choose what this block does — you can configure the details next.</p>
+        <div className="template-gallery">{NEW_NODE_KINDS.map(kind=><button key={kind} onClick={()=>addNodeHere(addingAtEdge,kind)}>
+          <span className={`auto-node-icon ${AUTO_CHIP_CLASS[AUTO_NODE_META[kind].chip]||"chip-neutral"}`} style={{display:"inline-grid",placeItems:"center",width:28,height:28,borderRadius:8}}>{AUTO_NODE_META[kind].icon}</span>
+          <strong>{AUTO_NODE_META[kind].label}</strong>
         </button>)}</div>
+      </SimpleModal>}
+      {linkingEdge&&<SimpleModal title="Connect to an existing block" onClose={()=>setLinkingEdge(null)}>
+        <p>Point this path at a block that already exists — this is how you send someone back to a main menu, or reuse one shared step from several places.</p>
+        <div className="template-gallery">{Object.values(flow.nodes).filter(n=>n.id!==linkingEdge.nodeId).map(n=><button key={n.id} onClick={()=>linkEdgeTo(linkingEdge,n.id)}>
+          <span className={`auto-node-icon ${AUTO_CHIP_CLASS[n.chip||AUTO_NODE_META[n.kind].chip]||"chip-neutral"}`} style={{display:"inline-grid",placeItems:"center",width:28,height:28,borderRadius:8}}>{n.icon||AUTO_NODE_META[n.kind].icon}</span>
+          <strong>{n.title}</strong>
+          <small>{AUTO_NODE_META[n.kind].label}</small>
+        </button>)}</div>
+        <div className="modal-actions"><button className="secondary-btn" onClick={()=>linkEdgeTo(linkingEdge,null)}>Disconnect this path</button></div>
       </SimpleModal>}
       {testOpen&&<SimpleModal title="Test this automation" onClose={()=>setTestOpen(false)}>
         <p>Type a sample customer message. This is a dry run — it shows which branch it would take and what would happen, without sending anything.</p>
@@ -1694,7 +1729,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
         <tbody>{[...list].sort((a,b)=>a.priority-b.priority).map((automation,idx)=><tr key={automation.id}>
           <td><div className="row-actions"><button title="Move up" disabled={idx===0} onClick={()=>reorder(automation,"up")}>▲</button><button title="Move down" disabled={idx===list.length-1} onClick={()=>reorder(automation,"down")}>▼</button></div></td>
           <td><div className="table-title"><span>⌁</span><div><strong>{automation.name}</strong>{automation.needsConfig&&<small style={{color:"#b66b26",display:"block"}}>⚠ Needs configuration</small>}</div></div></td>
-          <td>{automation.flow.trigger.subtitle}</td>
+          <td>{(automation.flow.nodes[automation.flow.entryId]?.config?.channels||[]).join(" + ")||"—"} · {Object.keys(automation.flow.nodes).length} blocks</td>
           <td><span className={`flow-status-pill ${automation.status==="active"?"is-active":"is-draft"}`}>{automation.status==="active"?"Active":automation.status==="draft"?"Draft":"Inactive"}</span></td>
           <td>{runCounts[automation.id]||0}</td>
           <td><div className="row-actions" style={{justifyContent:"flex-end"}}>
@@ -1715,148 +1750,228 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
   </>;
 }
 
-function AutoNode({step,onClick,onDelete}:{step:AutoStep;onClick:()=>void;onDelete?:()=>void}){
-  const incomplete=stepIsIncomplete(step);
+function AutoNodeCard({node,onClick,onDelete}:{node:AutoNode;onClick:()=>void;onDelete?:()=>void}){
+  const incomplete=nodeIsIncomplete(node);
+  const meta=AUTO_NODE_META[node.kind];
+  const cfg=node.config||{};
+  const preview=node.kind==="buttons"||node.kind==="message"||node.kind==="question"
+    ? (cfg.messageText||"").slice(0,70)
+    : node.kind==="items" ? `${(cfg.itemIds||[]).length} item(s)`
+    : node.kind==="tag" ? cfg.tagName||""
+    : node.kind==="escalate" ? cfg.escalateQueue||""
+    : node.kind==="aiAction" ? cfg.aiActionName||""
+    : node.kind==="wait" ? `${cfg.waitAmount??1} ${cfg.waitUnit||"hours"}`
+    : node.kind==="trigger" ? (cfg.channels||[]).join(" + ")
+    : "";
   return <div className="auto-node-wrap">
     <button className={`auto-node ${incomplete?"is-incomplete":""}`} onClick={onClick}>
-      <span className={`auto-node-icon ${AUTO_CHIP_CLASS[step.chip]||"chip-neutral"}`}>{step.icon}</span>
-      <span className="auto-node-text"><strong>{step.title}</strong><small>{step.subtitle}</small></span>
-      {incomplete&&<span className="auto-node-warn" title="This step still needs a required field">⚠</span>}
+      <span className={`auto-node-icon ${AUTO_CHIP_CLASS[node.chip||meta.chip]||"chip-neutral"}`}>{node.icon||meta.icon}</span>
+      <span className="auto-node-text">
+        <strong>{node.title||meta.label}</strong>
+        <small>{preview||meta.label}</small>
+      </span>
+      {incomplete&&<em className="auto-node-warn" title="This block still needs configuration">⚠</em>}
     </button>
-    {onDelete&&<button className="auto-node-delete" title="Remove this step" onClick={(e)=>{e.stopPropagation();onDelete()}}>×</button>}
+    {onDelete&&<button className="auto-node-remove" title="Remove this block" onClick={e=>{e.stopPropagation();onDelete()}}>×</button>}
   </div>;
 }
 
-// Measures the real rendered positions of the two branch columns in `containerRef` (its next
-// sibling in the DOM) and draws the stem/bar/drops to match exactly — rather than assuming a
-// fixed two-column width, which breaks the moment one column is wider than the other (e.g. a
-// nested condition split makes its column wider than its sibling, and the two top-level branches
-// are no longer symmetric). Re-measures on any resize of the branches row, including reflows
-// caused by adding/removing steps or a nested split.
-type AutoForkGeo={width:number;mid:number;leftCenter:number;rightCenter:number};
+// Renders the graph as an indented tree rather than a fixed grid: a node's outgoing paths nest
+// beneath it, so any number of options and any depth lay out naturally. A path that leads back to a
+// node already shown above renders as a reference chip instead of recursing forever — cycles are a
+// legitimate design (a "Main menu" option), so they're displayed, not rejected.
+function AutoGraphTree({graph,nodeId,seen,onEdit,onAddAt,onLinkAt}:{
+  graph:AutoGraph; nodeId:string|null; seen:string[];
+  onEdit:(n:AutoNode)=>void; onAddAt:(e:EdgeRef)=>void; onLinkAt:(e:EdgeRef)=>void;
+}){
+  if(!nodeId)return null;
+  const node=graph.nodes[nodeId];
+  if(!node)return null;
+  const edges=outgoingEdges(node);
+  const nextSeen=[...seen,node.id];
 
-function AutoFork({containerRef}:{containerRef:React.RefObject<HTMLDivElement|null>}){
-  const [geo,setGeo]=useState<AutoForkGeo|null>(null);
-  useEffect(()=>{
-    const geoRef:{current:AutoForkGeo|null}={current:null};
-    let frame=0;
-    const measure=()=>{
-      // rAF-batch: ResizeObserver can fire multiple times per frame (this fork's own change plus
-      // a sibling fork's cascading column resize) — only the last one in a frame needs to apply.
-      cancelAnimationFrame(frame);
-      frame=requestAnimationFrame(()=>{
-        const el=containerRef.current;
-        if(!el)return;
-        const cols=el.querySelectorAll(":scope > .auto-branch-col");
-        if(cols.length<2)return;
-        const parentRect=el.getBoundingClientRect();
-        const r0=cols[0].getBoundingClientRect();
-        const r1=cols[1].getBoundingClientRect();
-        const leftCenter=r0.left+r0.width/2-parentRect.left;
-        const rightCenter=r1.left+r1.width/2-parentRect.left;
-        const next:AutoForkGeo={width:Math.round(parentRect.width),mid:Math.round((leftCenter+rightCenter)/2),leftCenter:Math.round(leftCenter),rightCenter:Math.round(rightCenter)};
-        const prev=geoRef.current;
-        if(prev&&prev.width===next.width&&prev.mid===next.mid&&prev.leftCenter===next.leftCenter&&prev.rightCenter===next.rightCenter)return;
-        geoRef.current=next;
-        setGeo(next);
-      });
-    };
-    measure();
-    const el=containerRef.current;
-    const ro=typeof ResizeObserver!=="undefined"?new ResizeObserver(measure):null;
-    if(el&&ro)ro.observe(el);
-    window.addEventListener("resize",measure);
-    return ()=>{cancelAnimationFrame(frame);ro?.disconnect();window.removeEventListener("resize",measure)};
-  },[containerRef]); // mount-once (containerRef is a stable ref object) — updates are driven purely
-                      // by ResizeObserver/window resize from here on, not by this component's own
-                      // re-renders, so there's no feedback loop between this effect and its setState
-
-  if(!geo)return <div className="auto-fork" style={{width:2}}/>;
-  return <div className="auto-fork" style={{width:geo.width}}>
-    <div className="auto-fork-stem" style={{left:geo.mid}}/>
-    <div className="auto-fork-bar" style={{left:Math.min(geo.leftCenter,geo.rightCenter),width:Math.abs(geo.rightCenter-geo.leftCenter)}}/>
-    <div className="auto-fork-drop" style={{left:geo.leftCenter}}/>
-    <div className="auto-fork-drop" style={{left:geo.rightCenter}}/>
+  return <div className="graph-node">
+    <AutoNodeCard node={node} onClick={()=>onEdit(node)} onDelete={node.id===graph.entryId?undefined:()=>onEdit(node)}/>
+    {!!edges.length&&<div className="graph-edges">
+      {edges.map(({edge,label,target})=>{
+        const loops=target&&seen.includes(target);
+        const targetNode=target?graph.nodes[target]:null;
+        return <div className="graph-edge" key={`${edge.kind}-${"optionId" in edge?edge.optionId:"caseId" in edge?edge.caseId:edge.kind}`}>
+          <span className="graph-edge-label">{label}</span>
+          {loops&&targetNode
+            ? <button className="graph-loop-chip" onClick={()=>onEdit(targetNode)} title="This path goes back to a block shown above">↩ back to “{targetNode.title}”</button>
+            : target
+              ? <AutoGraphTree graph={graph} nodeId={target} seen={nextSeen} onEdit={onEdit} onAddAt={onAddAt} onLinkAt={onLinkAt}/>
+              : <div className="graph-edge-empty">
+                  <button className="auto-add-step" onClick={()=>onAddAt(edge)}>＋ Add block</button>
+                  <button className="graph-link-btn" onClick={()=>onLinkAt(edge)}>⇢ Connect to existing</button>
+                </div>}
+        </div>;
+      })}
+    </div>}
   </div>;
 }
 
-function StepDrawer({path,step,aiActions,items,onClose,onSave,onDelete}:{path:StepPath;step:AutoStep;aiActions:{name:string;description:string}[];items:{id:string;name:string}[];onClose:()=>void;onSave:(path:StepPath,next:AutoStep)=>void;onDelete?:()=>void}){
+function StepDrawer({node,graph,aiActions,items,onClose,onSave,onDelete}:{node:AutoNode;graph:AutoGraph;aiActions:{name:string;description:string}[];items:{id:string;name:string}[];onClose:()=>void;onSave:(next:AutoNode)=>void;onDelete?:()=>void}){
   const token=useAuthToken();
-  const [config,setConfig]=useState<AutoStepConfig>(step.config||{});
-  const update=(patch:Partial<AutoStepConfig>)=>setConfig({...config,...patch});
+  const [draft,setDraft]=useState<AutoNode>(node);
+  const config=draft.config||{};
+  const update=(patch:Partial<AutoStepConfig>)=>setDraft({...draft,config:{...config,...patch}});
   const toggleIn=(key:"channels"|"notifyChannels",value:string)=>{
     const current=(config[key] as string[]|undefined)||[];
     update({[key]:current.includes(value)?current.filter(v=>v!==value):[...current,value]} as Partial<AutoStepConfig>);
   };
-  const save=()=>onSave(path,{...step,config});
+  const save=()=>onSave(draft);
 
-  const flows=config.collectFlows||[];
-  const updateFlow=(flowId:string,patch:Partial<{name:string;urlTemplate:string;itemIds:string[];fields:{key:string;label:string}[]}>)=>update({collectFlows:flows.map(f=>f.id===flowId?{...f,...patch}:f)});
-  const addFlow=()=>update({collectFlows:[...flows,{id:crypto.randomUUID(),name:"",fields:[],urlTemplate:"",itemIds:[]}]});
-  const removeFlow=(flowId:string)=>update({collectFlows:flows.filter(f=>f.id!==flowId)});
-  const addField=(flowId:string)=>{const flow=flows.find(f=>f.id===flowId);if(!flow)return;updateFlow(flowId,{fields:[...flow.fields,{key:"",label:""}]})};
-  const updateField=(flowId:string,idx:number,patch:Partial<{key:string;label:string}>)=>{const flow=flows.find(f=>f.id===flowId);if(!flow)return;updateFlow(flowId,{fields:flow.fields.map((f,i)=>i===idx?{...f,...patch}:f)})};
-  const removeField=(flowId:string,idx:number)=>{const flow=flows.find(f=>f.id===flowId);if(!flow)return;updateFlow(flowId,{fields:flow.fields.filter((_,i)=>i!==idx)})};
-  const toggleFlowItem=(flowId:string,itemId:string)=>{const flow=flows.find(f=>f.id===flowId);if(!flow)return;const cur=flow.itemIds||[];updateFlow(flowId,{itemIds:cur.includes(itemId)?cur.filter(x=>x!==itemId):[...cur,itemId]})};
+  // Options (buttons node) — each is a real routable path, so there is no cap of two.
+  const options=config.options||[];
+  const addOption=()=>update({options:[...options,{id:crypto.randomUUID(),label:"",description:"",next:null}]});
+  const updateOption=(id:string,patch:Partial<AutoNodeOption>)=>update({options:options.map(o=>o.id===id?{...o,...patch}:o)});
+  const removeOption=(id:string)=>update({options:options.filter(o=>o.id!==id)});
+
+  // Cases (split node) — N-way keyword/weight branching, was hardcoded binary in v1.
+  const cases=config.cases||[];
+  const addCase=()=>update({cases:[...cases,{id:crypto.randomUUID(),label:"",match:"",next:null}]});
+  const updateCase=(id:string,patch:Partial<AutoNodeCase>)=>update({cases:cases.map(c=>c.id===id?{...c,...patch}:c)});
+  const removeCase=(id:string)=>update({cases:cases.filter(c=>c.id!==id)});
+
+  const collectFlows=config.collectFlows||[];
+  const updateFlow=(flowId:string,patch:Partial<{name:string;urlTemplate:string;itemIds:string[];fields:{key:string;label:string}[]}>)=>update({collectFlows:collectFlows.map(f=>f.id===flowId?{...f,...patch}:f)});
+  const addFlow=()=>update({collectFlows:[...collectFlows,{id:crypto.randomUUID(),name:"",fields:[],urlTemplate:"",itemIds:[]}]});
+  const removeFlow=(flowId:string)=>update({collectFlows:collectFlows.filter(f=>f.id!==flowId)});
+  const addField=(flowId:string)=>{const f=collectFlows.find(x=>x.id===flowId);if(!f)return;updateFlow(flowId,{fields:[...f.fields,{key:"",label:""}]})};
+  const updateField=(flowId:string,idx:number,patch:Partial<{key:string;label:string}>)=>{const f=collectFlows.find(x=>x.id===flowId);if(!f)return;updateFlow(flowId,{fields:f.fields.map((x,i)=>i===idx?{...x,...patch}:x)})};
+  const removeField=(flowId:string,idx:number)=>{const f=collectFlows.find(x=>x.id===flowId);if(!f)return;updateFlow(flowId,{fields:f.fields.filter((_,i)=>i!==idx)})};
+  const toggleFlowItem=(flowId:string,itemId:string)=>{const f=collectFlows.find(x=>x.id===flowId);if(!f)return;const cur=f.itemIds||[];updateFlow(flowId,{itemIds:cur.includes(itemId)?cur.filter(x=>x!==itemId):[...cur,itemId]})};
 
   const [testValues,setTestValues]=useState<Record<string,Record<string,string>>>({});
   const [testUrl,setTestUrl]=useState<Record<string,string>>({});
   const [testError,setTestError]=useState<Record<string,string>>({});
-  const runTestLink=async(flow:{id:string;urlTemplate:string})=>{
-    setTestUrl({...testUrl,[flow.id]:""});setTestError({...testError,[flow.id]:""});
-    if(!token||!flow.urlTemplate)return;
+  const runTestLink=async(id:string,template:string)=>{
+    setTestUrl({...testUrl,[id]:""});setTestError({...testError,[id]:""});
+    if(!token||!template)return;
     try{
-      const response=await fetch(metaApi("/api/automations/test-link"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({template:flow.urlTemplate,values:testValues[flow.id]||{}})});
+      const response=await fetch(metaApi("/api/automations/test-link"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({template,values:testValues[id]||{}})});
       const data=await response.json() as {url?:string;error?:string};
-      if(!response.ok||!data.url){setTestError({...testError,[flow.id]:data.error||"Could not build a preview link."});return}
-      setTestUrl({...testUrl,[flow.id]:data.url});
+      if(!response.ok||!data.url){setTestError({...testError,[id]:data.error||"Could not build a preview link."});return}
+      setTestUrl({...testUrl,[id]:data.url});
       window.open(data.url,"_blank","noopener,noreferrer");
-    }catch{setTestError({...testError,[flow.id]:"Could not reach the server."})}
+    }catch{setTestError({...testError,[id]:"Could not reach the server."})}
   };
 
-  return <div className="modal-backdrop" onMouseDown={onClose}><div className="modal drawer-modal" onMouseDown={e=>e.stopPropagation()}>
-    <div className="modal-head"><h2>{step.title}</h2><button onClick={onClose}>×</button></div>
-    <div className="modal-form">
-      <p className="empty-hint" style={{margin:"0 0 8px"}}>{step.subtitle}</p>
+  // Lets a path be pointed at an existing block from inside the drawer, mirroring the canvas.
+  const targetPicker=(current:string|null,onPick:(id:string|null)=>void)=><select value={current||""} onChange={e=>onPick(e.target.value||null)}>
+    <option value="">— not connected —</option>
+    {Object.values(graph.nodes).filter(n=>n.id!==draft.id).map(n=><option key={n.id} value={n.id}>{n.title}</option>)}
+  </select>;
 
-      {step.kind==="trigger"&&<label>Channels this automation runs on
+  const meta=AUTO_NODE_META[draft.kind];
+
+  return <div className="modal-backdrop" onMouseDown={onClose}><div className="modal drawer-modal" onMouseDown={e=>e.stopPropagation()}>
+    <div className="modal-head"><h2>{draft.title||meta.label}</h2><button onClick={onClose}>×</button></div>
+    <div className="modal-form">
+      <p className="empty-hint" style={{margin:"0 0 8px"}}>{meta.label}</p>
+      <label>Block name (shown on the canvas only)<input value={draft.title} onChange={e=>setDraft({...draft,title:e.target.value})}/></label>
+
+      {draft.kind==="trigger"&&<label>Channels this automation runs on
         <div className="channel-choice"><label className="channel-opt"><input type="checkbox" checked={(config.channels||[]).includes("webchat")} onChange={()=>toggleIn("channels","webchat")}/> <span>◉ Web chat</span></label><label className="channel-opt"><input type="checkbox" checked={(config.channels||[]).includes("whatsapp")} onChange={()=>toggleIn("channels","whatsapp")}/> <span>✆ WhatsApp</span></label><label className="channel-opt disabled" title="Instagram messaging isn't connected in this workspace yet"><input type="checkbox" disabled/> <span>◎ Instagram — not available yet</span></label></div>
       </label>}
 
-      {step.kind==="split"&&<>
+      {draft.kind==="message"&&<label>Message text — {"{{variable}}"} inserts an answer collected earlier
+        <textarea rows={4} value={config.messageText||""} onChange={e=>update({messageText:e.target.value})} placeholder={"Thanks {{name}} — here's what you need."}/>
+      </label>}
+
+      {draft.kind==="buttons"&&<>
+        <label>Prompt shown above the options<textarea rows={2} value={config.messageText||""} onChange={e=>update({messageText:e.target.value})} placeholder="Hello, how may we help you?"/></label>
+        <label>Options — each one routes to its own block, and there&apos;s no limit on how many
+          <div className="flow-options-list">
+            {options.map(o=><div className="flow-option-row" key={o.id} style={{flexWrap:"wrap"}}>
+              <input placeholder="Button label" value={o.label} onChange={e=>updateOption(o.id,{label:e.target.value})}/>
+              <input placeholder="Subtitle (optional)" value={o.description||""} onChange={e=>updateOption(o.id,{description:e.target.value})}/>
+              {targetPicker(o.next,id=>updateOption(o.id,{next:id}))}
+              <button type="button" onClick={()=>removeOption(o.id)}>×</button>
+            </div>)}
+          </div>
+          <button type="button" className="secondary-btn" onClick={addOption}>＋ Add option</button>
+        </label>
+        <label>If the answer matches no option<div>{targetPicker(config.fallbackNext??null,id=>update({fallbackNext:id}))}</div>
+          <small style={{fontWeight:400,color:"#8b93a1"}}>Leave unconnected to simply re-ask the question.</small>
+        </label>
+      </>}
+
+      {draft.kind==="question"&&<>
+        <label>Question to ask<textarea rows={2} value={config.messageText||""} onChange={e=>update({messageText:e.target.value})} placeholder="What name should we use?"/></label>
+        <label>Store the answer as<input value={config.variableKey||""} onChange={e=>update({variableKey:e.target.value.replace(/[^a-zA-Z0-9_]/g,"")})} placeholder="e.g. arrival"/>
+          <small style={{fontWeight:400,color:"#8b93a1"}}>Use it later as {"{{"}{config.variableKey||"key"}{"}}"} in any message, or as {"{"}{config.variableKey||"key"}{"}"} in a link template.</small>
+        </label>
+        <label>Expected answer<select value={config.inputType||"text"} onChange={e=>update({inputType:e.target.value as AutoStepConfig["inputType"]})}>
+          <option value="text">Any text</option><option value="number">A number</option><option value="date">A date</option><option value="email">An email address</option><option value="phone">A phone number</option>
+        </select><small style={{fontWeight:400,color:"#8b93a1"}}>Anything that doesn&apos;t fit is rejected and the question is asked again.</small></label>
+      </>}
+
+      {draft.kind==="items"&&<>
+        <label>Intro text above the cards (optional)<textarea rows={2} value={config.messageText||""} onChange={e=>update({messageText:e.target.value})}/></label>
+        <label>Catalog items to show
+          <div className="parameter-list">
+            {items.map(it=><label key={it.id} style={{display:"flex",gap:"0.4rem",alignItems:"center"}}><input type="checkbox" checked={(config.itemIds||[]).includes(it.id)} onChange={()=>update({itemIds:(config.itemIds||[]).includes(it.id)?(config.itemIds||[]).filter(x=>x!==it.id):[...(config.itemIds||[]),it.id]})}/> {it.name}</label>)}
+            {!items.length&&<small className="empty-hint">No items in your catalog yet — add some in the Items tab.</small>}
+          </div>
+        </label>
+        <label>Link for each card&apos;s button — {"{key}"} inserts a collected answer
+          <input value={config.urlTemplate||""} onChange={e=>update({urlTemplate:e.target.value})} placeholder="https://example.com/book?arrival={arrival}&rooms={rooms}"/>
+        </label>
+        {!!config.urlTemplate&&<label>Test this link
+          <button type="button" className="secondary-btn" onClick={()=>runTestLink(draft.id,config.urlTemplate||"")}>▷ Test this link</button>
+          {testUrl[draft.id]&&<small style={{display:"block",marginTop:"6px",wordBreak:"break-all"}}>Opened: {testUrl[draft.id]}</small>}
+          {testError[draft.id]&&<small style={{display:"block",marginTop:"6px",color:"#b3261e"}}>{testError[draft.id]}</small>}
+        </label>}
+      </>}
+
+      {draft.kind==="split"&&<>
         <label>Rule type<select value={config.ruleType||"conditional"} onChange={e=>update({ruleType:e.target.value as AutoStepConfig["ruleType"]})}>
           <option value="conditional">Conditional (keyword match)</option>
           <option value="ab">A/B split</option>
           <option value="time">Time window</option>
           <option value="freq">Frequency cap</option>
         </select></label>
-        {config.ruleType==="conditional"&&<label>Match if message contains (comma-separated)<input value={config.condition||""} onChange={e=>update({condition:e.target.value})}/></label>}
-        {config.ruleType==="ab"&&<label>Branch A weight: {config.abWeightA??50}%<input type="range" min={0} max={100} value={config.abWeightA??50} onChange={e=>update({abWeightA:Number(e.target.value)})}/></label>}
+        <label>Cases — checked in order, first match wins
+          <div className="flow-options-list">
+            {cases.map(c=><div className="flow-option-row" key={c.id} style={{flexWrap:"wrap"}}>
+              <input placeholder="Case name" value={c.label} onChange={e=>updateCase(c.id,{label:e.target.value})}/>
+              {(config.ruleType||"conditional")==="conditional"&&<input placeholder="Keywords, comma-separated" value={c.match||""} onChange={e=>updateCase(c.id,{match:e.target.value})}/>}
+              {config.ruleType==="ab"&&<input type="number" min={0} max={100} placeholder="%" value={c.weight??50} onChange={e=>updateCase(c.id,{weight:Number(e.target.value)})}/>}
+              {targetPicker(c.next,id=>updateCase(c.id,{next:id}))}
+              <button type="button" onClick={()=>removeCase(c.id)}>×</button>
+            </div>)}
+          </div>
+          <button type="button" className="secondary-btn" onClick={addCase}>＋ Add case</button>
+        </label>
+        <label>Otherwise go to<div>{targetPicker(config.fallbackNext??null,id=>update({fallbackNext:id}))}</div></label>
         {config.ruleType==="time"&&<><label>Start time<input type="time" value={config.startTime||"09:00"} onChange={e=>update({startTime:e.target.value})}/></label><label>End time<input type="time" value={config.endTime||"18:00"} onChange={e=>update({endTime:e.target.value})}/></label></>}
         {config.ruleType==="freq"&&<><label>Max sends<input type="number" min={1} value={config.freqMax??3} onChange={e=>update({freqMax:Number(e.target.value)})}/></label><label>Per<select value={config.freqPeriod||"day"} onChange={e=>update({freqPeriod:e.target.value as AutoStepConfig["freqPeriod"]})}><option value="hour">Hour</option><option value="day">Day</option><option value="week">Week</option></select></label></>}
       </>}
 
-      {step.kind==="message"&&<label>Message text<textarea rows={3} value={config.messageText||""} onChange={e=>update({messageText:e.target.value})}/></label>}
+      {draft.kind==="wait"&&<><label>Duration<input type="number" min={1} value={config.waitAmount??1} onChange={e=>update({waitAmount:Number(e.target.value)})}/></label><label>Unit<select value={config.waitUnit||"hours"} onChange={e=>update({waitUnit:e.target.value as AutoStepConfig["waitUnit"]})}><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option></select></label></>}
 
-      {step.kind==="wait"&&<><label>Duration<input type="number" min={1} value={config.waitAmount??1} onChange={e=>update({waitAmount:Number(e.target.value)})}/></label><label>Unit<select value={config.waitUnit||"hours"} onChange={e=>update({waitUnit:e.target.value as AutoStepConfig["waitUnit"]})}><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option></select></label></>}
+      {draft.kind==="tag"&&<label>Tag name<input value={config.tagName||""} onChange={e=>update({tagName:e.target.value})}/></label>}
 
-      {step.kind==="tag"&&<label>Tag name<input value={config.tagName||""} onChange={e=>update({tagName:e.target.value})}/></label>}
+      {draft.kind==="notify"&&<><label>Notify via<div className="checkbox-row"><label><input type="checkbox" checked={(config.notifyChannels||[]).includes("email")} onChange={()=>toggleIn("notifyChannels","email")}/> Email</label><label><input type="checkbox" checked={(config.notifyChannels||[]).includes("slack")} onChange={()=>toggleIn("notifyChannels","slack")}/> Slack</label></div></label><label>Recipient<input value={config.notifyRecipient||""} onChange={e=>update({notifyRecipient:e.target.value})} placeholder="email or leave blank for the workspace Slack webhook"/></label></>}
 
-      {step.kind==="notify"&&<><label>Notify via<div className="checkbox-row"><label><input type="checkbox" checked={(config.notifyChannels||[]).includes("email")} onChange={()=>toggleIn("notifyChannels","email")}/> Email</label><label><input type="checkbox" checked={(config.notifyChannels||[]).includes("slack")} onChange={()=>toggleIn("notifyChannels","slack")}/> Slack</label></div></label><label>Recipient<input value={config.notifyRecipient||""} onChange={e=>update({notifyRecipient:e.target.value})} placeholder="email or leave blank for the workspace Slack webhook"/></label></>}
+      {draft.kind==="aiAction"&&(aiActions.length?<label>Which AI Action to run<select value={config.aiActionName||""} onChange={e=>update({aiActionName:e.target.value})}><option value="">— Select an action —</option>{aiActions.map(a=><option key={a.name} value={a.name}>{a.name}</option>)}</select>{config.aiActionName&&aiActions.find(a=>a.name===config.aiActionName)?.description&&<small style={{fontWeight:400,color:"#8b93a1"}}>{aiActions.find(a=>a.name===config.aiActionName)!.description}</small>}</label>:<p className="empty-hint">No AI Actions are configured yet. Create one in Assistants → AI Actions, then pick it here.</p>)}
 
-      {step.kind==="aiAction"&&(aiActions.length?<label>Which AI Action to run<select value={config.aiActionName||""} onChange={e=>update({aiActionName:e.target.value})}><option value="">— Select an action —</option>{aiActions.map(a=><option key={a.name} value={a.name}>{a.name}</option>)}</select>{config.aiActionName&&aiActions.find(a=>a.name===config.aiActionName)?.description&&<small style={{fontWeight:400,color:"#8b93a1"}}>{aiActions.find(a=>a.name===config.aiActionName)!.description}</small>}</label>:<p className="empty-hint">No AI Actions are configured yet. Create one in Assistants → AI Actions, then pick it here.</p>)}
+      {draft.kind==="escalate"&&<><label>Assign to queue<input value={config.escalateQueue||""} onChange={e=>update({escalateQueue:e.target.value})}/></label><label>Priority<select value={config.escalatePriority||"Normal"} onChange={e=>update({escalatePriority:e.target.value as AutoStepConfig["escalatePriority"]})}><option value="Normal">Normal</option><option value="Urgent">Urgent</option></select></label></>}
 
-      {step.kind==="escalate"&&<><label>Assign to queue<input value={config.escalateQueue||""} onChange={e=>update({escalateQueue:e.target.value})}/></label><label>Priority<select value={config.escalatePriority||"Normal"} onChange={e=>update({escalatePriority:e.target.value as AutoStepConfig["escalatePriority"]})}><option value="Normal">Normal</option><option value="Urgent">Urgent</option></select></label></>}
+      {draft.kind==="end"&&<p className="empty-hint">This block ends the flow. The next message the customer sends starts the automation again from the top.</p>}
 
-      {step.kind==="aiReply"&&<>
-        <p className="empty-hint" style={{margin:"0 0 4px"}}>This step calls your real AI assistant. Optionally add one or more "Collect & Link" flows below — each is a distinct kind of request (e.g. "Room booking", "Event space booking", "Table reservation") with its own fields, link, and items. The assistant works out which flow a customer means and follows only that one — nothing here is fixed to any particular business type.</p>
-        {flows.map(flow=><div key={flow.id} style={{border:"1px solid var(--line)",borderRadius:"8px",padding:"12px",marginBottom:"12px"}}>
+      {(draft.kind==="aiReply"||draft.kind==="aiAction")&&<>
+        <p className="empty-hint" style={{margin:"8px 0 4px"}}>This block hands the conversation to your real AI assistant. Optionally add one or more &quot;Collect &amp; Link&quot; flows — each is a distinct kind of request with its own fields, link, and items.</p>
+        {collectFlows.map(flow=><div key={flow.id} style={{border:"1px solid var(--line)",borderRadius:"8px",padding:"12px",marginBottom:"12px"}}>
           <label>Flow name<input placeholder="e.g. Room booking" value={flow.name} onChange={e=>updateFlow(flow.id,{name:e.target.value})}/></label>
           <label>Fields to collect, in order
             <div className="flow-options-list">
               {flow.fields.map((f,idx)=><div className="flow-option-row" key={idx}>
                 <input placeholder="Field key (e.g. arrival)" value={f.key} onChange={e=>updateField(flow.id,idx,{key:e.target.value})}/>
-                <input placeholder="Question to ask (e.g. What's your check-in date?)" value={f.label} onChange={e=>updateField(flow.id,idx,{label:e.target.value})}/>
+                <input placeholder="Question to ask" value={f.label} onChange={e=>updateField(flow.id,idx,{label:e.target.value})}/>
                 <button type="button" onClick={()=>removeField(flow.id,idx)}>×</button>
               </div>)}
             </div>
@@ -1878,7 +1993,7 @@ function StepDrawer({path,step,aiActions,items,onClose,onSave,onDelete}:{path:St
                 <input placeholder="sample value" value={testValues[flow.id]?.[f.key]||""} onChange={e=>setTestValues({...testValues,[flow.id]:{...(testValues[flow.id]||{}),[f.key]:e.target.value}})}/>
               </div>:null)}
             </div>
-            <button type="button" className="secondary-btn" onClick={()=>runTestLink(flow)}>▷ Test this link</button>
+            <button type="button" className="secondary-btn" onClick={()=>runTestLink(flow.id,flow.urlTemplate)}>▷ Test this link</button>
             {testUrl[flow.id]&&<small style={{display:"block",marginTop:"6px",wordBreak:"break-all"}}>Opened: {testUrl[flow.id]}</small>}
             {testError[flow.id]&&<small style={{display:"block",marginTop:"6px",color:"#b3261e"}}>{testError[flow.id]}</small>}
           </label>}
@@ -1886,10 +2001,11 @@ function StepDrawer({path,step,aiActions,items,onClose,onSave,onDelete}:{path:St
         </div>)}
         <button type="button" className="secondary-btn" onClick={addFlow}>＋ Add a request type (flow)</button>
       </>}
-      {step.kind==="generic"&&<p className="empty-hint">No configurable fields for this step.</p>}
+
+      {draft.kind!=="buttons"&&draft.kind!=="split"&&draft.kind!=="end"&&<label style={{marginTop:"10px"}}>After this block, go to<div>{targetPicker(draft.next??null,id=>setDraft({...draft,next:id}))}</div></label>}
     </div>
     <div className="modal-actions">
-      {onDelete&&<button className="danger-btn" style={{marginRight:"auto"}} onClick={onDelete}>🗑 Delete step</button>}
+      {onDelete&&<button className="danger-btn" style={{marginRight:"auto"}} onClick={onDelete}>🗑 Delete block</button>}
       <button className="secondary-btn" onClick={onClose}>Cancel</button>
       <button className="primary" onClick={save}>Save changes</button>
     </div>
