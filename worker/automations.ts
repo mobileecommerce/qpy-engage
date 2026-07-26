@@ -622,6 +622,37 @@ async function sendSlackNotification(webhookUrl: string, text: string): Promise<
   try { await fetch(webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) }); } catch { /* best-effort */ }
 }
 
+// Item link params (e.g. a guest's confirmed dates/guest count) are collected by the AI over
+// several turns but only actually supplied on the turn it calls show_items — a later turn in the
+// same conversation (e.g. "show me other options") may re-call show_items without re-supplying
+// them, since nothing forces the model to repeat itself. Persisting the last-known set per
+// session and falling back to it closes that gap without relying on the model to remember.
+async function loadLinkParams(db: D1Database, workspaceId: string, sessionId: string): Promise<Record<string, string> | undefined> {
+  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN link_params TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
+  const row = await db.prepare(`SELECT link_params FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`).bind(workspaceId, sessionId).first<{ link_params: string }>();
+  if (!row?.link_params) return undefined;
+  try { const parsed = JSON.parse(row.link_params); return parsed && typeof parsed === "object" ? parsed : undefined; } catch { return undefined; }
+}
+
+async function saveLinkParams(db: D1Database, workspaceId: string, sessionId: string, linkParams: Record<string, string>): Promise<void> {
+  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN link_params TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
+  await db.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, link_params) VALUES (?, ?, ?)
+    ON CONFLICT(workspace_id, session_id) DO UPDATE SET link_params = excluded.link_params`).bind(workspaceId, sessionId, JSON.stringify(linkParams)).run();
+}
+
+// If the model supplied linkParams this turn, that's the freshest/most authoritative set — persist
+// it for later turns in the same session. If it didn't (e.g. it re-showed items without repeating
+// itself), fall back to whatever was last persisted, instead of sending a bare, param-less link.
+// Only applies to web chat, which has the conversation-state surface this relies on (persistConversationState).
+async function resolveLinkParams(db: D1Database, workspaceId: string, ctx: RunCtx, freshLinkParams?: Record<string, string>): Promise<Record<string, string> | undefined> {
+  if (!ctx.persistConversationState) return freshLinkParams;
+  if (freshLinkParams && Object.keys(freshLinkParams).length) {
+    await saveLinkParams(db, workspaceId, ctx.contactKey, freshLinkParams);
+    return freshLinkParams;
+  }
+  return loadLinkParams(db, workspaceId, ctx.contactKey);
+}
+
 async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx, automation: AutomationRow, step: AutomationStep, history: ChatMessage[], outMessages: AutomationOutMessage[]): Promise<"continue" | "waiting"> {
   const cfg = step.config || {};
   const send = async (text: string) => {
@@ -644,7 +675,8 @@ async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx
       : await callClaude(env.ANTHROPIC_API_KEY, systemPrompt, history);
     await send(result.reply || "Thanks for reaching out — a team member will follow up shortly.");
     if (shownItemIds.length) {
-      const items = withLinkParams(await getItemsByIds(env.DB, workspaceId, shownItemIds), shownLinkParams);
+      const linkParams = await resolveLinkParams(env.DB, workspaceId, ctx, shownLinkParams);
+      const items = withLinkParams(await getItemsByIds(env.DB, workspaceId, shownItemIds), linkParams);
       if (items.length) outMessages.push({ type: "items", items });
     }
     return "continue";
@@ -660,7 +692,8 @@ async function executeStep(env: AutomationsEnv, workspaceId: string, ctx: RunCtx
     const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions, undefined, undefined, undefined, catalogItems, async (ids, linkParams) => { shownItemIds = ids; shownLinkParams = linkParams; });
     await send(result.reply || "Let me look into that and get back to you.");
     if (shownItemIds.length) {
-      const items = withLinkParams(await getItemsByIds(env.DB, workspaceId, shownItemIds), shownLinkParams);
+      const linkParams = await resolveLinkParams(env.DB, workspaceId, ctx, shownLinkParams);
+      const items = withLinkParams(await getItemsByIds(env.DB, workspaceId, shownItemIds), linkParams);
       if (items.length) outMessages.push({ type: "items", items });
     }
     return "continue";
