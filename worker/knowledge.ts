@@ -15,13 +15,22 @@ const RENDER_TIMEOUT_MS = 20000;
 // produce a few hundred characters, and the old 300 threshold read that as success — which is
 // exactly how a restaurant page with all its detail in JavaScript passed as fetched-and-fine.
 const MIN_RAW_BODY_LENGTH = 800;
-const MAX_PAGES = 40;
+const MAX_PAGES = 25;
 const FETCH_CONCURRENCY = 4;
 const MAX_PAGE_CHARS = 6000;
-// Rendering a page through the browser API costs seconds, not milliseconds, so a whole crawl of
-// JS-heavy pages would blow any sane request budget. Only this many pages get the expensive
-// treatment; the rest fall back to whatever their raw HTML gave.
-const MAX_RENDER_CALLS = 8;
+// Rendering a page through the browser API costs seconds, not milliseconds, and Cloudflare rate
+// limits it hard — a burst of 8 got 7 rejections. Only this many pages get the expensive treatment
+// per sync, spaced apart; the rest keep whatever their raw HTML gave and are picked up next sync.
+const MAX_RENDER_CALLS = 3;
+// Cloudflare throttles Browser Rendering hard on the free tier — 1.5s between calls still drew
+// "Rate limit exceeded" on 3 of 4. Spacing them this far apart trades sync speed for actually
+// getting the pages.
+const RENDER_GAP_MS = 12000;
+// A page can clear the "has some text" bar on its description alone while the detail that answers
+// questions — opening hours, capacity, prices — is still only in JavaScript. The Al Madam page is
+// exactly that: 1,149 characters of blurb, no times. Rendering therefore reaches further up than
+// the empty-page threshold does.
+const RENDER_IF_UNDER = 2500;
 
 async function ensureKnowledgeSchema(db: D1Database): Promise<void> {
   await db.batch([
@@ -86,7 +95,12 @@ async function extractTextFromHtml(html: string): Promise<{ bodyText: string; me
   };
 }
 
-async function fetchRenderedHtml(url: string, accountId: string, apiToken: string): Promise<string | null> {
+// Rendering used to fail completely silently, which made a misconfigured token indistinguishable
+// from a site that genuinely has no content — the sync just reported few pages and no reason. The
+// first failure's actual message is kept and surfaced to the dashboard.
+export type RenderBudget = { renders: number; attempted: number; succeeded: number; lastError?: string };
+
+async function fetchRenderedHtml(url: string, accountId: string, apiToken: string, budget?: RenderBudget): Promise<string | null> {
   try {
     const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/browser-rendering/content`, {
       method: "POST",
@@ -94,10 +108,22 @@ async function fetchRenderedHtml(url: string, accountId: string, apiToken: strin
       body: JSON.stringify({ url }),
       signal: AbortSignal.timeout(RENDER_TIMEOUT_MS),
     });
-    if (!response.ok) return null;
-    const payload = await response.json() as { success?: boolean; result?: string };
-    return payload.success && payload.result ? payload.result : null;
-  } catch {
+    if (!response.ok) {
+      if (budget && !budget.lastError) {
+        const detail = (await response.text()).slice(0, 300);
+        budget.lastError = `HTTP ${response.status}: ${detail}`;
+      }
+      return null;
+    }
+    const payload = await response.json() as { success?: boolean; result?: string; errors?: Array<{ message?: string }> };
+    if (!payload.success || !payload.result) {
+      if (budget && !budget.lastError) budget.lastError = payload.errors?.[0]?.message || "Browser Rendering returned no content.";
+      return null;
+    }
+    if (budget) budget.succeeded++;
+    return payload.result;
+  } catch (error) {
+    if (budget && !budget.lastError) budget.lastError = error instanceof Error ? error.message : "Browser Rendering request failed.";
     return null;
   }
 }
@@ -145,7 +171,7 @@ async function discoverUrls(entryUrl: string): Promise<string[]> {
     const xml = await fetchText(origin + path);
     if (!xml || !xml.includes("<loc>")) continue;
     const top = locs(xml);
-    const childSitemaps = top.filter((u) => /\.xml($|\?)/i.test(u) && sameOrigin(u, origin)).slice(0, 12);
+    const childSitemaps = top.filter((u) => /\.xml($|\?)/i.test(u) && sameOrigin(u, origin)).slice(0, 8);
 
     const groups: string[][] = [];
     for (const child of childSitemaps) {
@@ -185,8 +211,13 @@ async function discoverUrls(entryUrl: string): Promise<string[]> {
 
   found.delete("");
   const entry = normaliseUrl(entryUrl);
-  // The URL the business actually typed always gets crawled, and goes first.
-  return [entry, ...[...found].filter((u) => u !== entry)].slice(0, MAX_PAGES);
+  const depth = (u: string) => { try { return new URL(u).pathname.split("/").filter(Boolean).length; } catch { return 0; } };
+  // A Worker invocation may only make so many subrequests (50 on the free plan, and D1 writes count
+  // toward it), so the page budget is genuinely scarce — spend it on pages that hold answers. A
+  // section listing like /al_badayer_dining is mostly links; the detail page beneath it,
+  // /al_badayer_dining/al-madam-restaurant, is where the opening hours actually live.
+  const rest = [...found].filter((u) => u !== entry).sort((a, b) => Math.min(depth(b), 2) - Math.min(depth(a), 2));
+  return [entry, ...rest].slice(0, MAX_PAGES);
 }
 
 type CrawledPage = { url: string; title: string; text: string };
@@ -195,20 +226,47 @@ type CrawledPage = { url: string; title: string; text: string };
 // render client-side, one pass can only afford to render a handful, so those are skipped next time
 // and the budget goes to pages still known to be thin — running Sync again keeps filling the site
 // in instead of re-rendering the same first few pages forever.
-async function crawlPages(urls: string[], env: KnowledgeEnv, alreadyRich: Set<string>): Promise<CrawledPage[]> {
+async function crawlPages(urls: string[], env: KnowledgeEnv, alreadyRich: Set<string>): Promise<{ pages: CrawledPage[]; budget: RenderBudget }> {
   const pages: CrawledPage[] = [];
-  const budget = { renders: MAX_RENDER_CALLS };
-  const ordered = [...urls].sort((a, b) => Number(alreadyRich.has(a)) - Number(alreadyRich.has(b)));
-  for (let i = 0; i < ordered.length; i += FETCH_CONCURRENCY) {
-    const batch = await Promise.all(ordered.slice(i, i + FETCH_CONCURRENCY).map(async (url) => {
+  const budget: RenderBudget = { renders: MAX_RENDER_CALLS, attempted: 0, succeeded: 0 };
+
+  // Phase 1 — plain HTML for every page, in parallel. Cheap and safe to hammer.
+  for (let i = 0; i < urls.length; i += FETCH_CONCURRENCY) {
+    const batch = await Promise.all(urls.slice(i, i + FETCH_CONCURRENCY).map(async (url) => {
       try {
-        const text = await fetchWebsiteText(url, env, budget);
-        return text ? { url, title: "", text } : null;
+        const text = await fetchWebsiteText(url, env);
+        return { url, title: "", text: text || "" };
       } catch { return null; }
     }));
     for (const page of batch) if (page) pages.push(page);
   }
-  return pages;
+
+  if (!env.CLOUDFLARE_ACCOUNT_ID || !env.CLOUDFLARE_BROWSER_RENDERING_TOKEN) {
+    return { pages: pages.filter((p) => p.text), budget };
+  }
+
+  // Phase 2 — the pages that came back with nothing real get the browser, ONE AT A TIME. Running
+  // these inside the parallel batches above meant Cloudflare saw a burst and rejected 7 of 8 with
+  // "Rate limit exceeded", so a correctly configured token still looked like it did nothing.
+  // Pages already holding good content from an earlier sync are skipped so repeat runs advance.
+  const thin = pages
+    .filter((p) => p.text.length < MIN_RAW_BODY_LENGTH && !alreadyRich.has(p.url))
+    .sort((a, b) => a.text.length - b.text.length);
+
+  for (const page of thin) {
+    if (budget.renders <= 0) break;
+    budget.renders--;
+    budget.attempted++;
+    const html = await fetchRenderedHtml(page.url, env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_BROWSER_RENDERING_TOKEN, budget);
+    if (html) {
+      const rendered = await extractTextFromHtml(html);
+      if (rendered.bodyText.length > page.text.length) page.text = rendered.bodyText.slice(0, MAX_CONTENT_LENGTH);
+    }
+    // Spacing the calls keeps a burst from tripping the same per-minute limit again.
+    if (budget.renders > 0) await new Promise((resolve) => setTimeout(resolve, RENDER_GAP_MS));
+  }
+
+  return { pages: pages.filter((p) => p.text), budget };
 }
 
 // Every page on a site repeats its nav and footer. Left in, that boilerplate is most of what gets
@@ -233,7 +291,7 @@ function stripSharedBoilerplate(pages: CrawledPage[]): CrawledPage[] {
   }).filter((page) => page.text.length > 40);
 }
 
-async function fetchWebsiteText(url: string, env: KnowledgeEnv, budget?: { renders: number }): Promise<string> {
+async function fetchWebsiteText(url: string, env: KnowledgeEnv): Promise<string> {
   const response = await fetch(url, {
     headers: { "user-agent": "Mozilla/5.0 (compatible; QpyEngageBot/1.0; +https://mobileecommerce.github.io/qpy-engage/)" },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -242,23 +300,11 @@ async function fetchWebsiteText(url: string, env: KnowledgeEnv, budget?: { rende
   const contentType = response.headers.get("content-type") || "";
   if (!contentType.includes("html")) throw new Error("That URL did not return an HTML page.");
 
-  let { bodyText, metaText } = await extractTextFromHtml(await response.text());
+  const { bodyText, metaText } = await extractTextFromHtml(await response.text());
 
   // Client-rendered pages (SPAs) often have little or no text in the raw HTML body — the real
   // content only exists after JavaScript runs. If Browser Rendering is configured, retry against
   // the JS-executed page instead of settling for just the title/meta description.
-  if (bodyText.length < MIN_RAW_BODY_LENGTH && env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_BROWSER_RENDERING_TOKEN && (!budget || budget.renders > 0)) {
-    if (budget) budget.renders--;
-    const renderedHtml = await fetchRenderedHtml(url, env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_BROWSER_RENDERING_TOKEN);
-    if (renderedHtml) {
-      const rendered = await extractTextFromHtml(renderedHtml);
-      if (rendered.bodyText.length > bodyText.length) {
-        bodyText = rendered.bodyText;
-        if (rendered.metaText) metaText = rendered.metaText;
-      }
-    }
-  }
-
   // Fall back to title/meta description so there's at least something real to ground on.
   const text = bodyText.length > metaText.length ? bodyText : [metaText, bodyText].filter(Boolean).join(" — ");
   return text.slice(0, MAX_CONTENT_LENGTH);
@@ -284,7 +330,7 @@ async function fetchWebsite(request: Request, env: KnowledgeEnv): Promise<Respon
   const prior = new Map((priorRows.results || []).map((r) => [r.url, r.char_count]));
   const alreadyRich = new Set([...prior.entries()].filter(([, n]) => n >= MIN_RAW_BODY_LENGTH).map(([u]) => u));
 
-  const crawled = await crawlPages(urls, env, alreadyRich);
+  const { pages: crawled, budget } = await crawlPages(urls, env, alreadyRich);
   if (!crawled.length) return json(request, { error: "Could not read any pages on that site." }, 400);
   let pages = stripSharedBoilerplate(crawled);
   if (!pages.length) return json(request, { error: "No readable text found — this site's content may load via JavaScript." }, 400);
@@ -296,16 +342,19 @@ async function fetchWebsite(request: Request, env: KnowledgeEnv): Promise<Respon
   // Drop anything no longer reachable on the site, so a deleted page stops being quoted — but keep
   // pages that simply weren't re-read this pass.
   const liveUrls = new Set(crawled.map((p) => p.url));
-  for (const url of prior.keys()) {
-    if (!liveUrls.has(url)) {
-      await env.DB.prepare(`DELETE FROM knowledge_pages WHERE workspace_id = ? AND source_id = ? AND url = ?`)
-        .bind(session.workspaceId, sourceId, url).run();
-    }
+  const stale = [...prior.keys()].filter((u) => !liveUrls.has(u));
+  if (stale.length) {
+    await env.DB.batch(stale.map((url) => env.DB.prepare(
+      `DELETE FROM knowledge_pages WHERE workspace_id = ? AND source_id = ? AND url = ?`
+    ).bind(session.workspaceId, sourceId, url)));
   }
-  for (const page of pages) {
-    await env.DB.prepare(`INSERT INTO knowledge_pages (workspace_id, source_id, url, title, content, char_count) VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(workspace_id, source_id, url) DO UPDATE SET title=excluded.title, content=excluded.content, char_count=excluded.char_count, fetched_at=CURRENT_TIMESTAMP`)
-      .bind(session.workspaceId, sourceId, page.url, page.title, page.text, page.text.length).run();
+  // Batched: each D1 round-trip counts against the Worker's subrequest ceiling, so writing 25 pages
+  // one at a time would spend half the budget on storage alone.
+  if (pages.length) {
+    await env.DB.batch(pages.map((page) => env.DB.prepare(
+      `INSERT INTO knowledge_pages (workspace_id, source_id, url, title, content, char_count) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(workspace_id, source_id, url) DO UPDATE SET title=excluded.title, content=excluded.content, char_count=excluded.char_count, fetched_at=CURRENT_TIMESTAMP`
+    ).bind(session.workspaceId, sourceId, page.url, page.title, page.text, page.text.length)));
   }
 
   // knowledge_content stays the single-blob view, still used as the fallback whenever there is no
@@ -316,9 +365,61 @@ async function fetchWebsite(request: Request, env: KnowledgeEnv): Promise<Respon
     .bind(session.workspaceId, sourceId, url, combined, combined.length).run();
 
   return json(request, {
-    fetched: true, pageCount: pages.length, charCount: combined.length,
+    fetched: true, pageCount: pages.length, crawledCount: crawled.length, charCount: combined.length,
+    render: { attempted: budget.attempted, succeeded: budget.succeeded, error: budget.lastError || null },
     pages: pages.map((p) => ({ url: p.url, chars: p.text.length })),
     excerpt: combined.slice(0, 300),
+  });
+}
+
+// Rendering gets its own request because a Worker invocation is capped at 50 subrequests (free
+// plan, D1 writes included). Crawling 25 pages plus storing them very nearly exhausts that, so the
+// render calls at the end were being rejected outright — a correctly configured token still
+// produced nothing. Each call to this endpoint starts with a fresh budget and upgrades a few more
+// of the pages that are still thin, so running it repeatedly fills a JavaScript-heavy site in.
+async function renderPass(request: Request, env: KnowledgeEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const body = await request.json() as { sourceId?: number };
+  const sourceId = Number(body.sourceId);
+  if (!Number.isFinite(sourceId)) return json(request, { error: "Missing source id." }, 400);
+  if (!env.CLOUDFLARE_ACCOUNT_ID || !env.CLOUDFLARE_BROWSER_RENDERING_TOKEN) {
+    return json(request, { error: "Browser rendering isn't configured for this workspace." }, 400);
+  }
+
+  await ensureKnowledgeSchema(env.DB);
+  const rows = await env.DB.prepare(
+    `SELECT url, char_count FROM knowledge_pages WHERE workspace_id = ? AND source_id = ? AND char_count < ?
+     ORDER BY char_count ASC LIMIT ?`
+  ).bind(session.workspaceId, sourceId, RENDER_IF_UNDER, MAX_RENDER_CALLS).all<{ url: string; char_count: number }>();
+  const targets = rows.results || [];
+  if (!targets.length) return json(request, { rendered: 0, remaining: 0, done: true });
+
+  const budget: RenderBudget = { renders: MAX_RENDER_CALLS, attempted: 0, succeeded: 0 };
+  const updates: D1PreparedStatement[] = [];
+  for (const target of targets) {
+    budget.attempted++;
+    const html = await fetchRenderedHtml(target.url, env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_BROWSER_RENDERING_TOKEN, budget);
+    if (html) {
+      const { bodyText } = await extractTextFromHtml(html);
+      const text = bodyText.slice(0, MAX_PAGE_CHARS);
+      // Only ever replace with more than we had, so a failed render never destroys good content.
+      if (text.length > target.char_count) {
+        updates.push(env.DB.prepare(`UPDATE knowledge_pages SET content = ?, char_count = ?, fetched_at = CURRENT_TIMESTAMP
+          WHERE workspace_id = ? AND source_id = ? AND url = ?`)
+          .bind(text, text.length, session.workspaceId, sourceId, target.url));
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, RENDER_GAP_MS));
+  }
+  if (updates.length) await env.DB.batch(updates);
+
+  const left = await env.DB.prepare(`SELECT COUNT(*) AS n FROM knowledge_pages WHERE workspace_id = ? AND source_id = ? AND char_count < ?`)
+    .bind(session.workspaceId, sourceId, RENDER_IF_UNDER).first<{ n: number }>();
+  const remaining = Number(left?.n || 0);
+  return json(request, {
+    rendered: updates.length, attempted: budget.attempted, succeeded: budget.succeeded,
+    remaining, done: remaining === 0, error: budget.lastError || null,
   });
 }
 
@@ -413,6 +514,7 @@ export async function handleKnowledgeRequest(request: Request, env: KnowledgeEnv
   if (!env.DB) return json(request, { error: "Workspace database is unavailable." }, 503);
 
   if (url.pathname === "/api/knowledge/fetch-website" && request.method === "POST") return fetchWebsite(request, env);
+  if (url.pathname === "/api/knowledge/render-pass" && request.method === "POST") return renderPass(request, env);
   if (url.pathname === "/api/knowledge/save-content" && request.method === "POST") return saveContent(request, env);
   if (url.pathname === "/api/knowledge/content" && request.method === "GET") return getContent(request, env);
   return json(request, { error: "Not found" }, 404);
