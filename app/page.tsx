@@ -2004,12 +2004,15 @@ function StepDrawer({node,graph,aiActions,items,onClose,onSave,onDelete}:{node:A
       });
       const data=await response.json() as {translation?:AutoNodeTranslation;error?:string};
       if(!response.ok||!data.translation){setBlockTranslateError(data.error||"Translation failed");return}
-      // Merge, so a label already corrected by hand isn't silently overwritten by a fresh guess.
+      // Keep wording already corrected by hand, but only where something was actually written —
+      // spreading the existing map wholesale let a blank field overwrite the fresh translation with
+      // an empty string, so the field the person wanted filled stayed empty.
+      const written=(map:Record<string,string>|undefined)=>Object.fromEntries(Object.entries(map||{}).filter(([,v])=>v.trim()));
       setTranslation({
         ...data.translation,
-        options:{...(data.translation.options||{}),...(translation.options||{})},
-        documents:{...(data.translation.documents||{}),...(translation.documents||{})},
-        messageText:translation.messageText||data.translation.messageText,
+        options:{...(data.translation.options||{}),...written(translation.options)},
+        documents:{...(data.translation.documents||{}),...written(translation.documents)},
+        messageText:(translation.messageText||"").trim()||data.translation.messageText,
       });
     }catch{setBlockTranslateError("Translation failed")}
     finally{setBlockTranslating(false)}
