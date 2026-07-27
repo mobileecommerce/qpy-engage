@@ -264,7 +264,7 @@
 .template-gallery{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;max-height:60vh;overflow-y:auto}
 .template-gallery button{text-align:left;border:1px solid var(--line);border-radius:10px;padding:12px;background:#fff;display:flex;flex-direction:column;gap:4px;cursor:pointer}
 .template-gallery button:hover{border-color:oklch(56% 0.19 265)}
-.template-gallery button span{font-size:18px}
+.template-gallery button>span:first-child{font-size:18px}
 .template-gallery button strong{font-size:12px}
 .template-gallery button small{font-size:10.5px;color:#8b93a1;line-height:1.4}
 .drawer-modal{max-width:420px}
@@ -406,7 +406,7 @@
 .block-picker-grid button{display:flex;align-items:flex-start;gap:10px;text-align:left;border:1px solid var(--line);border-radius:10px;padding:10px 11px;background:#fff;cursor:pointer;transition:border-color .12s,background .12s}
 .block-picker-grid button:hover{border-color:oklch(56% 0.19 265);background:oklch(99% 0.012 265)}
 .block-picker-grid .auto-node-icon{display:grid;place-items:center;width:28px;height:28px;border-radius:8px;flex:none;font-size:14px}
-.block-picker-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.block-picker-text{display:flex;flex-direction:column;gap:2px;flex:1 1 auto;min-width:0;font-size:inherit}
 .block-picker-text strong{font-size:12.5px;line-height:1.25}
 .block-picker-text small{font-size:10.5px;color:#8b93a1;line-height:1.35}
 .connect-list{max-height:min(56vh,440px);overflow-y:auto;margin-top:4px}
@@ -443,7 +443,7 @@
 .template-gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:9px;max-height:min(58vh,460px);overflow-y:auto;padding:2px}
 .template-gallery button{flex-direction:row;align-items:flex-start;gap:11px;padding:11px 12px;border-radius:10px;transition:border-color .12s,background .12s}
 .template-gallery button:hover{background:oklch(99% 0.012 265)}
-.template-gallery button>span{font-size:19px;line-height:1;flex:none;width:28px;text-align:center}
+.template-gallery button>span:first-child{font-size:19px;line-height:1;flex:none;width:28px;text-align:center}
 
 /* ── Block editor ──
    The densest popup in the product: name, kind-specific fields, translations, routing and three
