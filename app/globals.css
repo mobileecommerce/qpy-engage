@@ -552,3 +552,28 @@ small{font-size:11.5px;line-height:1.45}
   .graph-node{animation:none}
   .build-blocks i{animation:none;opacity:.7}
 }
+
+/* ── Inbox conversation header ──
+   The header was pinned to 61px. Its contents now need 69px, so the "AI is handling / Take over"
+   block was pushed out of its own container and sat over the panel above it. Letting the row grow
+   and wrap fixes it at any width, rather than trading one hard-coded height for another. */
+.chat-head{height:auto;min-height:61px;padding:10px 15px;gap:10px;flex-wrap:wrap;align-items:center}
+.chat-person{display:flex;align-items:center;gap:9px;min-width:0;flex:1 1 190px}
+.chat-person>div{min-width:0}
+.chat-person strong,.chat-person small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ai-state{flex:0 1 auto;min-width:0;flex-wrap:wrap}
+.ai-state>div{min-width:0}
+.ai-state strong,.ai-state small{display:block;line-height:1.3}
+.ai-state button{flex:none;white-space:nowrap}
+
+/* The three panels were fixed at 280 + 430 + 220, so a wide window left the transcript cramped
+   while space went unused beside it. They now share the room proportionally with sane floors. */
+.full-inbox{grid-template-columns:minmax(240px,.85fr) minmax(360px,1.9fr) minmax(230px,.9fr)}
+@media(max-width:1100px){
+  .full-inbox{grid-template-columns:minmax(220px,.9fr) minmax(320px,1.6fr)}
+  .full-inbox .notes-panel{grid-column:1/-1;border-left:0;border-top:1px solid var(--line)}
+}
+/* Keep the timestamp on one line so it can't squeeze the name beside it. */
+.conv-meta small{white-space:nowrap}
+.conversation-list button>div{min-width:0}
+.conversation-list strong,.conversation-list small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
