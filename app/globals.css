@@ -287,7 +287,7 @@
 .test-result-note{font-size:10.5px;color:#8b93a1;margin:3px 0 6px}
 .test-result-branch ul{margin:0;padding-left:16px}
 .test-result-branch li{font-size:11.5px;color:#414855;line-height:1.7}
-@media(max-width:900px){.auto-branches{flex-direction:column;align-items:center;gap:28px}.template-gallery{grid-template-columns:1fr}}
+@media(max-width:900px){.auto-branches{flex-direction:column;align-items:center;gap:28px}}
 
 /* ── Popup redesign: scoped to modals/drawers only (.modal-backdrop and everything inside
    .modal), so it never touches the same-named form classes used on regular pages. Bigger,
@@ -395,3 +395,23 @@
 .translation-source{flex:0 0 34%;font-size:11px;color:#8b93a1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .option-lang{flex:1 1 190px;min-width:0;font-size:11.5px;padding:5px 8px}
 .option-row-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+
+/* ── Block picker ──
+   Thirteen block types read as a wall when stacked as full-width cards, so they are grouped by what
+   they do and laid out as compact rows: icon, name, and one line saying when to reach for it. */
+.block-picker{display:flex;flex-direction:column;gap:16px;max-height:min(58vh,460px);overflow-y:auto;margin:4px -4px 0;padding:0 4px}
+.block-picker section{display:flex;flex-direction:column;gap:7px}
+.block-picker h4{margin:0;font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#9aa1af}
+.block-picker-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px}
+.block-picker-grid button{display:flex;align-items:flex-start;gap:10px;text-align:left;border:1px solid var(--line);border-radius:10px;padding:10px 11px;background:#fff;cursor:pointer;transition:border-color .12s,background .12s}
+.block-picker-grid button:hover{border-color:oklch(56% 0.19 265);background:oklch(99% 0.012 265)}
+.block-picker-grid .auto-node-icon{display:grid;place-items:center;width:28px;height:28px;border-radius:8px;flex:none;font-size:14px}
+.block-picker-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.block-picker-text strong{font-size:12.5px;line-height:1.25}
+.block-picker-text small{font-size:10.5px;color:#8b93a1;line-height:1.35}
+.connect-list{max-height:min(56vh,440px);overflow-y:auto;margin-top:4px}
+.connect-list .block-picker-text small{text-transform:none}
+
+/* Long popups scrolled their title and their Save button out of reach; both now stay put. */
+.modal-head{position:sticky;top:-24px;background:#fff;z-index:2;margin-top:-4px;padding-top:4px}
+.modal-actions{position:sticky;bottom:-24px;background:#fff;z-index:2;margin-bottom:-4px;padding-bottom:4px}

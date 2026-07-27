@@ -1376,22 +1376,24 @@ type EdgeRef =
   | { kind:"case"; nodeId:string; caseId:string }
   | { kind:"fallback"; nodeId:string };
 
-const AUTO_NODE_META:Record<AutoNodeKind,{icon:string;chip:string;label:string}>={
-  trigger:{icon:"💬",chip:"rose",label:"Trigger"},
-  message:{icon:"💬",chip:"rose",label:"Send message"},
-  buttons:{icon:"◉",chip:"teal",label:"Ask with options"},
-  question:{icon:"❓",chip:"teal",label:"Ask & store answer"},
-  upload:{icon:"📎",chip:"teal",label:"Request documents"},
-  items:{icon:"▤",chip:"teal",label:"Show catalog items"},
-  aiReply:{icon:"✨",chip:"indigo",label:"AI reply"},
-  aiAction:{icon:"⚙",chip:"indigo",label:"AI reply + action"},
-  split:{icon:"⑂",chip:"purple",label:"Rule branch"},
-  wait:{icon:"⏱",chip:"neutral",label:"Wait"},
-  tag:{icon:"🏷️",chip:"neutral",label:"Add tag"},
-  notify:{icon:"🔔",chip:"purple",label:"Notify team"},
-  escalate:{icon:"🧑‍💼",chip:"human",label:"Escalate to human"},
-  end:{icon:"⏹",chip:"neutral",label:"End"},
+type AutoNodeGroup="Say something"|"Ask the customer"|"Choose a path"|"Do something";
+const AUTO_NODE_META:Record<AutoNodeKind,{icon:string;chip:string;label:string;hint:string;group:AutoNodeGroup}>={
+  trigger:{icon:"💬",chip:"rose",label:"Trigger",hint:"Where the conversation starts",group:"Say something"},
+  message:{icon:"💬",chip:"rose",label:"Send message",hint:"Send text and carry on",group:"Say something"},
+  buttons:{icon:"◉",chip:"teal",label:"Ask with options",hint:"Tappable choices, each with its own path",group:"Ask the customer"},
+  question:{icon:"❓",chip:"teal",label:"Ask & store answer",hint:"Capture one value, like a date or email",group:"Ask the customer"},
+  upload:{icon:"📎",chip:"teal",label:"Request documents",hint:"Wait for files, checked by type and size",group:"Ask the customer"},
+  items:{icon:"▤",chip:"teal",label:"Show catalog items",hint:"Product or room cards with links",group:"Say something"},
+  aiReply:{icon:"✨",chip:"indigo",label:"AI reply",hint:"Hand the conversation to your assistant",group:"Say something"},
+  aiAction:{icon:"⚙",chip:"indigo",label:"AI reply + action",hint:"AI reply that can call one of your actions",group:"Do something"},
+  split:{icon:"⑂",chip:"purple",label:"Rule branch",hint:"Route on keywords, time or frequency",group:"Choose a path"},
+  wait:{icon:"⏱",chip:"neutral",label:"Wait",hint:"Pause, then pick up later",group:"Do something"},
+  tag:{icon:"🏷️",chip:"neutral",label:"Add tag",hint:"Label the conversation for your team",group:"Do something"},
+  notify:{icon:"🔔",chip:"purple",label:"Notify team",hint:"Alert someone that this happened",group:"Do something"},
+  escalate:{icon:"🧑‍💼",chip:"human",label:"Escalate to human",hint:"Put a real person in the conversation",group:"Do something"},
+  end:{icon:"⏹",chip:"neutral",label:"End",hint:"Finish the conversation here",group:"Choose a path"},
 };
+const AUTO_NODE_GROUPS:AutoNodeGroup[]=["Say something","Ask the customer","Choose a path","Do something"];
 
 const NEW_NODE_KINDS:AutoNodeKind[]=["message","buttons","question","upload","items","aiReply","aiAction","split","wait","tag","notify","escalate","end"];
 
@@ -1801,18 +1803,24 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
         return <SimpleModal title={displacedNode?"Insert a block here":"Add a block here"} onClose={()=>setAddingAtEdge(null)}>
         <p>Choose what this block does — you can configure the details next.</p>
         {displacedNode&&<p className="empty-hint">It goes in front of <strong>“{displacedNode.title}”</strong>, which stays connected after it. Picking “End” is the exception — that finishes the conversation here instead.</p>}
-        <div className="template-gallery">{NEW_NODE_KINDS.map(kind=><button key={kind} onClick={()=>addNodeHere(addingAtEdge,kind)}>
-          <span className={`auto-node-icon ${AUTO_CHIP_CLASS[AUTO_NODE_META[kind].chip]||"chip-neutral"}`} style={{display:"inline-grid",placeItems:"center",width:28,height:28,borderRadius:8}}>{AUTO_NODE_META[kind].icon}</span>
-          <strong>{AUTO_NODE_META[kind].label}</strong>
-        </button>)}</div>
+        <div className="block-picker">{AUTO_NODE_GROUPS.map(group=>{
+          const kinds=NEW_NODE_KINDS.filter(k=>AUTO_NODE_META[k].group===group);
+          if(!kinds.length)return null;
+          return <section key={group}>
+            <h4>{group}</h4>
+            <div className="block-picker-grid">{kinds.map(kind=><button key={kind} onClick={()=>addNodeHere(addingAtEdge,kind)}>
+              <span className={`auto-node-icon ${AUTO_CHIP_CLASS[AUTO_NODE_META[kind].chip]||"chip-neutral"}`}>{AUTO_NODE_META[kind].icon}</span>
+              <span className="block-picker-text"><strong>{AUTO_NODE_META[kind].label}</strong><small>{AUTO_NODE_META[kind].hint}</small></span>
+            </button>)}</div>
+          </section>;
+        })}</div>
       </SimpleModal>;
       })()}
       {linkingEdge&&<SimpleModal title="Connect to an existing block" onClose={()=>setLinkingEdge(null)}>
         <p>Point this path at a block that already exists — this is how you send someone back to a main menu, or reuse one shared step from several places.</p>
-        <div className="template-gallery">{Object.values(flow.nodes).filter(n=>n.id!==linkingEdge.nodeId).map(n=><button key={n.id} onClick={()=>linkEdgeTo(linkingEdge,n.id)}>
-          <span className={`auto-node-icon ${AUTO_CHIP_CLASS[n.chip||AUTO_NODE_META[n.kind].chip]||"chip-neutral"}`} style={{display:"inline-grid",placeItems:"center",width:28,height:28,borderRadius:8}}>{n.icon||AUTO_NODE_META[n.kind].icon}</span>
-          <strong>{n.title}</strong>
-          <small>{AUTO_NODE_META[n.kind].label}</small>
+        <div className="block-picker-grid connect-list">{Object.values(flow.nodes).filter(n=>n.id!==linkingEdge.nodeId).map(n=><button key={n.id} onClick={()=>linkEdgeTo(linkingEdge,n.id)}>
+          <span className={`auto-node-icon ${AUTO_CHIP_CLASS[n.chip||AUTO_NODE_META[n.kind].chip]||"chip-neutral"}`}>{n.icon||AUTO_NODE_META[n.kind].icon}</span>
+          <span className="block-picker-text"><strong>{n.title}</strong><small>{AUTO_NODE_META[n.kind].label}</small></span>
         </button>)}</div>
         <div className="modal-actions"><button className="secondary-btn" onClick={()=>linkEdgeTo(linkingEdge,null)}>Disconnect this path</button></div>
       </SimpleModal>}
