@@ -1861,7 +1861,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
       </button>
       <p style={{margin:"14px 0 8px"}}>Or pick an industry starter flow — you can edit every step afterward.</p>
       <div className="template-gallery">{sectors.map(s=><button key={s.key} onClick={()=>createFromTemplate(s.key,`${s.name} automation`)}>
-        <span>{s.icon}</span><strong>{s.name}</strong><small>{s.desc}</small>
+        <span>{s.icon}</span><span className="block-picker-text"><strong>{s.name}</strong><small>{s.desc}</small></span>
       </button>)}</div>
     </SimpleModal>}
   </>;
@@ -2065,9 +2065,8 @@ function StepDrawer({node,graph,aiActions,items,onClose,onSave,onDelete}:{node:A
   const meta=AUTO_NODE_META[draft.kind];
 
   return <div className="modal-backdrop" onMouseDown={onClose}><div className="modal drawer-modal" onMouseDown={e=>e.stopPropagation()}>
-    <div className="modal-head"><h2>{draft.title||meta.label}</h2><button onClick={onClose}>×</button></div>
+    <div className="modal-head"><h2>{draft.title||meta.label}<small>{meta.label} · {meta.hint}</small></h2><button onClick={onClose}>×</button></div>
     <div className="modal-form">
-      <p className="empty-hint" style={{margin:"0 0 8px"}}>{meta.label}</p>
       <label>Block name (shown on the canvas only)<input value={draft.title} onChange={e=>setDraft({...draft,title:e.target.value})}/></label>
 
       {draft.kind==="trigger"&&<label>Channels this automation runs on

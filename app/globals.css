@@ -415,3 +415,53 @@
 /* Long popups scrolled their title and their Save button out of reach; both now stay put. */
 .modal-head{position:sticky;top:-24px;background:#fff;z-index:2;margin-top:-4px;padding-top:4px}
 .modal-actions{position:sticky;bottom:-24px;background:#fff;z-index:2;margin-bottom:-4px;padding-bottom:4px}
+
+/* ── Popup typography and layout, applied to every popup ──
+   The older dialogs were built at 8–9px, which is smaller than any body text in the product and
+   genuinely hard to read. Rather than chase each one, this sets a readable floor inside .modal;
+   anything deliberately smaller (the block picker's hints) is more specific and still wins. */
+.modal strong{font-size:13px;line-height:1.3}
+.modal small{font-size:11.5px;line-height:1.45;color:#7f8794}
+.modal label{font-size:12.5px;font-weight:700;color:#2b2f38}
+.modal .role-note{font-size:12px;line-height:1.55;border-radius:10px;padding:12px 13px}
+.modal .flow-preview{border-radius:10px}
+.modal .flow-preview span{font-size:11px;padding:8px 12px;border-radius:8px}
+
+/* Search results as proper rows, matching the block picker rather than a cramped 52px strip. */
+.modal .search-results button{height:auto;padding:11px 10px;gap:11px;border-bottom:1px solid var(--line);border-radius:8px}
+.modal .search-results button>span{width:30px;height:30px;font-size:14px;flex:none}
+.modal .search-results strong{font-size:13px}
+.modal .search-results small{font-size:11.5px}
+.modal .search-results b{color:#b3b9c4;font-weight:400}
+
+/* Source type chooser: readable labels and a larger tap target. */
+.modal .source-types{gap:10px}
+.modal .source-types button{height:78px;border-radius:10px;font-size:12px;font-weight:600;gap:6px}
+.modal .source-types span{font-size:20px}
+
+/* Starter-template gallery ("New automation") uses the same compact rows as the block picker. */
+.template-gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:9px;max-height:min(58vh,460px);overflow-y:auto;padding:2px}
+.template-gallery button{flex-direction:row;align-items:flex-start;gap:11px;padding:11px 12px;border-radius:10px;transition:border-color .12s,background .12s}
+.template-gallery button:hover{background:oklch(99% 0.012 265)}
+.template-gallery button>span{font-size:19px;line-height:1;flex:none;width:28px;text-align:center}
+
+/* ── Block editor ──
+   The densest popup in the product: name, kind-specific fields, translations, routing and three
+   actions. It gets more width than the others so the option rows stop wrapping onto three lines,
+   and the block kind reads as a label on the title rather than a stray line of body text. */
+.drawer-modal{max-width:560px}
+.drawer-modal .modal-head{align-items:flex-start}
+.drawer-modal .modal-head h2{display:flex;flex-direction:column;gap:3px}
+.drawer-modal .modal-form{gap:15px}
+.drawer-modal .modal-form>label{gap:7px}
+/* Option rows: label and subtitle share a line, routing controls sit under them, so a menu with
+   several options stays readable instead of becoming a wall of inputs. */
+.drawer-modal .flow-option-row{align-items:center;gap:8px;padding:9px;border:1px solid oklch(93% 0.004 90);border-radius:9px;background:oklch(99.3% 0.002 90)}
+.drawer-modal .flow-option-row input{flex:1 1 150px;min-width:0}
+.drawer-modal .flow-option-row select{flex:1 1 160px;min-width:0}
+.drawer-modal .flow-option-row>button{flex:none;width:28px;height:28px;border-radius:7px;border:1px solid oklch(92% 0.004 90);background:#fff;color:oklch(55% 0.16 15);cursor:pointer}
+.drawer-modal .flow-options-list{display:flex;flex-direction:column;gap:8px}
+/* Delete sits apart from Cancel/Save so it is not adjacent to the button people press constantly. */
+.drawer-modal .modal-actions{justify-content:space-between}
+.drawer-modal .modal-actions .danger-btn{margin-right:auto}
+.drawer-modal .modal-head h2 small{font-size:11.5px;font-weight:500;color:#8b93a1;letter-spacing:0}
