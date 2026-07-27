@@ -1530,6 +1530,33 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
   const [catalogItems,setCatalogItems]=useState<{id:string;name:string}[]>([]);
   const [renaming,setRenaming]=useState(false);
   const [nameDraft,setNameDraft]=useState("");
+  // Blocks appear one at a time after a build, in the order a conversation would reach them, so a
+  // new flow reads as being assembled rather than materialising all at once. This is a reveal of a
+  // finished result, not live streaming — the graph has already arrived by the time it starts.
+  const [revealed,setRevealed]=useState<Set<string>|undefined>(undefined);
+  const revealGraph=(graph:AutoGraph)=>{
+    const order:string[]=[];
+    const queue=[graph.entryId];
+    const seen=new Set<string>();
+    while(queue.length){
+      const id=queue.shift()!;
+      if(!id||seen.has(id)||!graph.nodes[id])continue;
+      seen.add(id); order.push(id);
+      const n=graph.nodes[id], cfg=n.config||{};
+      for(const next of [n.next,...(cfg.options||[]).map(o=>o.next),...(cfg.cases||[]).map(c=>c.next),cfg.fallbackNext])
+        if(next)queue.push(next);
+    }
+    setRevealed(new Set());
+    let i=0;
+    const timer=setInterval(()=>{
+      i++;
+      setRevealed(new Set(order.slice(0,i)));
+      // Undefined rather than the full set: it removes the filter entirely, so later edits that add
+      // blocks are never hidden by a stale reveal set.
+      if(i>=order.length){clearInterval(timer);setTimeout(()=>setRevealed(undefined),450)}
+    },170);
+  };
+
   const [genPrompt,setGenPrompt]=useState("");
   const [generating,setGenerating]=useState(false);
   const [genNote,setGenNote]=useState<{source:string;why:string;name:string}|null>(null);
@@ -1547,6 +1574,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
       setSelected(data.automation);
       setView("canvas");
       setGenPrompt("");
+      revealGraph(data.automation.flow);
       // Say which route it took. Reusing a starter template and writing a new flow are very
       // different outcomes, and the owner should not have to guess which one they got.
       setGenNote({source:data.source||"generated",why:data.why||"",name:data.automation.name});
@@ -1799,6 +1827,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
           onEdit={setEditing}
           onAddAt={setAddingAtEdge}
           onLinkAt={setLinkingEdge}
+          revealed={revealed}
         />
       </div>
       {editing&&<StepDrawer node={editing} graph={flow} aiActions={aiActions} items={catalogItems} onClose={()=>setEditing(null)} onSave={saveNode} onDelete={editing.id===flow.entryId?undefined:()=>removeNode(editing.id)}/>}
@@ -1877,6 +1906,10 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
         onChange={e=>setGenPrompt(e.target.value)}
         onKeyDown={e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey))generateFromPrompt()}}
         placeholder="e.g. Ask if they want a refund, collect the order number and a photo, then hand to a human"/>
+      {generating&&<div className="build-progress">
+        <div className="build-blocks"><i/><i/><i/></div>
+        <small>Working out the steps…</small>
+      </div>}
       <div className="prompt-builder-foot">
         <div className="prompt-examples">
           {["Book a table and confirm by WhatsApp","Collect documents for a licence renewal","Answer FAQs, escalate anything about refunds"].map(x=>
@@ -1945,11 +1978,15 @@ function AutoNodeCard({node,onClick,onDelete}:{node:AutoNode;onClick:()=>void;on
 // beneath it, so any number of options and any depth lay out naturally. A path that leads back to a
 // node already shown above renders as a reference chip instead of recursing forever — cycles are a
 // legitimate design (a "Main menu" option), so they're displayed, not rejected.
-function AutoGraphTree({graph,nodeId,seen,onEdit,onAddAt,onLinkAt}:{
+function AutoGraphTree({graph,nodeId,seen,onEdit,onAddAt,onLinkAt,revealed}:{
   graph:AutoGraph; nodeId:string|null; seen:string[];
   onEdit:(n:AutoNode)=>void; onAddAt:(e:EdgeRef)=>void; onLinkAt:(e:EdgeRef)=>void;
+  // While a freshly built automation is being revealed, anything not yet reached simply isn't
+  // rendered — including the edges below it, so the tree grows downward rather than flickering.
+  revealed?:Set<string>;
 }){
   if(!nodeId)return null;
+  if(revealed&&!revealed.has(nodeId))return null;
   const node=graph.nodes[nodeId];
   if(!node)return null;
   const edges=outgoingEdges(node);
@@ -1969,7 +2006,7 @@ function AutoGraphTree({graph,nodeId,seen,onEdit,onAddAt,onLinkAt}:{
           {loops&&targetNode
             ? <button className="graph-loop-chip" onClick={()=>onEdit(targetNode)} title="This path goes back to a block shown above">↩ back to “{targetNode.title}”</button>
             : target
-              ? <AutoGraphTree graph={graph} nodeId={target} seen={nextSeen} onEdit={onEdit} onAddAt={onAddAt} onLinkAt={onLinkAt}/>
+              ? <AutoGraphTree graph={graph} nodeId={target} seen={nextSeen} onEdit={onEdit} onAddAt={onAddAt} onLinkAt={onLinkAt} revealed={revealed}/>
               : <div className="graph-edge-empty">
                   <button className="auto-add-step" onClick={()=>onAddAt(edge)}>＋ Add block</button>
                   <button className="graph-link-btn" onClick={()=>onLinkAt(edge)}>⇢ Connect to existing</button>
