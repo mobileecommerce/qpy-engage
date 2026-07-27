@@ -722,6 +722,72 @@ async function translateAutomation(request: Request, env: AutomationsEnv, id: st
   return json(request, { translated: languages, automation: rowToAutomation({ ...row, flow_json: JSON.stringify(merged) }) });
 }
 
+// Translates one block's text on demand, from values posted by the drawer rather than from what is
+// stored. The editor holds unsaved changes: translating the saved copy would quietly translate text
+// the person can no longer see, so the strings travel with the request and nothing needs saving
+// first. Stateless — it neither reads nor writes the automation.
+async function translateBlock(request: Request, env: AutomationsEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  if (!env.ANTHROPIC_API_KEY) return json(request, { error: "AI translation isn't configured for this workspace." }, 400);
+
+  const body = await request.json() as {
+    language?: unknown; messageText?: unknown;
+    options?: Array<{ id?: unknown; label?: unknown }>;
+    documents?: Array<{ key?: unknown; label?: unknown }>;
+  };
+  const language = normaliseLang(body.language);
+  if (!language) return json(request, { error: "Choose a language first." }, 400);
+
+  const messageText = typeof body.messageText === "string" ? body.messageText.slice(0, 2000) : "";
+  const options = (Array.isArray(body.options) ? body.options : [])
+    .filter((o) => typeof o?.id === "string" && typeof o?.label === "string" && o.label.trim())
+    .slice(0, MAX_LANGUAGES * 4)
+    .map((o) => ({ id: String(o.id), label: String(o.label).slice(0, 300) }));
+  const documents = (Array.isArray(body.documents) ? body.documents : [])
+    .filter((d) => typeof d?.key === "string" && typeof d?.label === "string" && d.label.trim())
+    .slice(0, 20)
+    .map((d) => ({ key: String(d.key), label: String(d.label).slice(0, 300) }));
+  if (!messageText && !options.length && !documents.length) {
+    return json(request, { error: "There is nothing to translate in this block yet." }, 400);
+  }
+
+  const payload = {
+    messageText: messageText || undefined,
+    options: options.length ? Object.fromEntries(options.map((o) => [o.id, o.label])) : undefined,
+    documents: documents.length ? Object.fromEntries(documents.map((d) => [d.key, d.label])) : undefined,
+  };
+  const prompt = `Translate the customer-facing text below into ${language}.\n\n`
+    + `Return ONLY JSON with the same shape and the same keys, no commentary: `
+    + `{"messageText":"...","options":{"<id>":"..."},"documents":{"<key>":"..."}}. `
+    + `Omit any key that was absent from the input. Keep {{variable}} placeholders untouched. `
+    + `These are chat menu buttons and prompts, so keep them short and natural for a customer to read and tap — translate meaning, not word for word.\n\n`
+    + JSON.stringify(payload);
+
+  const result = await callClaude(env.ANTHROPIC_API_KEY, "You translate product interface text. You reply with JSON and nothing else.", [{ role: "user", content: prompt }], 2000)
+    .catch(() => ({ error: "Translation request failed." }));
+  const reply = ("reply" in result && result.reply) || "";
+  if (!reply) return json(request, { error: ("error" in result && result.error) || "Translation request failed." }, 502);
+
+  try {
+    const parsed = JSON.parse(reply.slice(reply.indexOf("{"), reply.lastIndexOf("}") + 1)) as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    if (typeof parsed.messageText === "string") out.messageText = parsed.messageText.slice(0, 2000);
+    for (const field of ["options", "documents"] as const) {
+      const src = parsed[field];
+      if (!src || typeof src !== "object") continue;
+      const map: Record<string, string> = {};
+      for (const [k, v] of Object.entries(src as Record<string, unknown>)) {
+        if (typeof v === "string" && v.trim()) map[k] = v.slice(0, 300);
+      }
+      if (Object.keys(map).length) out[field] = map;
+    }
+    return json(request, { language, translation: out });
+  } catch {
+    return json(request, { error: "Translation came back in an unexpected format." }, 502);
+  }
+}
+
 // ── Execution engine ──
 // The engine now lives in worker/automation-engine.ts (graph walk, node execution, session cursor).
 // Re-exported here so existing importers (worker/index.ts, worker/meta.ts, worker/widget.ts) keep
@@ -750,6 +816,7 @@ export async function handleAutomationsRequest(request: Request, env: Automation
   if (url.pathname === "/api/automations/from-template" && request.method === "POST") return createFromTemplate(request, env);
   if (url.pathname === "/api/automations/activity" && request.method === "GET") return listActivity(request, env);
   if (url.pathname === "/api/automations/ai-actions" && request.method === "GET") return listAiActions(request, env);
+  if (url.pathname === "/api/automations/translate-block" && request.method === "POST") return translateBlock(request, env);
   if (url.pathname.endsWith("/translate") && request.method === "POST") {
     return translateAutomation(request, env, url.pathname.slice("/api/automations/".length, -"/translate".length));
   }

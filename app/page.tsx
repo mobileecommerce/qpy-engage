@@ -1985,6 +1985,35 @@ function StepDrawer({node,graph,aiActions,items,onClose,onSave,onDelete}:{node:A
     update({i18n:{...(config.i18n||{}),[transLang]:{...translation,...patch}}});
   };
   const translatesText=["message","buttons","question","upload","items"].includes(draft.kind);
+  const [blockTranslating,setBlockTranslating]=useState(false);
+  const [blockTranslateError,setBlockTranslateError]=useState("");
+  // Sends the values currently on screen, not the saved ones — the drawer holds unsaved edits, and
+  // translating a version the person can no longer see would be quietly wrong.
+  const translateThisBlock=async()=>{
+    if(!transLang||!token)return;
+    setBlockTranslating(true); setBlockTranslateError("");
+    try{
+      const response=await fetch(metaApi("/api/automations/translate-block"),{
+        method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},
+        body:JSON.stringify({
+          language:transLang,
+          messageText:config.messageText||"",
+          options:draft.kind==="buttons"?options.map(o=>({id:o.id,label:o.label})):[],
+          documents:draft.kind==="upload"?documents.map(d=>({key:d.key,label:d.label})):[],
+        }),
+      });
+      const data=await response.json() as {translation?:AutoNodeTranslation;error?:string};
+      if(!response.ok||!data.translation){setBlockTranslateError(data.error||"Translation failed");return}
+      // Merge, so a label already corrected by hand isn't silently overwritten by a fresh guess.
+      setTranslation({
+        ...data.translation,
+        options:{...(data.translation.options||{}),...(translation.options||{})},
+        documents:{...(data.translation.documents||{}),...(translation.documents||{})},
+        messageText:translation.messageText||data.translation.messageText,
+      });
+    }catch{setBlockTranslateError("Translation failed")}
+    finally{setBlockTranslating(false)}
+  };
 
   // Cases (split node) — N-way keyword/weight branching, was hardcoded binary in v1.
   const cases=config.cases||[];
@@ -2196,10 +2225,17 @@ function StepDrawer({node,graph,aiActions,items,onClose,onSave,onDelete}:{node:A
       {translatesText&&graphLanguages.length>0&&<div className="translation-block">
         <div className="translation-head">
           <strong>Translations</strong>
-          <select value={transLang} onChange={e=>setTransLang(e.target.value)}>
-            {graphLanguages.map(code=><option key={code} value={code}>{langName(code)}</option>)}
-          </select>
+          <div className="translation-head-actions">
+            <select value={transLang} onChange={e=>setTransLang(e.target.value)}>
+              {graphLanguages.map(code=><option key={code} value={code}>{langName(code)}</option>)}
+            </select>
+            <button type="button" className="secondary-btn" disabled={blockTranslating} onClick={translateThisBlock}>
+              {blockTranslating?"Translating…":"✨ Translate with AI"}
+            </button>
+          </div>
         </div>
+        {blockTranslateError&&<p className="empty-hint" style={{color:"oklch(55% 0.16 15)"}}>{blockTranslateError}</p>}
+        <small className="translation-note">Fills only the empty fields below — anything you have already written is kept.</small>
         <label>Message in {langName(transLang)}
           <textarea rows={2} value={translation.messageText||""} onChange={e=>setTranslation({messageText:e.target.value})}
             placeholder={config.messageText||"Leave empty to use the original"}/>
