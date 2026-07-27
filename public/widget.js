@@ -3,13 +3,44 @@
   var API_ORIGIN = "https://qpy-engage-api.qpy-engage.workers.dev";
   var currentScript = document.currentScript;
   var workspaceId = currentScript ? currentScript.getAttribute("data-workspace") : null;
-  // Reuse the same conversation across a page refresh (same tab) instead of starting a new
-  // one — sessionStorage survives reloads/navigation but clears when the tab actually closes.
-  var sessionStorageKey = "qpy-widget-session-" + (workspaceId || "none");
-  var resumedSessionId = null;
-  try { resumedSessionId = window.sessionStorage.getItem(sessionStorageKey); } catch (e) {}
-  var sessionId = resumedSessionId || ((window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2)));
-  if (!resumedSessionId) { try { window.sessionStorage.setItem(sessionStorageKey, sessionId); } catch (e) {} }
+  // A visitor can hold several separate conversations, listed inside the widget. The list lives in
+  // localStorage rather than sessionStorage: a history that disappears when the tab closes isn't a
+  // history, and the whole point of the list is coming back to an earlier thread.
+  var chatsKey = "qpy-widget-chats-" + (workspaceId || "none");
+  var activeKey = "qpy-widget-active-" + (workspaceId || "none");
+  var legacySessionKey = "qpy-widget-session-" + (workspaceId || "none");
+
+  function newChatId() {
+    return (window.crypto && window.crypto.randomUUID)
+      ? window.crypto.randomUUID()
+      : (Date.now().toString(36) + Math.random().toString(36).slice(2));
+  }
+  function readStored(key, fallback) {
+    try { var raw = window.localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; } catch (e) { return fallback; }
+  }
+  function writeStored(key, value) {
+    try { window.localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+  }
+
+  var chats = readStored(chatsKey, null);
+  if (!Array.isArray(chats)) {
+    // Adopt the single conversation older builds kept, so upgrading doesn't read as "my chat is gone".
+    var legacyId = null;
+    try { legacyId = window.sessionStorage.getItem(legacySessionKey); } catch (e) {}
+    chats = legacyId ? [{ id: legacyId, title: "", preview: "", updatedAt: Date.now() }] : [];
+  }
+  var sessionId = null;
+  try { sessionId = window.localStorage.getItem(activeKey); } catch (e) {}
+  var hasActive = false;
+  for (var ci = 0; ci < chats.length; ci++) if (chats[ci].id === sessionId) hasActive = true;
+  if (!hasActive) {
+    sessionId = chats.length ? chats[0].id : newChatId();
+    var known = false;
+    for (var cj = 0; cj < chats.length; cj++) if (chats[cj].id === sessionId) known = true;
+    if (!known) chats.unshift({ id: sessionId, title: "", preview: "", updatedAt: Date.now() });
+  }
+  try { window.localStorage.setItem(activeKey, sessionId); } catch (e) {}
+  writeStored(chatsKey, chats);
 
   var ICONS = {
     chat: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-4.5 7.5 8.5 8.5 0 0 1-7.6.9L3 21l1.9-5.9a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>',
@@ -39,27 +70,32 @@
     var color = (appearance && appearance.color) || "#4c50ee";
     var placement = appearance && appearance.placement === "left" ? "left" : "right";
     var effect = (appearance && appearance.effect) || "none";
+    var headerColor = (appearance && appearance.headerColor) || "#171923";
     var name = assistantName || "AI assistant";
     var greeting = welcome || "Hi! How can I help today?";
 
     var root = document.createElement("div");
     root.id = "qpy-engage-widget";
     if (placement === "left") root.className = "qpy-left";
-    root.innerHTML = '<button aria-label="Open customer chat" class="qpy-launch effect-' + effect + '">' + launcherContent(appearance) + '</button><section class="qpy-panel" hidden><header><strong></strong><small>AI assistant</small><button aria-label="Close chat">×</button></header><main><p class="qpy-ai"></p></main><form><input aria-label="Message" placeholder="Type a message…"><button aria-label="Send message">➤</button></form></section>';
+    root.innerHTML = '<button aria-label="Open customer chat" class="qpy-launch effect-' + effect + '">' + launcherContent(appearance) + '</button><section class="qpy-panel" hidden><header><button class="qpy-back" aria-label="Back to your chats" hidden>\u2039</button><strong></strong><small>AI assistant</small><button class="qpy-close" aria-label="Close chat">×</button></header><div class="qpy-list" hidden><button class="qpy-new">\uff0b Start a new chat</button><div class="qpy-list-items"></div></div><main></main><form><input aria-label="Message" placeholder="Type a message…"><button aria-label="Send message">➤</button></form></section>';
     root.querySelector("header strong").textContent = name;
-    root.querySelector("main p").textContent = greeting;
     root.style.setProperty("--qpy-color", color);
     root.style.setProperty("--qpy-glow", hexToRgba(color, 0.45));
+    root.style.setProperty("--qpy-header", headerColor);
 
     var style = document.createElement("style");
-    style.textContent = "#qpy-engage-widget{position:fixed;right:22px;bottom:22px;z-index:2147483647;font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#20232b}#qpy-engage-widget.qpy-left{right:auto;left:22px}.qpy-launch{width:54px;height:54px;border:0;border-radius:50%;background:var(--qpy-color,#4c50ee);color:#fff;font-size:20px;font-weight:800;box-shadow:0 10px 30px #0003;display:grid;place-items:center}.qpy-launch[hidden]{display:none}.qpy-launch img{width:28px;height:28px;border-radius:50%;object-fit:cover}.qpy-launch.effect-pulse{animation:qpy-pulse 2.2s infinite}.qpy-launch.effect-bounce{animation:qpy-bounce 2.6s infinite}@keyframes qpy-pulse{0%,100%{box-shadow:0 10px 30px #0003,0 0 0 0 var(--qpy-glow,rgba(76,80,238,.45))}50%{box-shadow:0 10px 30px #0003,0 0 0 14px rgba(0,0,0,0)}}@keyframes qpy-bounce{0%,20%,50%,80%,100%{transform:translateY(0)}40%{transform:translateY(-10px)}60%{transform:translateY(-5px)}}.qpy-panel{position:absolute;right:0;bottom:66px;width:min(340px,calc(100vw - 28px));height:440px;background:#fff;border:1px solid #e1e3e8;border-radius:16px;box-shadow:0 18px 60px #0003;overflow:hidden;display:flex;flex-direction:column}.qpy-panel[hidden]{display:none}#qpy-engage-widget.qpy-left .qpy-panel{right:auto;left:0}.qpy-panel header{height:60px;padding:0 15px;background:#171923;color:#fff;display:grid;grid-template-columns:1fr auto;align-content:center;flex:none}.qpy-panel header strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.qpy-panel header small{grid-column:1;color:#b9bec8;font-size:11px}.qpy-panel header button{grid-column:2;grid-row:1/3;border:0;background:transparent;color:#fff;font-size:24px}.qpy-panel main{flex:1;padding:14px;background:#f5f6f8;overflow:auto}.qpy-panel main p{max-width:78%;padding:9px 11px;border-radius:10px;line-height:1.45;margin:7px 0;white-space:pre-line}.qpy-ai{background:#fff}.qpy-user{background:var(--qpy-color,#4c50ee);color:#fff;margin-left:auto!important}.qpy-system{background:transparent!important;color:#8d94a1;font-size:11px;text-align:center;max-width:100%!important;margin:4px auto!important}.qpy-typing{display:flex;align-items:center;gap:6px;padding:9px 11px!important}.qpy-typing em{font-style:normal;font-size:11px;color:#69707e}.qpy-typing span{width:6px;height:6px;border-radius:50%;background:#9aa1af;animation:qpy-typing-bounce 1.2s infinite;flex:none}.qpy-typing span:nth-child(3){animation-delay:.2s}.qpy-typing span:nth-child(4){animation-delay:.4s}@keyframes qpy-typing-bounce{0%,60%,100%{transform:translateY(0);opacity:.5}30%{transform:translateY(-4px);opacity:1}}.qpy-panel form{height:64px;display:flex;gap:7px;padding:10px;border-top:1px solid #e1e3e8;flex:none}.qpy-panel input{flex:1;min-width:0;border:1px solid #d9dce3;border-radius:8px;padding:0 10px}.qpy-panel form button{width:42px;border:0;border-radius:8px;background:var(--qpy-color,#4c50ee);color:#fff}.qpy-panel form button:disabled{opacity:.5}.qpy-buttons{display:flex;flex-direction:column;gap:6px;max-width:88%;margin:7px 0 12px}.qpy-buttons button{border:1px solid var(--qpy-color,#4c50ee);background:#fff;color:var(--qpy-color,#4c50ee);border-radius:20px;padding:8px 14px;font-size:12.5px;font-weight:600;text-align:center}.qpy-buttons button:disabled{opacity:.5}.qpy-buttons button small{display:block;font-size:10.5px;font-weight:400;opacity:.75;margin-top:2px}.qpy-uploads{display:flex;flex-direction:column;gap:8px;max-width:88%;margin:7px 0 12px}.qpy-upload-row{border:1px solid #d9dce3;border-radius:10px;background:#fff;padding:9px 10px;display:flex;flex-direction:column;gap:5px}.qpy-upload-row.done{border-color:#39a06a;background:#f3fbf6}.qpy-upload-row.error{border-color:#d2544a;background:#fdf4f3}.qpy-upload-row strong{font-size:12px}.qpy-upload-row small{font-size:10.5px;color:#6b7280}.qpy-upload-row em{font-style:normal;font-size:10.5px;color:#6b7280;word-break:break-word}.qpy-upload-row.error em{color:#b8332a}.qpy-upload-row.done em{color:#2f7d54}.qpy-upload-pick{display:inline-block;text-align:center;border:1px solid var(--qpy-color,#4c50ee);color:var(--qpy-color,#4c50ee);border-radius:8px;padding:6px 12px;font-size:11.5px;font-weight:700;cursor:pointer}.qpy-upload-pick[disabled]{opacity:.5;cursor:progress}.qpy-upload-pick input{display:none}.qpy-items{display:flex;gap:10px;overflow-x:auto;margin:7px 0 12px;padding-bottom:4px}.qpy-item-card{flex:0 0 auto;width:170px;border:1px solid #e1e3e8;border-radius:10px;overflow:hidden;background:#fff;display:flex;flex-direction:column}.qpy-item-card img{width:100%;height:90px;object-fit:cover;background:#eef0f4}.qpy-item-card .qpy-item-body{padding:8px 9px;display:flex;flex-direction:column;gap:4px;flex:1}.qpy-item-card strong{font-size:12px;line-height:1.3}.qpy-item-card small{font-size:10.5px;color:#6b7280}.qpy-item-card .qpy-item-price{font-size:12px;font-weight:700;color:var(--qpy-color,#4c50ee)}.qpy-item-card a{margin-top:auto;display:block;text-align:center;border:0;background:var(--qpy-color,#4c50ee);color:#fff;border-radius:7px;padding:6px;font-size:11.5px;font-weight:700;text-decoration:none}";
+    style.textContent = "#qpy-engage-widget{position:fixed;right:22px;bottom:22px;z-index:2147483647;font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#20232b}#qpy-engage-widget.qpy-left{right:auto;left:22px}.qpy-launch{width:54px;height:54px;border:0;border-radius:50%;background:var(--qpy-color,#4c50ee);color:#fff;font-size:20px;font-weight:800;box-shadow:0 10px 30px #0003;display:grid;place-items:center}.qpy-launch[hidden]{display:none}.qpy-launch img{width:28px;height:28px;border-radius:50%;object-fit:cover}.qpy-launch.effect-pulse{animation:qpy-pulse 2.2s infinite}.qpy-launch.effect-bounce{animation:qpy-bounce 2.6s infinite}@keyframes qpy-pulse{0%,100%{box-shadow:0 10px 30px #0003,0 0 0 0 var(--qpy-glow,rgba(76,80,238,.45))}50%{box-shadow:0 10px 30px #0003,0 0 0 14px rgba(0,0,0,0)}}@keyframes qpy-bounce{0%,20%,50%,80%,100%{transform:translateY(0)}40%{transform:translateY(-10px)}60%{transform:translateY(-5px)}}.qpy-panel{position:absolute;right:0;bottom:66px;width:min(370px,calc(100vw - 28px));height:min(620px,calc(100vh - 110px));background:#fff;border:1px solid #e1e3e8;border-radius:16px;box-shadow:0 18px 60px #0003;overflow:hidden;display:flex;flex-direction:column}.qpy-panel[hidden]{display:none}#qpy-engage-widget.qpy-left .qpy-panel{right:auto;left:0}.qpy-panel header{height:60px;padding:0 12px;background:var(--qpy-header,#171923);color:#fff;display:grid;grid-template-columns:auto 1fr auto;align-content:center;flex:none}.qpy-panel header strong{grid-column:2;grid-row:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.qpy-panel header small{grid-column:2;grid-row:2;color:#b9bec8;font-size:11px}.qpy-panel header button{border:0;background:transparent;color:#fff;font-size:24px;line-height:1;cursor:pointer;padding:0}.qpy-back{grid-column:1;grid-row:1/3;font-size:30px!important;width:22px;text-align:left}.qpy-back[hidden]{display:none}.qpy-close{grid-column:3;grid-row:1/3;width:26px}.qpy-list{flex:1;background:#f5f6f8;overflow:auto;padding:11px}.qpy-list[hidden]{display:none}.qpy-panel main[hidden],.qpy-panel form[hidden]{display:none}.qpy-new{width:100%;border:1px dashed var(--qpy-color,#4c50ee);background:#fff;color:var(--qpy-color,#4c50ee);border-radius:10px;padding:11px;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:11px}.qpy-chat-row{display:block;width:100%;text-align:left;border:1px solid #e1e3e8;background:#fff;border-radius:10px;padding:10px 11px;margin-bottom:7px;cursor:pointer}.qpy-chat-row.active{border-color:var(--qpy-color,#4c50ee)}.qpy-chat-row strong{display:block;font-size:12.5px;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.qpy-chat-row small{display:block;font-size:11px;color:#6b7280;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.qpy-chat-row em{font-style:normal;font-size:10px;color:#9aa1af;display:block;margin-top:4px}.qpy-empty-list{color:#8d94a1;font-size:12px;text-align:center;padding:16px 8px}.qpy-panel main{flex:1;padding:14px;background:#f5f6f8;overflow:auto}.qpy-panel main p{max-width:78%;padding:9px 11px;border-radius:10px;line-height:1.45;margin:7px 0;white-space:pre-line}.qpy-ai{background:#fff}.qpy-user{background:var(--qpy-color,#4c50ee);color:#fff;margin-left:auto!important}.qpy-system{background:transparent!important;color:#8d94a1;font-size:11px;text-align:center;max-width:100%!important;margin:4px auto!important}.qpy-typing{display:flex;align-items:center;gap:6px;padding:9px 11px!important}.qpy-typing em{font-style:normal;font-size:11px;color:#69707e}.qpy-typing span{width:6px;height:6px;border-radius:50%;background:#9aa1af;animation:qpy-typing-bounce 1.2s infinite;flex:none}.qpy-typing span:nth-child(3){animation-delay:.2s}.qpy-typing span:nth-child(4){animation-delay:.4s}@keyframes qpy-typing-bounce{0%,60%,100%{transform:translateY(0);opacity:.5}30%{transform:translateY(-4px);opacity:1}}.qpy-panel form{height:64px;display:flex;gap:7px;padding:10px;border-top:1px solid #e1e3e8;flex:none}.qpy-panel input{flex:1;min-width:0;border:1px solid #d9dce3;border-radius:8px;padding:0 10px}.qpy-panel form button{width:42px;border:0;border-radius:8px;background:var(--qpy-color,#4c50ee);color:#fff}.qpy-panel form button:disabled{opacity:.5}.qpy-buttons{display:flex;flex-direction:column;gap:6px;max-width:88%;margin:7px 0 12px}.qpy-buttons button{border:1px solid var(--qpy-color,#4c50ee);background:#fff;color:var(--qpy-color,#4c50ee);border-radius:20px;padding:8px 14px;font-size:12.5px;font-weight:600;text-align:center}.qpy-buttons button:disabled{opacity:.5}.qpy-buttons button small{display:block;font-size:10.5px;font-weight:400;opacity:.75;margin-top:2px}.qpy-uploads{display:flex;flex-direction:column;gap:8px;max-width:88%;margin:7px 0 12px}.qpy-upload-row{border:1px solid #d9dce3;border-radius:10px;background:#fff;padding:9px 10px;display:flex;flex-direction:column;gap:5px}.qpy-upload-row.done{border-color:#39a06a;background:#f3fbf6}.qpy-upload-row.error{border-color:#d2544a;background:#fdf4f3}.qpy-upload-row strong{font-size:12px}.qpy-upload-row small{font-size:10.5px;color:#6b7280}.qpy-upload-row em{font-style:normal;font-size:10.5px;color:#6b7280;word-break:break-word}.qpy-upload-row.error em{color:#b8332a}.qpy-upload-row.done em{color:#2f7d54}.qpy-upload-pick{display:inline-block;text-align:center;border:1px solid var(--qpy-color,#4c50ee);color:var(--qpy-color,#4c50ee);border-radius:8px;padding:6px 12px;font-size:11.5px;font-weight:700;cursor:pointer}.qpy-upload-pick[disabled]{opacity:.5;cursor:progress}.qpy-upload-pick input{display:none}.qpy-items{display:flex;gap:10px;overflow-x:auto;margin:7px 0 12px;padding-bottom:4px}.qpy-item-card{flex:0 0 auto;width:170px;border:1px solid #e1e3e8;border-radius:10px;overflow:hidden;background:#fff;display:flex;flex-direction:column}.qpy-item-card img{width:100%;height:90px;object-fit:cover;background:#eef0f4}.qpy-item-card .qpy-item-body{padding:8px 9px;display:flex;flex-direction:column;gap:4px;flex:1}.qpy-item-card strong{font-size:12px;line-height:1.3}.qpy-item-card small{font-size:10.5px;color:#6b7280}.qpy-item-card .qpy-item-price{font-size:12px;font-weight:700;color:var(--qpy-color,#4c50ee)}.qpy-item-card a{margin-top:auto;display:block;text-align:center;border:0;background:var(--qpy-color,#4c50ee);color:#fff;border-radius:7px;padding:6px;font-size:11.5px;font-weight:700;text-decoration:none}";
     document.head.appendChild(style);
     document.body.appendChild(root);
 
     var launch = root.querySelector(".qpy-launch");
     var panel = root.querySelector(".qpy-panel");
     var headerSubtitle = root.querySelector("header small");
-    var close = root.querySelector("header button");
+    var back = root.querySelector(".qpy-back");
+    var close = root.querySelector(".qpy-close");
+    var listPane = root.querySelector(".qpy-list");
+    var listItems = root.querySelector(".qpy-list-items");
+    var newChatButton = root.querySelector(".qpy-new");
     var form = root.querySelector("form");
     var input = root.querySelector("input");
     var sendButton = root.querySelector("form button");
@@ -71,16 +107,79 @@
     var awaitingAiReply = false;
 
     function setHandlingLabel(isAiActive) {
+      // The poll ticks every few seconds and would otherwise overwrite the chat-list header with
+      // "AI assistant" while the visitor is looking at their list of conversations.
+      if (listPane && !listPane.hidden) return;
       headerSubtitle.textContent = isAiActive === false ? "Our team" : "AI assistant";
     }
 
-    if (resumedSessionId && workspaceId) {
+    // ── Several conversations in one window ──
+
+    function chatLabel(chat) {
+      return chat.title || "New conversation";
+    }
+
+    function touchActiveChat(text) {
+      for (var i = 0; i < chats.length; i++) {
+        if (chats[i].id !== sessionId) continue;
+        if (!chats[i].title && text) chats[i].title = text.slice(0, 42);
+        if (text) chats[i].preview = text.slice(0, 70);
+        chats[i].updatedAt = Date.now();
+        break;
+      }
+      writeStored(chatsKey, chats);
+    }
+
+    function renderChatList() {
+      listItems.innerHTML = "";
+      var ordered = chats.slice().sort(function (a, b) { return (b.updatedAt || 0) - (a.updatedAt || 0); });
+      if (!ordered.length) {
+        listItems.insertAdjacentHTML("beforeend", '<p class="qpy-empty-list">No conversations yet.</p>');
+        return;
+      }
+      ordered.forEach(function (chat) {
+        var row = document.createElement("button");
+        row.type = "button";
+        row.className = "qpy-chat-row" + (chat.id === sessionId ? " active" : "");
+        var title = document.createElement("strong");
+        title.textContent = chatLabel(chat);
+        var preview = document.createElement("small");
+        preview.textContent = chat.preview || "Tap to continue";
+        var when = document.createElement("em");
+        when.textContent = chat.updatedAt ? new Date(chat.updatedAt).toLocaleString() : "";
+        row.appendChild(title); row.appendChild(preview); row.appendChild(when);
+        row.onclick = function () { switchChat(chat.id); };
+        listItems.appendChild(row);
+      });
+    }
+
+    function showList() {
+      renderChatList();
+      listPane.hidden = false;
+      messages.hidden = true;
+      form.hidden = true;
+      back.hidden = true;
+      headerSubtitle.textContent = chats.length === 1 ? "1 conversation" : chats.length + " conversations";
+    }
+
+    function showChat() {
+      listPane.hidden = true;
+      messages.hidden = false;
+      form.hidden = false;
+      back.hidden = false;
+    }
+
+    function loadChatHistory(greetIfEmpty) {
+      if (!workspaceId) return;
       fetch(API_ORIGIN + "/api/widget/history?workspaceId=" + encodeURIComponent(workspaceId) + "&sessionId=" + encodeURIComponent(sessionId))
         .then(function (response) { return response.ok ? response.json() : { messages: [] }; })
         .then(function (data) {
           setHandlingLabel(data.aiActive);
           var stored = data.messages || [];
-          if (!stored.length) return;
+          if (!stored.length) {
+            if (greetIfEmpty && !messages.children.length) appendMessage("qpy-ai", greeting);
+            return;
+          }
           messages.innerHTML = "";
           stored.forEach(function (m) {
             var cls = m.role === "system" ? "qpy-system" : (m.role === "user" ? "qpy-user" : "qpy-ai");
@@ -91,7 +190,32 @@
             lastSeenAt = m.createdAt;
           });
         })
-        .catch(function () {});
+        .catch(function () {
+          if (greetIfEmpty && !messages.children.length) appendMessage("qpy-ai", greeting);
+        });
+    }
+
+    // Switching threads has to reset everything the old conversation owned — transcript, the
+    // history sent to the model, and the poll cursor. Leaving the cursor behind would make the
+    // next poll skip the new thread's messages as "already seen".
+    function switchChat(id) {
+      sessionId = id;
+      try { window.localStorage.setItem(activeKey, id); } catch (e) {}
+      history = [];
+      lastSeenAt = "";
+      hideTyping();
+      awaitingAiReply = false;
+      messages.innerHTML = "";
+      showChat();
+      loadChatHistory(true);
+      input.focus();
+    }
+
+    function startNewChat() {
+      var id = newChatId();
+      chats.unshift({ id: id, title: "", preview: "", updatedAt: Date.now() });
+      writeStored(chatsKey, chats);
+      switchChat(id);
     }
 
     function hideTyping() {
@@ -302,14 +426,28 @@
       pollTimer = setInterval(pollForReplies, 4000);
     }
 
-    launch.onclick = function () { panel.hidden = false; launch.hidden = true; input.focus(); startPolling(); };
+    launch.onclick = function () {
+      panel.hidden = false;
+      launch.hidden = true;
+      if (!listPane.hidden) renderChatList(); else input.focus();
+      startPolling();
+    };
     close.onclick = function () { panel.hidden = true; launch.hidden = false; };
+    back.onclick = showList;
+    newChatButton.onclick = startNewChat;
+
     if (!workspaceId) {
       appendMessage("qpy-ai", "This chat widget is missing its workspace id — copy the install code again from Qpy Engage Channels settings.");
+    } else {
+      // Open straight into the active thread; the back arrow is how the visitor reaches the list.
+      showChat();
+      loadChatHistory(true);
     }
     function sendText(text) {
       if (!workspaceId || !text) return;
       appendMessage("qpy-user", text);
+      // The visitor's own words name the thread in the list — far more recognisable than a date.
+      touchActiveChat(text);
       input.disabled = true;
       sendButton.disabled = true;
       startPolling();
@@ -340,6 +478,7 @@
           var answer = result.ok && result.data && result.data.reply ? result.data.reply : (result.data && result.data.error) || "Sorry, I couldn't respond right now.";
           if (result.ok) history.push({ role: "assistant", content: answer });
           appendMessage("qpy-ai", answer);
+          if (result.ok) touchActiveChat(answer);
         })
         .catch(function () {
           awaitingAiReply = false;
