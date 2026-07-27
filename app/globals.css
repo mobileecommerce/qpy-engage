@@ -577,3 +577,19 @@ small{font-size:11.5px;line-height:1.45}
 .conv-meta small{white-space:nowrap}
 .conversation-list button>div{min-width:0}
 .conversation-list strong,.conversation-list small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+
+/* ── Right-hand conversation panel ──
+   The hierarchy was upside down: section headings rendered at 11px in normal weight while the text
+   beneath them fell back to the 16px page default, so the labels read as fine print and the
+   placeholders shouted. Headings are now clearly headings, and the supporting text sits below them.
+   (.empty-hint carried a size in the sheet but no rule was reaching these elements, so it is set
+   here explicitly rather than relied upon.) */
+.empty-hint{font-size:12.5px;line-height:1.6;color:#8b93a1}
+.notes-panel h3{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#9aa1af;margin:0 0 7px}
+.notes-panel h3.notes-heading{margin-top:18px;padding-top:15px}
+.notes-panel>small{display:block;font-size:11.5px;color:#8b93a1;line-height:1.5;margin:-3px 0 9px}
+.notes-panel .empty-hint{font-size:12.5px;color:#8b93a1;margin:0 0 4px}
+.notes-panel .lead-panel-data{font-size:12.5px;line-height:1.6}
+.notes-panel .note p{font-size:12.5px;line-height:1.55;margin:0 0 4px}
+.notes-panel .note small{font-size:11px;color:#9aa1af}
+.notes-panel textarea{font:inherit;font-size:12.5px;line-height:1.5}
