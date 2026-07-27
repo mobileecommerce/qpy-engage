@@ -820,7 +820,8 @@ async function generateAutomation(request: Request, env: AutomationsEnv): Promis
   const instruction = `A business owner asked for this automation:\n"""${prompt}"""\n\n`
     + `Starter templates already available:\n${templates}\n\n`
     + `If one template clearly covers the request, reply {"useTemplate":"<key>","name":"<short name>","why":"<one sentence>"}.\n`
-    + `Otherwise design it and reply {"name":"<short name>","why":"<one sentence>","graph":{"version":2,"entryId":"<id>","nodes":{...}}}.\n\n`
+    + `Otherwise design it and reply {"name":"<short name>","why":"<one sentence>","graph":{"version":2,"entryId":"<id>","nodes":{...}}}.\n`
+    + `"why" must tell the owner something they cannot see at a glance — which template you matched and why, or what the flow asks for and why no template fitted. Never restate that you built it.\n\n`
     + `Node shape: {"id","kind","title","next":"<id or null>","config":{...}}. Every id must be a short lowercase slug you invent and every "next" must name a node you defined, or null.\n`
     + `kinds: message (config.messageText) | buttons (config.messageText, config.options:[{"id","label","next"}]) | question (config.messageText, config.variableKey, config.inputType: text|number|date|email|phone) | upload (config.messageText, config.documents:[{"key","label","accept":["pdf","jpg","png"],"maxMb":5,"required":true}]) | aiReply (no config) | escalate (config.escalateQueue) | tag (config.tagName) | end.\n`
     + `The entry node must be kind "trigger" with config.channels ${JSON.stringify(channels)} and a "next".\n`

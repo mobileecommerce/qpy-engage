@@ -1559,7 +1559,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
 
   const [genPrompt,setGenPrompt]=useState("");
   const [generating,setGenerating]=useState(false);
-  const [genNote,setGenNote]=useState<{source:string;why:string;name:string}|null>(null);
+  const [genNote,setGenNote]=useState<{source:string;why:string;name:string;blocks:number}|null>(null);
   const generateFromPrompt=async()=>{
     if(!token||genPrompt.trim().length<6){notify("Describe what the automation should do");return}
     setGenerating(true); setGenNote(null);
@@ -1577,7 +1577,8 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
       revealGraph(data.automation.flow);
       // Say which route it took. Reusing a starter template and writing a new flow are very
       // different outcomes, and the owner should not have to guess which one they got.
-      setGenNote({source:data.source||"generated",why:data.why||"",name:data.automation.name});
+      setGenNote({source:data.source||"generated",why:data.why||"",name:data.automation.name,
+        blocks:Object.keys(data.automation.flow.nodes).length});
     }catch{notify("Could not build that automation")}
     finally{setGenerating(false)}
   };
@@ -1813,12 +1814,26 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
         <button className="secondary-btn" onClick={()=>{setTestOpen(true);setTestResult(null)}}>▷ Test</button>
         <button className={`toggle ${selected.status==="active"?"on":""}`} onClick={()=>toggleStatus(selected)} title={selected.status==="active"?"Active — click to deactivate":"Inactive — click to activate"}><i/></button>
       </div></div>
-      {genNote&&<div className={`gen-note ${genNote.source}`}>
-        <span>{genNote.source==="template"?"▤":"✨"}</span>
-        <div><strong>{genNote.source==="template"?"Started from a matching template":"Written for you"}</strong>
-          <small>{genNote.why}</small></div>
-        <button type="button" onClick={()=>setGenNote(null)} aria-label="Dismiss">×</button>
-      </div>}
+      {genNote&&(()=>{
+        const headline=genNote.source==="template"
+          ? `Started from a matching template — ${genNote.blocks} blocks`
+          : `Built from your description — ${genNote.blocks} blocks`;
+        // The reason earns its line only if it explains something. Trying to detect duplication by
+        // comparing strings missed the real problem: a reply like "Written for you." isn't a
+        // duplicate of anything, it just says nothing. Length is the honest signal here — a genuine
+        // explanation names what the flow does or why no template fitted, and runs well past this.
+        const reason=(genNote.why||"").trim();
+        const worthShowing=reason.length>=30;
+        return <div className={`gen-note ${genNote.source}`}>
+          <span>{genNote.source==="template"?"▤":"✨"}</span>
+          <div>
+            <strong>{headline}</strong>
+            {worthShowing&&<small>{reason}</small>}
+            <small>Saved as a draft — read it through, then switch it on when you&apos;re happy.</small>
+          </div>
+          <button type="button" onClick={()=>setGenNote(null)} aria-label="Dismiss">×</button>
+        </div>;
+      })()}
       <div className="automation-canvas graph-canvas">
         <AutoGraphTree
           graph={flow}
