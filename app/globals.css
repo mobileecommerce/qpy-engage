@@ -390,3 +390,5 @@
 .translation-head select{padding:4px 9px;font-size:11.5px}
 /* The original sits beside each field so the person editing can see what they are translating. */
 .translation-source{flex:0 0 34%;font-size:11px;color:#8b93a1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.option-lang{flex:1 1 190px;min-width:0;font-size:11.5px;padding:5px 8px}
+.option-row-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}

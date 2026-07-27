@@ -1334,7 +1334,7 @@ const automationTemplates:{name:string;trigger:string;action:string}[]=[{name:"W
 // Any node can point at any node, so a wide menu tree, a deep linear chain, and a loop back to a
 // main menu are all just edges — no shape is privileged the way v1's fixed 2-branch tree was.
 type AutoNodeKind = "trigger"|"message"|"buttons"|"question"|"upload"|"items"|"aiReply"|"aiAction"|"split"|"wait"|"tag"|"notify"|"escalate"|"end";
-type AutoNodeOption = { id:string; label:string; description?:string; next:string|null };
+type AutoNodeOption = { id:string; label:string; description?:string; next:string|null; setLang?:string };
 type AutoNodeCase = { id:string; label:string; match?:string; weight?:number; next:string|null };
 type AutoDocumentSpec = { key:string; label:string; accept:string[]; maxMb:number; required:boolean };
 // Kept in step with SUPPORTED_UPLOAD_TYPES in worker/automation-graph.ts — the server only accepts
@@ -1941,6 +1941,20 @@ function StepDrawer({node,graph,aiActions,items,onClose,onSave,onDelete}:{node:A
   const updateOption=(id:string,patch:Partial<AutoNodeOption>)=>update({options:options.map(o=>o.id===id?{...o,...patch}:o)});
   const removeOption=(id:string)=>update({options:options.filter(o=>o.id!==id)});
 
+  // Builds the whole language chooser in one click. Every business wants the same shape — one
+  // option per language, each labelled in its own language so a speaker can recognise it without
+  // reading the others — and assembling that by hand across the options list is tedious enough
+  // that people skip it and fall back to guessing the customer's language.
+  const LANG_ENDONYM:Record<string,string>={ar:"العربية",hi:"हिन्दी",ur:"اردو",ru:"Русский",zh:"中文",fr:"Français",de:"Deutsch",es:"Español",fa:"فارسی",tl:"Tagalog",ml:"മലയാളം",ta:"தமிழ்",tr:"Türkçe",id:"Bahasa Indonesia",pt:"Português",it:"Italiano"};
+  const makeLanguageMenu=()=>{
+    const target=options[0]?.next??null;
+    const next=[
+      {id:crypto.randomUUID(),label:"English",next:target,setLang:"__default"},
+      ...graphLanguages.map(code=>({id:crypto.randomUUID(),label:LANG_ENDONYM[code]||langName(code),next:target,setLang:code})),
+    ];
+    update({options:next,messageText:config.messageText||"Please choose your language / اختر لغتك"});
+  };
+
   // Documents (upload node). The key is generated from the label once and then left alone: it is
   // what stored files are filed under, so renaming the label later must not orphan them.
   const documents=config.documents||[];
@@ -2032,10 +2046,19 @@ function StepDrawer({node,graph,aiActions,items,onClose,onSave,onDelete}:{node:A
               <input placeholder="Button label" value={o.label} onChange={e=>updateOption(o.id,{label:e.target.value})}/>
               <input placeholder="Subtitle (optional)" value={o.description||""} onChange={e=>updateOption(o.id,{description:e.target.value})}/>
               {targetPicker(o.next,id=>updateOption(o.id,{next:id}))}
+              {!!graphLanguages.length&&<select className="option-lang" title="Tapping this option switches the conversation to this language"
+                value={o.setLang||""} onChange={e=>updateOption(o.id,{setLang:e.target.value||undefined})}>
+                <option value="">Keeps current language</option>
+                <option value="__default">Switches to your default</option>
+                {graphLanguages.map(code=><option key={code} value={code}>Switches to {langName(code)}</option>)}
+              </select>}
               <button type="button" onClick={()=>removeOption(o.id)}>×</button>
             </div>)}
           </div>
-          <button type="button" className="secondary-btn" onClick={addOption}>＋ Add option</button>
+          <div className="option-row-actions">
+            <button type="button" className="secondary-btn" onClick={addOption}>＋ Add option</button>
+            {!!graphLanguages.length&&<button type="button" className="secondary-btn" onClick={makeLanguageMenu}>🌐 Make this a language menu</button>}
+          </div>
         </label>
         <label>If the answer matches no option<div>{targetPicker(config.fallbackNext??null,id=>update({fallbackNext:id}))}</div>
           <small style={{fontWeight:400,color:"#8b93a1"}}>Leave unconnected to simply re-ask the question.</small>

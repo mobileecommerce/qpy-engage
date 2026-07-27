@@ -1,7 +1,7 @@
 import { callClaude, callClaudeWithActions, sanitizeActions, type ChatMessage, type AssistantActionDef, type CatalogItemRef } from "./shared";
 import { readWorkspaceState, buildSystemPrompt } from "./widget";
 import { listItemsForWorkspace, getItemsByIds } from "./items";
-import { toGraph, interpolate, buildUrlFromTemplate, detectLanguage, systemString, type NodeOption, localizedText, localizedOptionLabel, localizedOptionDescription, localizedDocumentLabel, allLabelsForOption, type AutomationGraph, type AutomationNode, type NodeConfig } from "./automation-graph";
+import { toGraph, interpolate, buildUrlFromTemplate, detectLanguage, systemString, DEFAULT_LANG, type NodeOption, localizedText, localizedOptionLabel, localizedOptionDescription, localizedDocumentLabel, allLabelsForOption, type AutomationGraph, type AutomationNode, type NodeConfig } from "./automation-graph";
 import { loadSession, saveSession, clearCursor } from "./automation-session";
 import { receivedKeysAtNode } from "./documents";
 
@@ -393,7 +393,10 @@ async function resolveInputAt(x: ExecCtx, node: AutomationNode, message: string,
     if (!hit) hit = options.find((o) => lower.length > 2 && labelsOf(o).some((l) => l.includes(lower)));
     if (hit) {
       // A language menu pins the choice exactly, where guessing from prose cannot.
-      if (hit.setLang) vars.__lang = hit.setLang;
+      // Switching back to the authored language means clearing the override, not storing a code —
+      // there is no translation entry for "the original", it is simply the fallback.
+      if (hit.setLang === DEFAULT_LANG) delete vars.__lang;
+      else if (hit.setLang) vars.__lang = hit.setLang;
       return { startId: hit.next, reprompt: null };
     }
     if (cfg.fallbackNext) return { startId: cfg.fallbackNext, reprompt: null };

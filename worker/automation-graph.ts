@@ -27,7 +27,9 @@ export type RuleType = "conditional" | "ab" | "time" | "freq";
 export type InputType = "text" | "number" | "date" | "email" | "phone";
 
 // `setLang` turns an option into a language switch: tapping "العربية" pins the conversation to
-// Arabic. Exact by construction, unlike guessing the language from a short message.
+// Arabic. Exact by construction, unlike guessing the language from a short message. The sentinel
+// DEFAULT_LANG means "go back to the text as authored" — a real language code cannot express that,
+// because the authored language is whatever the business wrote and is never itself a translation.
 export type NodeOption = { id: string; label: string; description?: string; next: string | null; setLang?: string };
 export type NodeCase = { id: string; label: string; match?: string; weight?: number; next: string | null };
 
@@ -101,6 +103,7 @@ export const MAX_NODES = 200;
 export const MAX_OPTIONS = 24;
 export const MAX_CASES = 12;
 export const MAX_LANGUAGES = 12;
+export const DEFAULT_LANG = "__default";
 
 // A language code, not a display name: "ar", "pt-BR". Kept permissive on purpose — restricting to a
 // hardcoded list is exactly what stops a business serving a language nobody thought to include.
@@ -169,7 +172,7 @@ function sanitizeConfig(raw: unknown): NodeConfig {
   if (Array.isArray(c.options)) {
     cfg.options = c.options.slice(0, MAX_OPTIONS).map((o) => {
       const r = (o && typeof o === "object" ? o : {}) as Record<string, unknown>;
-      return { id: str(r.id, 80) || crypto.randomUUID(), label: str(r.label, 120), description: str(r.description, 300) || undefined, next: nextOf(r.next), setLang: normaliseLang(r.setLang) || undefined };
+      return { id: str(r.id, 80) || crypto.randomUUID(), label: str(r.label, 120), description: str(r.description, 300) || undefined, next: nextOf(r.next), setLang: (r.setLang === DEFAULT_LANG ? DEFAULT_LANG : normaliseLang(r.setLang)) || undefined };
     }).filter((o) => o.label);
   }
   if (typeof c.variableKey === "string") cfg.variableKey = c.variableKey.replace(/[^a-zA-Z0-9_]/g, "").slice(0, 60);
