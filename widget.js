@@ -427,6 +427,14 @@
       fetch(url).then(function (response) { return response.ok ? response.json() : { messages: [], typing: false }; })
         .then(function (data) {
           setHandlingLabel(data.aiActive);
+          // A reply is written to storage by the automation engine BEFORE the request that produced
+          // it returns. If a poll resolves in that window it holds the same message the pending
+          // request is about to render, and its cursor is too old to recognise that. Re-checking
+          // lastSeenAt only helps when the request wins the race — which, against a multi-second
+          // model call and a four-second poll, is often not the case. So while a reply is pending,
+          // leave delivery to it; the cursor stays put and the next tick picks up anything genuinely
+          // newer, at the cost of showing an agent message one cycle late.
+          if (awaitingAiReply) { if (data.typing) showTyping(t("agentTyping")); return; }
           (data.messages || []).forEach(function (m) {
             // A poll request can be in flight at the same moment the in-flight respond() call
             // (which owns displaying its own reply) saves and shows that same message — since
