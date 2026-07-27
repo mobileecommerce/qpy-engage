@@ -26,13 +26,25 @@ export type NodeKind =
 export type RuleType = "conditional" | "ab" | "time" | "freq";
 export type InputType = "text" | "number" | "date" | "email" | "phone";
 
-export type NodeOption = { id: string; label: string; description?: string; next: string | null };
+// `setLang` turns an option into a language switch: tapping "العربية" pins the conversation to
+// Arabic. Exact by construction, unlike guessing the language from a short message.
+export type NodeOption = { id: string; label: string; description?: string; next: string | null; setLang?: string };
 export type NodeCase = { id: string; label: string; match?: string; weight?: number; next: string | null };
 
 // One document the business expects at an upload node. `accept` is the list of allowed extensions;
 // it is enforced server-side against the file's real magic bytes, not just its name or the MIME type
 // the browser claims, since both of those are trivially forged.
 export type DocumentSpec = { key: string; label: string; accept: string[]; maxMb: number; required: boolean };
+
+// Everything on a node that a customer actually reads, in one other language. Keyed by language
+// code on NodeConfig.i18n. No fixed set of languages is baked in — a business serving Malayalam or
+// Tagalog speakers shouldn't need a code change to do it.
+export type NodeTranslation = {
+  messageText?: string;
+  options?: Record<string, string>;    // option id -> label
+  descriptions?: Record<string, string>; // option id -> subtitle
+  documents?: Record<string, string>;  // document key -> label
+};
 export type CollectFlow = { id: string; name: string; fields: { key: string; label: string }[]; urlTemplate: string; itemIds: string[] };
 
 export type NodeConfig = {
@@ -41,6 +53,7 @@ export type NodeConfig = {
   options?: NodeOption[];
   variableKey?: string; inputType?: InputType; required?: boolean;
   documents?: DocumentSpec[];
+  i18n?: Record<string, NodeTranslation>;
   itemIds?: string[]; urlTemplate?: string;
   ruleType?: RuleType; cases?: NodeCase[]; fallbackNext?: string | null;
   activeDays?: string[]; startTime?: string; endTime?: string;
@@ -60,11 +73,42 @@ export type AutomationNode = {
   config?: NodeConfig;
 };
 
-export type AutomationGraph = { version: 2; entryId: string; nodes: Record<string, AutomationNode> };
+// `languages` is what this automation has been translated into (the authored text is the default,
+// so it is never listed here). It drives the builder's translation editor and nothing else — the
+// engine simply uses whatever translations a node happens to carry.
+// The engine speaks too — "I didn't catch that", "please reply with a number". Those are not
+// authored by the business, so they live on the graph rather than a node, and the translate step
+// fills them alongside the node text. Without this an Arabic menu re-prompts in English.
+export type SystemStrings = Record<string, string>;
+export type AutomationGraph = { version: 2; entryId: string; nodes: Record<string, AutomationNode>; languages?: string[]; systemText?: Record<string, SystemStrings> };
+
+export const SYSTEM_STRINGS_EN: SystemStrings = {
+  didntCatch: "Sorry, I didn't catch that — please pick one of the options below.",
+  needValue: "Please send a value so I can continue.",
+  needNumber: "Please reply with just a number.",
+  needEmail: "That doesn't look like an email address — could you check it?",
+  needPhone: "That doesn't look like a phone number — could you check it?",
+  needDate: "Could you give me a date? For example 12/08/2026.",
+  stillNeeded: "Still needed",
+  sendEachDocument: "Please send each one as a photo or document in this chat.",
+};
+
+export function systemString(graph: AutomationGraph | undefined, lang: string, key: string): string {
+  return (lang && graph?.systemText?.[lang]?.[key]) || SYSTEM_STRINGS_EN[key] || "";
+}
 
 export const MAX_NODES = 200;
 export const MAX_OPTIONS = 24;
 export const MAX_CASES = 12;
+export const MAX_LANGUAGES = 12;
+
+// A language code, not a display name: "ar", "pt-BR". Kept permissive on purpose — restricting to a
+// hardcoded list is exactly what stops a business serving a language nobody thought to include.
+export function normaliseLang(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  const code = raw.trim().toLowerCase().replace(/_/g, "-");
+  return /^[a-z]{2,3}(-[a-z0-9]{2,8})?$/.test(code) ? code : "";
+}
 
 // Node kinds that stop the walk and wait for the customer's next message.
 const AWAITING_KINDS = new Set<NodeKind>(["buttons", "question", "upload", "aiReply", "aiAction"]);
@@ -125,12 +169,33 @@ function sanitizeConfig(raw: unknown): NodeConfig {
   if (Array.isArray(c.options)) {
     cfg.options = c.options.slice(0, MAX_OPTIONS).map((o) => {
       const r = (o && typeof o === "object" ? o : {}) as Record<string, unknown>;
-      return { id: str(r.id, 80) || crypto.randomUUID(), label: str(r.label, 120), description: str(r.description, 300) || undefined, next: nextOf(r.next) };
+      return { id: str(r.id, 80) || crypto.randomUUID(), label: str(r.label, 120), description: str(r.description, 300) || undefined, next: nextOf(r.next), setLang: normaliseLang(r.setLang) || undefined };
     }).filter((o) => o.label);
   }
   if (typeof c.variableKey === "string") cfg.variableKey = c.variableKey.replace(/[^a-zA-Z0-9_]/g, "").slice(0, 60);
   if (typeof c.inputType === "string" && ["text", "number", "date", "email", "phone"].includes(c.inputType)) cfg.inputType = c.inputType as InputType;
   if (typeof c.required === "boolean") cfg.required = c.required;
+  if (c.i18n && typeof c.i18n === "object") {
+    const out: Record<string, NodeTranslation> = {};
+    for (const [rawLang, rawValue] of Object.entries(c.i18n as Record<string, unknown>).slice(0, MAX_LANGUAGES)) {
+      const lang = normaliseLang(rawLang);
+      if (!lang) continue;
+      const t = (rawValue && typeof rawValue === "object" ? rawValue : {}) as Record<string, unknown>;
+      const entry: NodeTranslation = {};
+      if (typeof t.messageText === "string") entry.messageText = t.messageText.slice(0, 2000);
+      for (const field of ["options", "descriptions", "documents"] as const) {
+        const src = t[field];
+        if (!src || typeof src !== "object") continue;
+        const map: Record<string, string> = {};
+        for (const [k, v] of Object.entries(src as Record<string, unknown>).slice(0, MAX_OPTIONS)) {
+          if (typeof v === "string" && v.trim()) map[k.slice(0, 80)] = v.slice(0, 300);
+        }
+        if (Object.keys(map).length) entry[field] = map;
+      }
+      if (Object.keys(entry).length) out[lang] = entry;
+    }
+    if (Object.keys(out).length) cfg.i18n = out;
+  }
   if (Array.isArray(c.documents)) {
     cfg.documents = c.documents.slice(0, MAX_DOCUMENTS_PER_NODE).map((d) => {
       const r = (d && typeof d === "object" ? d : {}) as Record<string, unknown>;
@@ -225,7 +290,25 @@ export function sanitizeGraph(raw: unknown): AutomationGraph | null {
     if (node.config?.cases) node.config.cases = node.config.cases.map((k) => ({ ...k, next: exists(k.next) }));
     if (node.config?.fallbackNext !== undefined) node.config.fallbackNext = exists(node.config.fallbackNext);
   }
-  return { version: 2, entryId, nodes };
+  const languages = Array.isArray(g.languages)
+    ? Array.from(new Set(g.languages.map(normaliseLang).filter(Boolean))).slice(0, MAX_LANGUAGES)
+    : [];
+  const systemText: Record<string, SystemStrings> = {};
+  if (g.systemText && typeof g.systemText === "object") {
+    for (const [rawLang, rawValue] of Object.entries(g.systemText as Record<string, unknown>).slice(0, MAX_LANGUAGES)) {
+      const lang = normaliseLang(rawLang);
+      if (!lang || !rawValue || typeof rawValue !== "object") continue;
+      const map: SystemStrings = {};
+      for (const [k, v] of Object.entries(rawValue as Record<string, unknown>)) {
+        if (k in SYSTEM_STRINGS_EN && typeof v === "string" && v.trim()) map[k] = v.slice(0, 300);
+      }
+      if (Object.keys(map).length) systemText[lang] = map;
+    }
+  }
+  const out: AutomationGraph = { version: 2, entryId, nodes };
+  if (languages.length) out.languages = languages;
+  if (Object.keys(systemText).length) out.systemText = systemText;
+  return out;
 }
 
 // ── Completeness (drives the ⚠ badge, per node and per automation) ──
@@ -328,4 +411,80 @@ export function toGraph(raw: unknown): AutomationGraph {
   if (sane) return sane;
   const id = crypto.randomUUID();
   return { version: 2, entryId: id, nodes: { [id]: { id, kind: "trigger", title: "New message received", subtitle: "Click to choose which channels trigger this automation", next: null, config: { channels: ["webchat"] } } } };
+}
+
+// ── Language ──
+
+// Script ranges are decisive: text in Arabic or Devanagari script simply is not English, and no
+// word list is needed to know it. Latin-script languages share an alphabet, so those fall back to
+// short function words, which are the most frequent tokens in any real sentence.
+const SCRIPTS: Array<[RegExp, string]> = [
+  [/[؀-ۿݐ-ݿ]/, "ar"],
+  [/[֐-׿]/, "he"],
+  [/[ऀ-ॿ]/, "hi"],
+  [/[Ѐ-ӿ]/, "ru"],
+  [/[一-鿿]/, "zh"],
+  [/[぀-ヿ]/, "ja"],
+  [/[가-힯]/, "ko"],
+  [/[฀-๿]/, "th"],
+  [/[Ͱ-Ͽ]/, "el"],
+  [/[஀-௿]/, "ta"],
+  [/[ഀ-ൿ]/, "ml"],
+];
+
+const LATIN_HINTS: Array<[string, string[]]> = [
+  ["es", ["hola", "gracias", "por favor", "quiero", "cuanto", "cuánto", "habitacion", "habitación", "necesito"]],
+  ["fr", ["bonjour", "merci", "s'il vous", "je voudrais", "combien", "chambre", "besoin"]],
+  ["de", ["hallo", "danke", "bitte", "ich möchte", "wieviel", "zimmer", "brauche"]],
+  ["pt", ["olá", "obrigado", "obrigada", "por favor", "quero", "quanto", "quarto"]],
+  ["it", ["ciao", "grazie", "per favore", "vorrei", "quanto", "camera"]],
+  ["id", ["halo", "terima kasih", "tolong", "saya mau", "berapa", "kamar"]],
+  ["tr", ["merhaba", "teşekkür", "lütfen", "istiyorum", "ne kadar", "oda"]],
+];
+
+// Returns a language code, or "" when the text gives no real signal — a bare "ok" or "2" must not
+// be treated as evidence, or the conversation would flip language on every short reply.
+export function detectLanguage(text: string): string {
+  const sample = (text || "").trim();
+  if (sample.length < 2) return "";
+  for (const [pattern, code] of SCRIPTS) if (pattern.test(sample)) return code;
+  const lower = " " + sample.toLowerCase() + " ";
+  if (sample.length < 6) return "";
+  for (const [code, words] of LATIN_HINTS) {
+    for (const word of words) if (lower.includes(" " + word) || lower.includes(word + " ")) return code;
+  }
+  return "";
+}
+
+const RTL_LANGS = new Set(["ar", "he", "fa", "ur", "ps", "sd", "yi"]);
+export function isRtlLang(lang: string): boolean { return RTL_LANGS.has((lang || "").split("-")[0]); }
+
+// Node text in the conversation's language, falling back to what the business authored. Falling
+// back rather than blanking matters: a half-translated automation should still be usable.
+export function localizedText(cfg: NodeConfig | undefined, lang: string): string {
+  return (lang && cfg?.i18n?.[lang]?.messageText) || cfg?.messageText || "";
+}
+
+export function localizedOptionLabel(cfg: NodeConfig | undefined, optionId: string, authored: string, lang: string): string {
+  return (lang && cfg?.i18n?.[lang]?.options?.[optionId]) || authored;
+}
+
+export function localizedOptionDescription(cfg: NodeConfig | undefined, optionId: string, authored: string | undefined, lang: string): string | undefined {
+  return (lang && cfg?.i18n?.[lang]?.descriptions?.[optionId]) || authored;
+}
+
+export function localizedDocumentLabel(cfg: NodeConfig | undefined, docKey: string, authored: string, lang: string): string {
+  return (lang && cfg?.i18n?.[lang]?.documents?.[docKey]) || authored;
+}
+
+// Every label an option has ever been given, in any language. Matching a reply against only the
+// authored label is the trap here: a customer shown an Arabic menu taps the Arabic word, and an
+// English-only comparison silently rejects it and re-asks the question.
+export function allLabelsForOption(cfg: NodeConfig | undefined, optionId: string, authored: string): string[] {
+  const labels = [authored];
+  for (const translation of Object.values(cfg?.i18n || {})) {
+    const label = translation.options?.[optionId];
+    if (label) labels.push(label);
+  }
+  return labels;
 }

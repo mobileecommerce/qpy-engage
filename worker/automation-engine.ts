@@ -1,7 +1,7 @@
 import { callClaude, callClaudeWithActions, sanitizeActions, type ChatMessage, type AssistantActionDef, type CatalogItemRef } from "./shared";
 import { readWorkspaceState, buildSystemPrompt } from "./widget";
 import { listItemsForWorkspace, getItemsByIds } from "./items";
-import { toGraph, interpolate, buildUrlFromTemplate, type AutomationGraph, type AutomationNode, type NodeConfig } from "./automation-graph";
+import { toGraph, interpolate, buildUrlFromTemplate, detectLanguage, systemString, type NodeOption, localizedText, localizedOptionLabel, localizedOptionDescription, localizedDocumentLabel, allLabelsForOption, type AutomationGraph, type AutomationNode, type NodeConfig } from "./automation-graph";
 import { loadSession, saveSession, clearCursor } from "./automation-session";
 import { receivedKeysAtNode } from "./documents";
 
@@ -97,33 +97,37 @@ export async function evaluateSplit(db: D1Database, workspaceId: string, automat
 
 // ── Input validation for `question` nodes ──
 
-function validateInput(value: string, type: string | undefined): { ok: true; value: string } | { ok: false; error: string } {
+function validateInput(value: string, type: string | undefined, say: (k: string) => string): { ok: true; value: string } | { ok: false; error: string } {
   const v = value.trim();
-  if (!v) return { ok: false, error: "Please send a value so I can continue." };
+  if (!v) return { ok: false, error: say("needValue") };
   if (type === "number") {
     const n = Number(v.replace(/[^\d.-]/g, ""));
-    if (!Number.isFinite(n)) return { ok: false, error: "Please reply with just a number." };
+    if (!Number.isFinite(n)) return { ok: false, error: say("needNumber") };
     return { ok: true, value: String(n) };
   }
   if (type === "email") {
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return { ok: false, error: "That doesn't look like an email address — could you check it?" };
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return { ok: false, error: say("needEmail") };
     return { ok: true, value: v };
   }
   if (type === "phone") {
-    if (v.replace(/[^\d]/g, "").length < 7) return { ok: false, error: "That doesn't look like a phone number — could you check it?" };
+    if (v.replace(/[^\d]/g, "").length < 7) return { ok: false, error: say("needPhone") };
     return { ok: true, value: v };
   }
   if (type === "date") {
     // Deliberately permissive: businesses' customers write dates every imaginable way, and the
     // downstream link/AI handles the real formatting. We only reject something with no date-like
     // content at all rather than pretending to parse every locale.
-    if (!/\d/.test(v)) return { ok: false, error: "Could you give me a date? For example 12/08/2026." };
+    if (!/\d/.test(v)) return { ok: false, error: say("needDate") };
     return { ok: true, value: v };
   }
   return { ok: true, value: v };
 }
 
 // ── Collect & Link instructions for AI nodes (unchanged behaviour, now node-scoped) ──
+
+// Read live from vars rather than snapshotted onto the context: an option carrying setLang changes
+// the language partway through a turn, and every node after it must already speak the new one.
+function langOf(x: ExecCtx): string { return x.vars.__lang || ""; }
 
 function buildCollectLinkInstructions(cfg: NodeConfig | undefined): string {
   const flows = (cfg?.collectFlows || []).filter((f) => f.name.trim() && f.fields.filter((x) => x.key && x.label).length && f.urlTemplate.trim());
@@ -157,6 +161,7 @@ type NodeOutcome =
 type ExecCtx = {
   env: EngineEnv; workspaceId: string; ctx: RunCtx; automation: AutomationRow;
   history: ChatMessage[]; out: AutomationOutMessage[];
+  graph: AutomationGraph;
   vars: Record<string, string>;
 };
 
@@ -187,15 +192,18 @@ async function executeNode(x: ExecCtx, node: AutomationNode): Promise<NodeOutcom
       return { control: "next", next: node.next ?? null };
 
     case "message":
-      await sendText(x, interpolate(cfg.messageText || node.subtitle || "", x.vars));
+      await sendText(x, interpolate(localizedText(cfg, langOf(x)) || node.subtitle || "", x.vars));
       return { control: "next", next: node.next ?? null };
 
     case "buttons": {
-      const text = interpolate(cfg.messageText || node.title, x.vars);
+      const text = interpolate(localizedText(cfg, langOf(x)) || node.title, x.vars);
       // The widget renders real tappable buttons from this message type. WhatsApp's text-only
       // delivery gets a numbered fallback so the same node still works there — the customer can
       // reply with the number or the label, and both match in resolveInputAt().
-      const options = (cfg.options || []).map((o) => ({ label: o.label, description: o.description }));
+      const options = (cfg.options || []).map((o) => ({
+        label: localizedOptionLabel(cfg, o.id, o.label, langOf(x)),
+        description: localizedOptionDescription(cfg, o.id, o.description, langOf(x)),
+      }));
       x.out.push({ type: "buttons", text, options });
       const flat = options.length ? `${text}\n\n${options.map((o, i) => `${i + 1}. ${o.label}`).join("\n")}` : text;
       await x.ctx.deliver(flat);
@@ -203,24 +211,24 @@ async function executeNode(x: ExecCtx, node: AutomationNode): Promise<NodeOutcom
     }
 
     case "question":
-      await sendText(x, interpolate(cfg.messageText || node.title, x.vars));
+      await sendText(x, interpolate(localizedText(cfg, langOf(x)) || node.title, x.vars));
       return { control: "await" };
 
     case "upload": {
       const specs = cfg.documents || [];
       const received = await receivedKeysAtNode(x.env.DB, x.workspaceId, x.ctx.contactKey, node.id);
       x.out.push({
-        type: "upload", text: interpolate(cfg.messageText || node.title, x.vars), nodeId: node.id,
-        documents: specs.map((d) => ({ ...d, received: received.has(d.key) })),
+        type: "upload", text: interpolate(localizedText(cfg, langOf(x)) || node.title, x.vars), nodeId: node.id,
+        documents: specs.map((d) => ({ ...d, label: localizedDocumentLabel(cfg, d.key, d.label, langOf(x)), received: received.has(d.key) })),
       });
       // WhatsApp has no upload widget — the customer just sends the file into the chat — so it gets
       // a plain-text checklist naming each document and the formats we can accept.
       if (!x.ctx.persistConversationState) {
         const lines = specs.map((d) => {
           const mark = received.has(d.key) ? "✅" : "•";
-          return `${mark} ${d.label} (${d.accept.join(", ").toUpperCase()}, max ${d.maxMb} MB)${d.required ? "" : " — optional"}`;
+          return `${mark} ${localizedDocumentLabel(cfg, d.key, d.label, langOf(x))} (${d.accept.join(", ").toUpperCase()}, max ${d.maxMb} MB)${d.required ? "" : " — optional"}`;
         });
-        await x.ctx.deliver(`${interpolate(cfg.messageText || node.title, x.vars)}\n\n${lines.join("\n")}\n\nPlease send each one as a photo or document in this chat.`);
+        await x.ctx.deliver(`${interpolate(localizedText(cfg, langOf(x)) || node.title, x.vars)}\n\n${lines.join("\n")}\n\n${systemString(x.graph, langOf(x), "sendEachDocument")}`);
       }
       return { control: "await" };
     }
@@ -351,6 +359,7 @@ type Resolution = { startId: string | null; reprompt: AutomationNode | null; err
 
 async function resolveInputAt(x: ExecCtx, node: AutomationNode, message: string, vars: Record<string, string>): Promise<Resolution> {
   const cfg = node.config || {};
+  const say = (k: string) => systemString(x.graph, langOf(x), k);
   const text = (message || "").trim();
 
   // An upload step advances on documents arriving, not on anything the customer types. Whatever
@@ -364,26 +373,35 @@ async function resolveInputAt(x: ExecCtx, node: AutomationNode, message: string,
       if (cfg.variableKey) vars[cfg.variableKey] = specs.filter((d) => received.has(d.key)).map((d) => d.label).join(", ");
       return { startId: node.next ?? null, reprompt: null };
     }
-    return { startId: null, reprompt: node, error: `Still needed: ${outstanding.map((d) => d.label).join(", ")}.` };
+    return { startId: null, reprompt: node, error: `${say("stillNeeded")}: ${outstanding.map((d) => localizedDocumentLabel(cfg, d.key, d.label, langOf(x))).join(", ")}.` };
   }
 
   if (node.kind === "buttons") {
     const options = cfg.options || [];
     const lower = text.toLowerCase();
-    let hit = options.find((o) => o.label.trim().toLowerCase() === lower);
+    // Compare against every language this option has a label in, not just the authored one. A
+    // customer shown an Arabic menu taps the Arabic word; matching only English would reject it
+    // and re-ask the question they just answered.
+    const labelsOf = (o: NodeOption) => allLabelsForOption(cfg, o.id, o.label).map((l) => l.trim().toLowerCase());
+    let hit = options.find((o) => labelsOf(o).some((l) => l === lower));
     if (!hit) {
       // WhatsApp (and anyone typing rather than tapping) can answer with the option's number.
+      // Digits mean the same thing in every language, so this is the reliable fallback.
       const asNumber = Number(text);
       if (Number.isInteger(asNumber) && asNumber >= 1 && asNumber <= options.length) hit = options[asNumber - 1];
     }
-    if (!hit) hit = options.find((o) => lower.length > 2 && o.label.toLowerCase().includes(lower));
-    if (hit) return { startId: hit.next, reprompt: null };
+    if (!hit) hit = options.find((o) => lower.length > 2 && labelsOf(o).some((l) => l.includes(lower)));
+    if (hit) {
+      // A language menu pins the choice exactly, where guessing from prose cannot.
+      if (hit.setLang) vars.__lang = hit.setLang;
+      return { startId: hit.next, reprompt: null };
+    }
     if (cfg.fallbackNext) return { startId: cfg.fallbackNext, reprompt: null };
-    return { startId: null, reprompt: node, error: "Sorry, I didn't catch that — please pick one of the options below." };
+    return { startId: null, reprompt: node, error: say("didntCatch") };
   }
 
   if (node.kind === "question") {
-    const check = validateInput(text, cfg.inputType);
+    const check = validateInput(text, cfg.inputType, say);
     if (!check.ok) return { startId: null, reprompt: node, error: check.error };
     if (cfg.variableKey) vars[cfg.variableKey] = check.value;
     return { startId: node.next ?? null, reprompt: null };
@@ -435,6 +453,14 @@ export async function runAutomations(env: EngineEnv, workspaceId: string, channe
   const session = await loadSession(env.DB, workspaceId, ctx.contactKey);
   const vars: Record<string, string> = { ...(session?.variables || {}) };
 
+  // Language is decided once and then kept. Re-detecting on every turn would let a bare "ok" or a
+  // tapped English button drag an Arabic conversation back into English mid-flow. An explicit
+  // language option (setLang) overrides this later in resolveInputAt.
+  if (!vars.__lang) {
+    const detected = detectLanguage(message);
+    if (detected) vars.__lang = detected;
+  }
+
   // A live cursor pins the conversation to the automation it belongs to, so a mid-flow reply can
   // never be re-classified into a different automation (or a different branch of the same one).
   let automation = session?.nodeId ? rows.find((r) => r.id === session.automationId) : undefined;
@@ -446,7 +472,7 @@ export async function runAutomations(env: EngineEnv, workspaceId: string, channe
 
   const graph = toGraph(JSON.parse(automation.flow_json));
   const out: AutomationOutMessage[] = [];
-  const x: ExecCtx = { env, workspaceId, ctx, automation, history, out, vars };
+  const x: ExecCtx = { env, workspaceId, ctx, automation, history, out, vars, graph };
 
   let startId: string | null;
   if (resuming && session?.nodeId && graph.nodes[session.nodeId]) {
@@ -523,7 +549,7 @@ export async function continueAfterUpload(env: EngineEnv, workspaceId: string, c
   if (node.config?.variableKey) vars[node.config.variableKey] = specs.filter((d) => received.has(d.key)).map((d) => d.label).join(", ");
 
   const out: AutomationOutMessage[] = [];
-  const x: ExecCtx = { env, workspaceId, ctx, automation, history: [], out, vars };
+  const x: ExecCtx = { env, workspaceId, ctx, automation, history: [], out, vars, graph };
   const walk = await walkFrom(x, graph, node.next ?? null);
   if (walk.cursor) await saveSession(env.DB, workspaceId, ctx.contactKey, { automationId: automation.id, nodeId: walk.cursor, variables: vars });
   else await clearCursor(env.DB, workspaceId, ctx.contactKey, vars);
@@ -553,7 +579,7 @@ export async function resumeDueAutomationWaits(env: EngineEnv, makeDeliver: (row
     const session = await loadSession(env.DB, row.workspace_id, contactKey);
     const vars = { ...(session?.variables || {}) };
     const out: AutomationOutMessage[] = [];
-    const x: ExecCtx = { env, workspaceId: row.workspace_id, ctx, automation, history: [], out, vars };
+    const x: ExecCtx = { env, workspaceId: row.workspace_id, ctx, automation, history: [], out, vars, graph };
     let path: { nodeId?: string | null } = {};
     try { path = JSON.parse(row.resume_path) as { nodeId?: string | null }; } catch { path = {}; }
     const walk = await walkFrom(x, graph, path.nodeId ?? null);

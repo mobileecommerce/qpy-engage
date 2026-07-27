@@ -1,8 +1,9 @@
 import { requireSession, type AuthEnv } from "./auth";
-import { json, corsPreflight, allowedOrigin, sanitizeActions } from "./shared";
+import { json, corsPreflight, allowedOrigin, sanitizeActions, callClaude } from "./shared";
 import { readWorkspaceState } from "./widget";
 import {
   toGraph, sanitizeGraph, buildUrlFromTemplate, graphNeedsConfig, nodeAwaitsInput,
+  normaliseLang, MAX_LANGUAGES, SYSTEM_STRINGS_EN,
   type AutomationGraph, type AutomationNode,
 } from "./automation-graph";
 import { ensureSessionSchema } from "./automation-session";
@@ -647,6 +648,80 @@ async function dryRunAutomation(request: Request, env: AutomationsEnv, id: strin
   return json(request, { path });
 }
 
+// Fills every translatable string on the automation for the requested languages in one AI call, so
+// the business gets a working translation immediately and can then correct wording by hand. Doing
+// this once at authoring time (rather than per message at runtime) keeps menus deterministic, free
+// to serve, and identical on every turn.
+async function translateAutomation(request: Request, env: AutomationsEnv, id: string): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  if (!env.ANTHROPIC_API_KEY) return json(request, { error: "AI translation isn't configured for this workspace." }, 400);
+
+  const body = await request.json() as { languages?: unknown };
+  const languages = Array.isArray(body.languages)
+    ? Array.from(new Set(body.languages.map(normaliseLang).filter(Boolean))).slice(0, MAX_LANGUAGES)
+    : [];
+  if (!languages.length) return json(request, { error: "Choose at least one language." }, 400);
+
+  const row = await env.DB.prepare(`SELECT * FROM automations2 WHERE id = ? AND workspace_id = ?`)
+    .bind(id, session.workspaceId).first<AutomationRow>();
+  if (!row) return json(request, { error: "Not found" }, 404);
+  const graph = toGraph(JSON.parse(row.flow_json));
+
+  // Send only what a customer reads, keyed by id, so the model returns something we can map back
+  // exactly rather than having to re-parse a whole graph it might restructure.
+  const source: Record<string, unknown> = {};
+  for (const node of Object.values(graph.nodes)) {
+    const cfg = node.config || {};
+    const entry: Record<string, unknown> = {};
+    if (cfg.messageText) entry.messageText = cfg.messageText;
+    if (cfg.options?.length) entry.options = Object.fromEntries(cfg.options.map((o) => [o.id, o.label]));
+    if (cfg.options?.some((o) => o.description)) entry.descriptions = Object.fromEntries(cfg.options.filter((o) => o.description).map((o) => [o.id, o.description]));
+    if (cfg.documents?.length) entry.documents = Object.fromEntries(cfg.documents.map((d) => [d.key, d.label]));
+    if (Object.keys(entry).length) source[node.id] = entry;
+  }
+  if (!Object.keys(source).length) return json(request, { error: "This automation has no text to translate yet." }, 400);
+
+  const payload = { nodes: source, system: SYSTEM_STRINGS_EN };
+  const prompt = `Translate the customer-facing text below into these languages: ${languages.join(", ")}.\n\n`
+    + `Return ONLY JSON, no commentary, shaped exactly like: {"<language code>":{"nodes":{"<node id>":{"messageText":"...","options":{"<option id>":"..."},"descriptions":{...},"documents":{...}}},"system":{"didntCatch":"...", ...}}}\n\n`
+    + `Keep every id and key exactly as given. Keep {{variable}} placeholders untouched. These are chat menu buttons, so keep labels short and natural for a customer to tap — translate meaning, not word for word.\n\n`
+    + JSON.stringify(payload);
+
+  const result = await callClaude(env.ANTHROPIC_API_KEY, "You translate product interface text. You reply with JSON and nothing else.", [{ role: "user", content: prompt }], 8000)
+    .catch(() => ({ error: "Translation request failed." }));
+  const reply = ("reply" in result && result.reply) || "";
+  if (!reply) return json(request, { error: ("error" in result && result.error) || "Translation request failed. Please try again." }, 502);
+
+  let parsed: Record<string, { nodes?: Record<string, Record<string, unknown>>; system?: Record<string, string> }>;
+  try {
+    const jsonText = reply.slice(reply.indexOf("{"), reply.lastIndexOf("}") + 1);
+    parsed = JSON.parse(jsonText);
+  } catch { return json(request, { error: "Translation came back incomplete — try fewer languages at once." }, 502); }
+
+  const nodes = { ...graph.nodes };
+  const systemText: Record<string, Record<string, string>> = { ...(graph.systemText || {}) };
+  for (const lang of languages) {
+    const forLang = parsed[lang];
+    if (!forLang) continue;
+    if (forLang.system) systemText[lang] = { ...(systemText[lang] || {}), ...forLang.system };
+    for (const [nodeId, translation] of Object.entries(forLang.nodes || {})) {
+      const node = nodes[nodeId];
+      if (!node) continue;
+      const cfg = { ...(node.config || {}) };
+      // Merge rather than replace: a business that hand-corrected another language keeps it.
+      cfg.i18n = { ...(cfg.i18n || {}), [lang]: { ...(cfg.i18n?.[lang] || {}), ...translation } as never };
+      nodes[nodeId] = { ...node, config: cfg };
+    }
+  }
+
+  const merged = toGraph({ ...graph, nodes, systemText, languages: Array.from(new Set([...(graph.languages || []), ...languages])) });
+  await env.DB.prepare(`UPDATE automations2 SET flow_json = ?, needs_config = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND workspace_id = ?`)
+    .bind(JSON.stringify(merged), graphNeedsConfig(merged) ? 1 : 0, id, session.workspaceId).run();
+
+  return json(request, { translated: languages, automation: rowToAutomation({ ...row, flow_json: JSON.stringify(merged) }) });
+}
+
 // ── Execution engine ──
 // The engine now lives in worker/automation-engine.ts (graph walk, node execution, session cursor).
 // Re-exported here so existing importers (worker/index.ts, worker/meta.ts, worker/widget.ts) keep
@@ -675,6 +750,9 @@ export async function handleAutomationsRequest(request: Request, env: Automation
   if (url.pathname === "/api/automations/from-template" && request.method === "POST") return createFromTemplate(request, env);
   if (url.pathname === "/api/automations/activity" && request.method === "GET") return listActivity(request, env);
   if (url.pathname === "/api/automations/ai-actions" && request.method === "GET") return listAiActions(request, env);
+  if (url.pathname.endsWith("/translate") && request.method === "POST") {
+    return translateAutomation(request, env, url.pathname.slice("/api/automations/".length, -"/translate".length));
+  }
   if (url.pathname === "/api/automations/test-link" && request.method === "POST") return testLink(request, env);
   const reorderMatch = url.pathname.match(/^\/api\/automations\/([^/]+)\/reorder$/);
   if (reorderMatch && request.method === "POST") return reorderAutomation(request, env, reorderMatch[1]);

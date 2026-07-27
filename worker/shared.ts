@@ -72,7 +72,10 @@ export function sanitizeChatMessages(raw: unknown): ChatMessage[] {
     .map((m) => ({ role: m.role, content: m.content.slice(0, MAX_MESSAGE_LENGTH) }));
 }
 
-export async function callClaude(apiKey: string, systemPrompt: string, messages: ChatMessage[]): Promise<{ reply?: string; error?: string; status?: number }> {
+// maxTokens is optional because chat replies want to stay short, but structured work (translating a
+// whole automation into several languages) returns far more than a chat turn and silently truncates
+// mid-JSON at the chat default.
+export async function callClaude(apiKey: string, systemPrompt: string, messages: ChatMessage[], maxTokens = 500): Promise<{ reply?: string; error?: string; status?: number }> {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -82,7 +85,7 @@ export async function callClaude(apiKey: string, systemPrompt: string, messages:
     },
     body: JSON.stringify({
       model: ANTHROPIC_MODEL,
-      max_tokens: 500,
+      max_tokens: maxTokens,
       system: systemPrompt.slice(0, MAX_SYSTEM_PROMPT_LENGTH) || undefined,
       messages,
     }),

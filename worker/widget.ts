@@ -239,7 +239,14 @@ export async function buildSystemPrompt(db: D1Database, workspaceId: string, que
     + `Wrong: "Here's what we offer:\\n- Fast setup\\n- 24/7 support\\n- **No contracts**" `
     + `Right: "We offer fast setup, 24/7 support, and there's no contract required." `
     + "If an answer has several distinct points, write each as its own short paragraph (blank line between them) — never a list.\n\n";
-  prompt += `${role}\n\nTone: ${tone}. Preferred language: ${language}.\n\nFallback and human handoff policy: ${fallback}`;
+  // Reply in whatever the customer wrote, rather than forcing one configured language on everyone.
+  // The model is already multilingual; the old fixed setting meant an Arabic-speaking guest got
+  // English back from a hotel sitting in the UAE.
+  prompt += `${role}\n\nTone: ${tone}.\n\nLANGUAGE: Always answer in the same language the customer writes in, `
+    + `matching their script (reply to Arabic in Arabic, to Hindi in Hindi). If their language is genuinely unclear, use ${language}. `
+    + `Reference material below may be in a different language — translate the relevant facts into the customer's language rather than quoting them in the wrong one. `
+    + `Never mention that you translated anything, and never comment on which language they used.`
+    + `\n\nFallback and human handoff policy: ${fallback}`;
   if (policies?.restricted) prompt += `\n\nRestricted topics you must never answer — offer human handoff instead: ${policies.restricted}`;
   prompt += `\n\nConnected knowledge sources: ${sourceNames}.`;
   prompt += knowledgeText
@@ -474,7 +481,8 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
     const automationResult = await runAutomationsForWidgetMessage(env, workspaceId, sessionId, message, messages);
     if (automationResult.handled) {
       const repliedAt = sqliteNow();
-      return widgetJson({ messages: automationResult.messages, serverTime: repliedAt });
+      const langRow = await loadSession(env.DB, workspaceId, sessionId);
+    return widgetJson({ messages: automationResult.messages, serverTime: repliedAt, lang: langRow?.variables?.__lang || "" });
     }
   }
 
