@@ -372,3 +372,21 @@
 .auto-node-wrap:hover .auto-node-remove{opacity:1}
 .auto-node-remove:hover{background:oklch(95% 0.03 15);border-color:oklch(55% 0.16 15)}
 @media(max-width:640px){.graph-edges{margin-left:10px;padding-left:14px}.graph-edge:before{left:-14px;width:12px}}
+
+/* Language list on an automation, and the per-block translation editor. */
+.lang-chips{display:flex;flex-wrap:wrap;gap:7px;margin:10px 0}
+.lang-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid oklch(88% 0.02 265);background:oklch(98% 0.015 265);color:oklch(42% 0.12 265);border-radius:20px;padding:4px 6px 4px 11px;font-size:11.5px;font-weight:600}
+.lang-chip em{font-style:normal;opacity:.6;font-size:10px;text-transform:uppercase}
+.lang-chip button{border:0;background:transparent;color:inherit;font-size:15px;line-height:1;cursor:pointer;padding:0 4px;opacity:.6}
+.lang-chip button:hover{opacity:1}
+.lang-add{display:flex;gap:7px}
+.lang-add input{flex:1;min-width:0}
+.lang-presets{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+.lang-presets button{border:1px dashed oklch(88% 0.005 90);background:#fff;color:#7b8494;border-radius:16px;padding:4px 10px;font-size:11px;font-weight:600;cursor:pointer}
+.lang-presets button:hover{border-style:solid;color:oklch(45% 0.13 265);border-color:oklch(80% 0.06 265)}
+.translation-block{margin-top:14px;padding:12px;border:1px solid oklch(91% 0.005 90);border-radius:11px;background:oklch(99% 0.002 90)}
+.translation-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+.translation-head strong{font-size:12.5px}
+.translation-head select{padding:4px 9px;font-size:11.5px}
+/* The original sits beside each field so the person editing can see what they are translating. */
+.translation-source{flex:0 0 34%;font-size:11px;color:#8b93a1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

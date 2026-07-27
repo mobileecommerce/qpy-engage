@@ -1346,6 +1346,7 @@ type AutoStepConfig = {
   options?:AutoNodeOption[];
   variableKey?:string; inputType?:"text"|"number"|"date"|"email"|"phone"; required?:boolean;
   documents?:AutoDocumentSpec[];
+  i18n?:Record<string,AutoNodeTranslation>;
   itemIds?:string[]; urlTemplate?:string;
   ruleType?:"conditional"|"ab"|"time"|"freq"; cases?:AutoNodeCase[]; fallbackNext?:string|null;
   activeDays?:string[]; startTime?:string; endTime?:string;
@@ -1358,7 +1359,12 @@ type AutoStepConfig = {
   collectFlows?:{id:string;name:string;fields:{key:string;label:string}[];urlTemplate:string;itemIds:string[]}[];
 };
 type AutoNode = { id:string; kind:AutoNodeKind; title:string; subtitle?:string; icon?:string; chip?:string; next?:string|null; config?:AutoStepConfig };
-type AutoGraph = { version:2; entryId:string; nodes:Record<string,AutoNode> };
+type AutoNodeTranslation = { messageText?:string; options?:Record<string,string>; descriptions?:Record<string,string>; documents?:Record<string,string> };
+type AutoGraph = { version:2; entryId:string; nodes:Record<string,AutoNode>; languages?:string[]; systemText?:Record<string,Record<string,string>> };
+// Offered as one-tap choices; the field still accepts any code, because restricting the list is
+// exactly what stops a business serving a language nobody here thought of.
+const COMMON_LANGS:[string,string][]=[["ar","Arabic"],["hi","Hindi"],["ur","Urdu"],["ru","Russian"],["zh","Chinese"],["fr","French"],["de","German"],["es","Spanish"],["fa","Persian"],["tl","Tagalog"],["ml","Malayalam"],["ta","Tamil"]];
+const langName=(code:string)=>COMMON_LANGS.find(([c])=>c===code)?.[1]||code.toUpperCase();
 type AutomationDef = { id:string; name:string; sectorKey:string; status:"active"|"draft"|"inactive"; priority:number; needsConfig:boolean; flow:AutoGraph; createdAt?:string; updatedAt?:string };
 type SectorInfo = { key:string; name:string; icon:string; desc:string };
 type ActivityRow = { id:number; automationId:string; automationName:string; contact:string; channel:string; branch:string; outcome:string; outcomeType:string; createdAt:string };
@@ -1522,6 +1528,9 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
   const [catalogItems,setCatalogItems]=useState<{id:string;name:string}[]>([]);
   const [renaming,setRenaming]=useState(false);
   const [nameDraft,setNameDraft]=useState("");
+  const [langOpen,setLangOpen]=useState(false);
+  const [langDraft,setLangDraft]=useState("");
+  const [translating,setTranslating]=useState(false);
   const [testOpen,setTestOpen]=useState(false);
   const [testMessage,setTestMessage]=useState("");
   const [testResult,setTestResult]=useState<{path:{label:string;note?:string;steps:string[]}[]}|null>(null);
@@ -1621,6 +1630,40 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
     return saved;
   };
 
+  // ── Languages ──
+  const languages=selected?.flow.languages||[];
+  const addLanguage=(code:string)=>{
+    if(!selected)return;
+    const clean=code.trim().toLowerCase().replace(/_/g,"-");
+    if(!/^[a-z]{2,3}(-[a-z0-9]{2,8})?$/.test(clean)){notify("Enter a language code like ar, hi or pt-BR");return}
+    if(languages.includes(clean)){setLangDraft("");return}
+    commitGraph({...selected.flow,languages:[...languages,clean]},"");
+    setLangDraft("");
+  };
+  // Removing only stops a language being offered. The translated wording stays on the nodes, so
+  // re-adding it brings back text the business may have spent real time correcting.
+  const removeLanguage=(code:string)=>{
+    if(!selected)return;
+    commitGraph({...selected.flow,languages:languages.filter(l=>l!==code)},"");
+  };
+  const translateNow=async()=>{
+    if(!selected||!token)return;
+    if(!languages.length){notify("Add a language first");return}
+    setTranslating(true);
+    try{
+      const response=await fetch(metaApi(`/api/automations/${selected.id}/translate`),{
+        method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},
+        body:JSON.stringify({languages}),
+      });
+      const data=await response.json() as {automation?:AutomationDef;translated?:string[];error?:string};
+      if(!response.ok||!data.automation){notify(data.error||"Translation failed");return}
+      setList(list.map(a=>a.id===selected.id?data.automation!:a));
+      setSelected(data.automation);
+      notify(`Translated into ${(data.translated||[]).map(langName).join(", ")}`);
+    }catch{notify("Translation failed")}
+    finally{setTranslating(false)}
+  };
+
   const saveNode=async(node:AutoNode)=>{
     if(!selected)return;
     const saved=await commitGraph(setNode(selected.flow,node),"Block saved");
@@ -1713,6 +1756,7 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
         <p>{selected.needsConfig?"⚠ Some steps still need configuration — fill in the highlighted blocks before activating.":"Click any block to edit it. Hover a step to remove it."}</p>
       </div><div className="header-buttons">
         <button className="secondary-btn" onClick={()=>setView("list")}>← Back to list</button>
+        <button className="secondary-btn" onClick={()=>setLangOpen(true)}>🌐 Languages{languages.length?` (${languages.length})`:""}</button>
         <button className="secondary-btn" onClick={()=>{setTestOpen(true);setTestResult(null)}}>▷ Test</button>
         <button className={`toggle ${selected.status==="active"?"on":""}`} onClick={()=>toggleStatus(selected)} title={selected.status==="active"?"Active — click to deactivate":"Inactive — click to activate"}><i/></button>
       </div></div>
@@ -1727,6 +1771,30 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
         />
       </div>
       {editing&&<StepDrawer node={editing} graph={flow} aiActions={aiActions} items={catalogItems} onClose={()=>setEditing(null)} onSave={saveNode} onDelete={editing.id===flow.entryId?undefined:()=>removeNode(editing.id)}/>}
+      {langOpen&&<SimpleModal title="Languages" onClose={()=>setLangOpen(false)}>
+        <p>Add the languages this automation should speak. Customers get their own language automatically — anything not translated falls back to the text you wrote.</p>
+        <div className="lang-chips">
+          {languages.length?languages.map(code=><span key={code} className="lang-chip">{langName(code)} <em>{code}</em>
+            <button type="button" onClick={()=>removeLanguage(code)} aria-label={`Remove ${langName(code)}`}>×</button>
+          </span>):<p className="empty-hint">No extra languages yet.</p>}
+        </div>
+        <label>Add a language
+          <div className="lang-add">
+            <input value={langDraft} onChange={e=>setLangDraft(e.target.value)} placeholder="Code, e.g. ar or pt-BR"
+              onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();addLanguage(langDraft)}}}/>
+            <button type="button" className="secondary-btn" onClick={()=>addLanguage(langDraft)}>Add</button>
+          </div>
+        </label>
+        <div className="lang-presets">{COMMON_LANGS.filter(([c])=>!languages.includes(c)).map(([code,name])=>
+          <button key={code} type="button" onClick={()=>addLanguage(code)}>{name}</button>)}</div>
+        <div className="modal-actions">
+          <button className="secondary-btn" onClick={()=>setLangOpen(false)}>Close</button>
+          <button className="primary" disabled={translating||!languages.length} onClick={translateNow}>
+            {translating?"Translating…":"Translate with AI"}
+          </button>
+        </div>
+        <p className="empty-hint" style={{marginTop:"10px"}}>Translating fills every block at once and keeps any wording you have already corrected. Open a block afterwards to check or edit it.</p>
+      </SimpleModal>}
       {addingAtEdge&&(()=>{
         const displaced=getEdgeTarget(flow,addingAtEdge);
         const displacedNode=displaced?flow.nodes[displaced]:null;
@@ -1892,6 +1960,17 @@ function StepDrawer({node,graph,aiActions,items,onClose,onSave,onDelete}:{node:A
     // Never let the list empty out — a document accepting nothing could never be satisfied.
     if(next.length)updateDocument(i,{accept:next});
   };
+
+  // Translations for this block. Editing here is what lets a business fix wording the AI got
+  // slightly wrong — a menu label that is technically correct but nobody would tap.
+  const graphLanguages=graph.languages||[];
+  const [transLang,setTransLang]=useState(graphLanguages[0]||"");
+  const translation=(config.i18n||{})[transLang]||{};
+  const setTranslation=(patch:Partial<AutoNodeTranslation>)=>{
+    if(!transLang)return;
+    update({i18n:{...(config.i18n||{}),[transLang]:{...translation,...patch}}});
+  };
+  const translatesText=["message","buttons","question","upload","items"].includes(draft.kind);
 
   // Cases (split node) — N-way keyword/weight branching, was hardcoded binary in v1.
   const cases=config.cases||[];
@@ -2090,6 +2169,37 @@ function StepDrawer({node,graph,aiActions,items,onClose,onSave,onDelete}:{node:A
         </div>)}
         <button type="button" className="secondary-btn" onClick={addFlow}>＋ Add a request type (flow)</button>
       </>}
+
+      {translatesText&&graphLanguages.length>0&&<div className="translation-block">
+        <div className="translation-head">
+          <strong>Translations</strong>
+          <select value={transLang} onChange={e=>setTransLang(e.target.value)}>
+            {graphLanguages.map(code=><option key={code} value={code}>{langName(code)}</option>)}
+          </select>
+        </div>
+        <label>Message in {langName(transLang)}
+          <textarea rows={2} value={translation.messageText||""} onChange={e=>setTranslation({messageText:e.target.value})}
+            placeholder={config.messageText||"Leave empty to use the original"}/>
+        </label>
+        {draft.kind==="buttons"&&!!options.length&&<label>Button labels
+          <div className="flow-options-list">
+            {options.map(o=><div className="flow-option-row" key={o.id}>
+              <span className="translation-source">{o.label}</span>
+              <input value={translation.options?.[o.id]||""} placeholder="Leave empty to use the original"
+                onChange={e=>setTranslation({options:{...(translation.options||{}),[o.id]:e.target.value}})}/>
+            </div>)}
+          </div>
+        </label>}
+        {draft.kind==="upload"&&!!documents.length&&<label>Document names
+          <div className="flow-options-list">
+            {documents.map(d=><div className="flow-option-row" key={d.key}>
+              <span className="translation-source">{d.label||d.key}</span>
+              <input value={translation.documents?.[d.key]||""} placeholder="Leave empty to use the original"
+                onChange={e=>setTranslation({documents:{...(translation.documents||{}),[d.key]:e.target.value}})}/>
+            </div>)}
+          </div>
+        </label>}
+      </div>}
 
       {draft.kind!=="buttons"&&draft.kind!=="split"&&draft.kind!=="end"&&<label style={{marginTop:"10px"}}>After this block, go to<div>{targetPicker(draft.next??null,id=>setDraft({...draft,next:id}))}</div></label>}
     </div>
