@@ -1530,6 +1530,29 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
   const [catalogItems,setCatalogItems]=useState<{id:string;name:string}[]>([]);
   const [renaming,setRenaming]=useState(false);
   const [nameDraft,setNameDraft]=useState("");
+  const [genPrompt,setGenPrompt]=useState("");
+  const [generating,setGenerating]=useState(false);
+  const [genNote,setGenNote]=useState<{source:string;why:string;name:string}|null>(null);
+  const generateFromPrompt=async()=>{
+    if(!token||genPrompt.trim().length<6){notify("Describe what the automation should do");return}
+    setGenerating(true); setGenNote(null);
+    try{
+      const response=await fetch(metaApi("/api/automations/generate"),{
+        method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},
+        body:JSON.stringify({prompt:genPrompt.trim(),channels:["webchat"]}),
+      });
+      const data=await response.json() as {automation?:AutomationDef;source?:string;why?:string;error?:string};
+      if(!response.ok||!data.automation){notify(data.error||"Could not build that automation");return}
+      setList([...list,data.automation]);
+      setSelected(data.automation);
+      setView("canvas");
+      setGenPrompt("");
+      // Say which route it took. Reusing a starter template and writing a new flow are very
+      // different outcomes, and the owner should not have to guess which one they got.
+      setGenNote({source:data.source||"generated",why:data.why||"",name:data.automation.name});
+    }catch{notify("Could not build that automation")}
+    finally{setGenerating(false)}
+  };
   const [langOpen,setLangOpen]=useState(false);
   const [langDraft,setLangDraft]=useState("");
   const [translating,setTranslating]=useState(false);
@@ -1762,6 +1785,12 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
         <button className="secondary-btn" onClick={()=>{setTestOpen(true);setTestResult(null)}}>▷ Test</button>
         <button className={`toggle ${selected.status==="active"?"on":""}`} onClick={()=>toggleStatus(selected)} title={selected.status==="active"?"Active — click to deactivate":"Inactive — click to activate"}><i/></button>
       </div></div>
+      {genNote&&<div className={`gen-note ${genNote.source}`}>
+        <span>{genNote.source==="template"?"▤":"✨"}</span>
+        <div><strong>{genNote.source==="template"?"Started from a matching template":"Written for you"}</strong>
+          <small>{genNote.why}</small></div>
+        <button type="button" onClick={()=>setGenNote(null)} aria-label="Dismiss">×</button>
+      </div>}
       <div className="automation-canvas graph-canvas">
         <AutoGraphTree
           graph={flow}
@@ -1839,6 +1868,25 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
 
   return <>
     <PageHeader title="Automations" description="Always-on rules that react to a trigger and run a full branch — AI replies, system actions, tags, escalation — in one shot." action={<div className="header-buttons"><button className="secondary-btn" onClick={()=>{setView("activity");loadActivity()}}>Activity log</button><button className="primary" onClick={openTemplates}>＋ New automation</button></div>}/>
+    <div className="prompt-builder">
+      <div className="prompt-builder-head">
+        <strong>Describe the automation you need</strong>
+        <small>We&apos;ll write it, or start you from a matching template. It&apos;s saved as a draft so you can read it before anyone else does.</small>
+      </div>
+      <textarea rows={2} value={genPrompt} disabled={generating}
+        onChange={e=>setGenPrompt(e.target.value)}
+        onKeyDown={e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey))generateFromPrompt()}}
+        placeholder="e.g. Ask if they want a refund, collect the order number and a photo, then hand to a human"/>
+      <div className="prompt-builder-foot">
+        <div className="prompt-examples">
+          {["Book a table and confirm by WhatsApp","Collect documents for a licence renewal","Answer FAQs, escalate anything about refunds"].map(x=>
+            <button key={x} type="button" disabled={generating} onClick={()=>setGenPrompt(x)}>{x}</button>)}
+        </div>
+        <button className="primary" disabled={generating||genPrompt.trim().length<6} onClick={generateFromPrompt}>
+          {generating?"Building…":"Build it"}
+        </button>
+      </div>
+    </div>
     {loading?<p className="empty-hint">Loading…</p>:!list.length?
       <div className="empty-state"><span>⌁</span><h3>No automations yet</h3><p>Start from one of 8 ready-made industry flows — reservation booking, order tracking, emergency escalation, and more.</p><button className="primary" onClick={openTemplates}>＋ New automation</button></div>:
       <div className="data-card">

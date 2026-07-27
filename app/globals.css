@@ -507,3 +507,29 @@ small{font-size:11.5px;line-height:1.45}
 /* The setup checklist packs three steps into one row; at the smaller type they fitted, and now they
    need to be free to stack rather than squeezing each step into a narrow column. */
 .setup-card .steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr))}
+
+/* ── Describe-it automation builder ── */
+.prompt-builder{border:1px solid var(--line);border-radius:13px;background:#fff;padding:15px 16px;margin-bottom:14px}
+.prompt-builder-head{display:flex;flex-direction:column;gap:3px;margin-bottom:10px}
+.prompt-builder-head strong{font-size:13.5px}
+.prompt-builder-head small{color:#8b93a1}
+.prompt-builder textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:11px 12px;
+  font:inherit;font-size:13px;line-height:1.55;resize:vertical;min-height:62px;background:oklch(99.3% 0.002 90)}
+.prompt-builder textarea:focus{border-color:oklch(56% 0.19 265);box-shadow:0 0 0 3px oklch(90% 0.05 265);outline:0;background:#fff}
+.prompt-builder textarea:disabled{opacity:.6}
+.prompt-builder-foot{display:flex;align-items:center;gap:12px;margin-top:10px;flex-wrap:wrap}
+.prompt-examples{display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:0}
+.prompt-examples button{border:1px dashed oklch(88% 0.006 90);background:#fff;color:#7b8494;border-radius:16px;
+  padding:5px 10px;font-size:11.5px;cursor:pointer;transition:border-color .12s,color .12s}
+.prompt-examples button:hover:not(:disabled){border-style:solid;color:oklch(45% 0.13 265);border-color:oklch(80% 0.06 265)}
+.prompt-builder-foot>.primary{flex:none}
+
+/* Says which route the result took — writing a flow and reusing a template are different outcomes. */
+.gen-note{display:flex;align-items:flex-start;gap:11px;border:1px solid oklch(88% 0.04 265);
+  background:oklch(98.5% 0.015 265);border-radius:11px;padding:11px 13px;margin-bottom:12px}
+.gen-note.template{border-color:oklch(88% 0.04 195);background:oklch(98.5% 0.015 195)}
+.gen-note>span{font-size:15px;line-height:1.2}
+.gen-note>div{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.gen-note strong{font-size:12.5px}
+.gen-note small{color:#6f7784}
+.gen-note>button{border:0;background:transparent;color:#8b93a1;font-size:17px;line-height:1;cursor:pointer;padding:0 2px}

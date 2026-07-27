@@ -406,6 +406,13 @@ export const SECTOR_ORDER = ["servicedesk", "general", "fnb", "hotels", "grocery
 
 // ── CRUD ──
 
+// Both creation paths and the generator all need "put this at the end of the list".
+async function nextPriority(db: D1Database, workspaceId: string): Promise<number> {
+  const row = await db.prepare(`SELECT MAX(priority) as m FROM automations2 WHERE workspace_id = ?`).bind(workspaceId).first<{ m: number | null }>();
+  return (row?.m ?? -1) + 1;
+}
+
+
 // Node completeness now lives in worker/automation-graph.ts (nodeIsIncomplete / graphNeedsConfig)
 // so the engine, the API and the dashboard all judge it the same way. Re-exported under the old
 // names too, since the dashboard's mirror imports them.
@@ -459,8 +466,7 @@ async function createBlank(request: Request, env: AutomationsEnv): Promise<Respo
   if (session instanceof Response) return session;
   await ensureAutomationsSchema(env.DB);
   const body = await request.json().catch(() => ({})) as { name?: string };
-  const maxPriority = await env.DB.prepare(`SELECT MAX(priority) as m FROM automations2 WHERE workspace_id = ?`).bind(session.workspaceId).first<{ m: number | null }>();
-  const priority = (maxPriority?.m ?? -1) + 1;
+  const priority = await nextPriority(env.DB, session.workspaceId);
   const id = uid();
   const name = (body.name || "New automation").trim().slice(0, 120) || "New automation";
   const graph = blankGraph();
@@ -478,8 +484,7 @@ async function createFromTemplate(request: Request, env: AutomationsEnv): Promis
   const flows = sectorFlows();
   const sectorKey = body.sectorKey && flows[body.sectorKey] ? body.sectorKey : "general";
   const template = flows[sectorKey];
-  const maxPriority = await env.DB.prepare(`SELECT MAX(priority) as m FROM automations2 WHERE workspace_id = ?`).bind(session.workspaceId).first<{ m: number | null }>();
-  const priority = (maxPriority?.m ?? -1) + 1;
+  const priority = await nextPriority(env.DB, session.workspaceId);
   const id = uid();
   const name = (body.name || `${template.name} automation`).slice(0, 120);
   const graph = toGraph(template.flow);
@@ -788,6 +793,78 @@ async function translateBlock(request: Request, env: AutomationsEnv): Promise<Re
   }
 }
 
+// Builds an automation from a plain-language description, or points at a starter template when one
+// already covers the request. The model is given the real node vocabulary and the real template
+// list, so it either names a template we actually ship or emits a graph the sanitizer accepts.
+//
+// What comes back is always created as a DRAFT. An automation replies to real customers the moment
+// it is active, and nobody should discover what a generated flow says by having it said to a
+// customer first.
+async function generateAutomation(request: Request, env: AutomationsEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  if (!env.ANTHROPIC_API_KEY) return json(request, { error: "AI isn't configured for this workspace." }, 400);
+
+  const body = await request.json() as { prompt?: unknown; channels?: unknown };
+  const prompt = typeof body.prompt === "string" ? body.prompt.trim().slice(0, 1200) : "";
+  if (prompt.length < 6) return json(request, { error: "Describe what the automation should do." }, 400);
+  const channels = Array.isArray(body.channels)
+    ? body.channels.filter((c): c is string => c === "webchat" || c === "whatsapp")
+    : ["webchat"];
+
+  await ensureAutomationsSchema(env.DB);
+  const flows = sectorFlows();
+  const templates = SECTOR_ORDER.map((key) => `${key}: ${flows[key].name} — ${flows[key].desc}`).join("\n");
+
+  const system = "You design customer-service chat automations. You reply with JSON and nothing else.";
+  const instruction = `A business owner asked for this automation:\n"""${prompt}"""\n\n`
+    + `Starter templates already available:\n${templates}\n\n`
+    + `If one template clearly covers the request, reply {"useTemplate":"<key>","name":"<short name>","why":"<one sentence>"}.\n`
+    + `Otherwise design it and reply {"name":"<short name>","why":"<one sentence>","graph":{"version":2,"entryId":"<id>","nodes":{...}}}.\n\n`
+    + `Node shape: {"id","kind","title","next":"<id or null>","config":{...}}. Every id must be a short lowercase slug you invent and every "next" must name a node you defined, or null.\n`
+    + `kinds: message (config.messageText) | buttons (config.messageText, config.options:[{"id","label","next"}]) | question (config.messageText, config.variableKey, config.inputType: text|number|date|email|phone) | upload (config.messageText, config.documents:[{"key","label","accept":["pdf","jpg","png"],"maxMb":5,"required":true}]) | aiReply (no config) | escalate (config.escalateQueue) | tag (config.tagName) | end.\n`
+    + `The entry node must be kind "trigger" with config.channels ${JSON.stringify(channels)} and a "next".\n`
+    + `Write every customer-facing line in full, ready to send — never placeholders like "..." or "[insert]". Use {{variableKey}} to refer back to an answer. Prefer buttons over free text where the choices are known. Keep it under 14 nodes.`;
+
+  const result = await callClaude(env.ANTHROPIC_API_KEY, system, [{ role: "user", content: instruction }], 4000)
+    .catch(() => ({ error: "Generation request failed." }));
+  const reply = ("reply" in result && result.reply) || "";
+  if (!reply) return json(request, { error: ("error" in result && result.error) || "Generation failed. Please try again." }, 502);
+
+  let parsed: { useTemplate?: string; name?: string; why?: string; graph?: unknown };
+  try { parsed = JSON.parse(reply.slice(reply.indexOf("{"), reply.lastIndexOf("}") + 1)); }
+  catch { return json(request, { error: "The reply came back in an unexpected shape. Try describing it differently." }, 502); }
+
+  const name = (parsed.name || "New automation").slice(0, 80);
+  const why = (parsed.why || "").slice(0, 300);
+
+  // Template route — reuse the exact same creation path as picking it from the gallery.
+  if (parsed.useTemplate && SECTOR_ORDER.includes(parsed.useTemplate)) {
+    const key = parsed.useTemplate;
+    const graph = toGraph(flows[key].flow);
+    const id = uid();
+    const priority = await nextPriority(env.DB, session.workspaceId);
+    await env.DB.prepare(`INSERT INTO automations2 (id, workspace_id, name, sector_key, status, priority, needs_config, flow_json) VALUES (?, ?, ?, ?, 'draft', ?, ?, ?)`)
+      .bind(id, session.workspaceId, name, key, priority, graphNeedsConfig(graph) ? 1 : 0, JSON.stringify(graph)).run();
+    const row = await env.DB.prepare(`SELECT * FROM automations2 WHERE id = ?`).bind(id).first<AutomationRow>();
+    return json(request, { source: "template", templateKey: key, why, automation: rowToAutomation(row!) });
+  }
+
+  // Generated route — the sanitizer is what makes this safe to store: unknown kinds, bad ids and
+  // pointers to nodes that were never defined are all dropped before it reaches the database.
+  const graph = sanitizeGraph(parsed.graph);
+  if (!graph) return json(request, { error: "The generated flow wasn't valid. Try describing it in more detail." }, 502);
+  const entry = graph.nodes[graph.entryId];
+  if (!entry || entry.kind !== "trigger") return json(request, { error: "The generated flow had no starting point. Try again." }, 502);
+
+  const id = uid();
+  const priority = await nextPriority(env.DB, session.workspaceId);
+  await env.DB.prepare(`INSERT INTO automations2 (id, workspace_id, name, sector_key, status, priority, needs_config, flow_json) VALUES (?, ?, ?, 'custom', 'draft', ?, ?, ?)`)
+    .bind(id, session.workspaceId, name, priority, graphNeedsConfig(graph) ? 1 : 0, JSON.stringify(graph)).run();
+  const row = await env.DB.prepare(`SELECT * FROM automations2 WHERE id = ?`).bind(id).first<AutomationRow>();
+  return json(request, { source: "generated", why, nodeCount: Object.keys(graph.nodes).length, automation: rowToAutomation(row!) });
+}
+
 // ── Execution engine ──
 // The engine now lives in worker/automation-engine.ts (graph walk, node execution, session cursor).
 // Re-exported here so existing importers (worker/index.ts, worker/meta.ts, worker/widget.ts) keep
@@ -817,6 +894,7 @@ export async function handleAutomationsRequest(request: Request, env: Automation
   if (url.pathname === "/api/automations/activity" && request.method === "GET") return listActivity(request, env);
   if (url.pathname === "/api/automations/ai-actions" && request.method === "GET") return listAiActions(request, env);
   if (url.pathname === "/api/automations/translate-block" && request.method === "POST") return translateBlock(request, env);
+  if (url.pathname === "/api/automations/generate" && request.method === "POST") return generateAutomation(request, env);
   if (url.pathname.endsWith("/translate") && request.method === "POST") {
     return translateAutomation(request, env, url.pathname.slice("/api/automations/".length, -"/translate".length));
   }
