@@ -8,7 +8,7 @@ type Message = { from: "customer" | "ai" | "agent"; text: string; time: string }
 type Conversation = { id: string; initials: string; name: string; preview: string; time: string; unread: number; tone: string; status: "open" | "resolved"; email: string; phone: string; tags: string[]; notes?: string[] };
 type Automation = { id: number; title: string; trigger: string; action: string; runs: number; rate: string; active: boolean };
 type Source = { id: number; name: string; type: "Website" | "Document" | "FAQ"; pages: number; status: "Ready" | "Syncing" | "Failed" };
-type WidgetAppearance = { iconType: "brand" | "chat" | "help" | "spark" | "custom"; customIconUrl: string; placement: "left" | "right"; effect: "none" | "pulse" | "bounce"; color: string; headerColor: string };
+type WidgetAppearance = { iconType: "brand" | "chat" | "help" | "spark" | "custom"; customIconUrl: string; placement: "left" | "right"; effect: "none" | "pulse" | "bounce"; color: string; headerColor: string; glossy: boolean };
 type WeekdayKey="sun"|"mon"|"tue"|"wed"|"thu"|"fri"|"sat";
 type WorkingHours={enabled:boolean;timezone:string;days:Record<WeekdayKey,{open:boolean;start:string;end:string}>};
 const WEEKDAYS:[WeekdayKey,string][]=[["sun","Sunday"],["mon","Monday"],["tue","Tuesday"],["wed","Wednesday"],["thu","Thursday"],["fri","Friday"],["sat","Saturday"]];
@@ -646,7 +646,7 @@ function Channels({step,setStep,connected,setConnected,workspaceId,workspaceName
   const [metaError,setMetaError]=useState("");
   const token=useAuthToken();
   const copyWidget=async()=>{const code=`<script src="https://mobileecommerce.github.io/qpy-engage/widget.js" data-workspace="${workspaceId}"></script>`;try{await navigator.clipboard.writeText(code);notify("Web chat installation code copied")}catch{const blob=new Blob([code],{type:"text/plain"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="qpy-engage-widget.txt";a.click();URL.revokeObjectURL(a.href);notify("Web chat installation file downloaded")}};
-  const [widgetAppearance,setWidgetAppearance]=useStoredState<WidgetAppearance>("qpy-engage-widget-appearance",{iconType:"brand",customIconUrl:"",placement:"right",effect:"none",color:"#4c50ee",headerColor:"#171923"});
+  const [widgetAppearance,setWidgetAppearance]=useStoredState<WidgetAppearance>("qpy-engage-widget-appearance",{iconType:"brand",customIconUrl:"",placement:"right",effect:"none",color:"#4c50ee",headerColor:"#171923",glossy:false});
   const [workingHours,setWorkingHours]=useStoredState<WorkingHours>("qpy-engage-working-hours",DEFAULT_WORKING_HOURS);
   const setDay=(day:WeekdayKey,patch:Partial<{open:boolean;start:string;end:string}>)=>setWorkingHours({...workingHours,days:{...workingHours.days,[day]:{...workingHours.days[day],...patch}}});
   const uploadWidgetIcon=(file?:File)=>{
@@ -700,7 +700,7 @@ function Channels({step,setStep,connected,setConnected,workspaceId,workspaceName
   const activeStep=channel==="instagram"?instagramStep:step;
   const setActiveStep=channel==="instagram"?setInstagramStep:setStep;
   const liveLabel=channel==="instagram"&&instagramConnected?"● Instagram live":channel==="whatsapp"&&metaConnection?"● WhatsApp live":undefined;
-  return <><PageHeader title="Channels" description="Connect and manage your customer messaging channels." action={liveLabel?<span className="status-pill ready">{liveLabel}</span>:undefined}/><div className="channel-layout"><aside className="channel-list"><h3>Messaging channels</h3><button className={channel==="whatsapp"?"selected":""} onClick={()=>setChannel("whatsapp")}><span className="wa-logo">◉</span><div><strong>WhatsApp</strong><small>{metaConnection?`${metaConnection.displayPhoneNumber||"Cloud API"} connected`:"Official Cloud API channel"}</small></div></button><button className={channel==="instagram"?"selected":""} onClick={()=>setChannel("instagram")}><span className="instagram-logo">◎</span><div><strong>Instagram</strong><small>{instagramConnected?"Connected sandbox":"Instagram Messaging API"}</small></div></button><button className={channel==="webchat"?"selected":""} onClick={()=>setChannel("webchat")}><span className="web-logo">◌</span><div><strong>Web chat</strong><small>Website messaging widget</small></div></button></aside>{channel==="webchat"?<section className="channel-empty widget-customizer"><span className="web-logo">◌</span><h2>Web chat widget</h2><p>Add Qpy Engage to your website so visitors can talk with your AI assistant before opening WhatsApp or Instagram. Customize how the launcher looks below — changes apply instantly to your live installed widget.</p><div className="widget-preview-frame"><div className={`widget-preview-launcher effect-${widgetAppearance.effect}`} style={{background:widgetAppearance.color}}>{widgetAppearance.iconType==="custom"&&widgetAppearance.customIconUrl?<img src={widgetAppearance.customIconUrl} alt="Custom widget icon"/>:widgetIconGlyph(widgetAppearance.iconType)}</div><small>Live preview • {widgetAppearance.placement==="left"?"bottom-left":"bottom-right"}</small></div><div className="widget-icon-grid">{iconOptions.map(opt=><button key={opt.key} className={widgetAppearance.iconType===opt.key?"selected":""} onClick={()=>setWidgetAppearance({...widgetAppearance,iconType:opt.key})}><span style={{background:widgetAppearance.color}}>{widgetIconGlyph(opt.key)}</span><small>{opt.label}</small></button>)}<label className={`widget-icon-upload ${widgetAppearance.iconType==="custom"?"selected":""}`}>{widgetAppearance.customIconUrl?<img src={widgetAppearance.customIconUrl} alt="Your uploaded icon"/>:<span>＋</span>}<small>Custom</small><input type="file" accept="image/jpeg,image/png,image/webp,image/svg+xml" onChange={e=>uploadWidgetIcon(e.target.files?.[0])}/></label></div><div className="form-grid"><div className="connection-mode widget-placement"><small>Placement</small><div><button className={widgetAppearance.placement==="right"?"active":""} onClick={()=>setWidgetAppearance({...widgetAppearance,placement:"right"})}>Bottom right</button><button className={widgetAppearance.placement==="left"?"active":""} onClick={()=>setWidgetAppearance({...widgetAppearance,placement:"left"})}>Bottom left</button></div></div><label>Launcher effect<select value={widgetAppearance.effect} onChange={e=>setWidgetAppearance({...widgetAppearance,effect:e.target.value as WidgetAppearance["effect"]})}><option value="none">None</option><option value="pulse">Pulse</option><option value="bounce">Bounce</option></select></label><label>Accent color<input type="color" value={widgetAppearance.color} onChange={e=>setWidgetAppearance({...widgetAppearance,color:e.target.value})}/><small>Buttons, launcher and the visitor&apos;s own messages.</small></label><label>Chat header color<input type="color" value={widgetAppearance.headerColor||"#171923"} onChange={e=>setWidgetAppearance({...widgetAppearance,headerColor:e.target.value})}/><small>The bar across the top of the open chat window.</small></label></div><div className="widget-header-preview" style={{background:widgetAppearance.headerColor||"#171923"}}><strong>{workspaceName} Assistant</strong><small>AI assistant</small><span style={{background:widgetAppearance.color}}/></div><div className="working-hours"><div className="working-hours-head"><div><strong>Business hours</strong><small>When enabled, the AI knows when your team is offline and can say so instead of promising an instant human reply.</small></div><label className="switch"><input type="checkbox" checked={workingHours.enabled} onChange={e=>setWorkingHours({...workingHours,enabled:e.target.checked})}/><i/></label></div>{workingHours.enabled&&<><label className="full-label">Timezone<select value={workingHours.timezone} onChange={e=>setWorkingHours({...workingHours,timezone:e.target.value})}>{TIMEZONE_OPTIONS.map(tz=><option key={tz} value={tz}>{tz}</option>)}</select></label><div className="working-hours-days">{WEEKDAYS.map(([key,label])=><div key={key} className="working-hours-row"><label className="working-hours-toggle"><input type="checkbox" checked={workingHours.days[key].open} onChange={e=>setDay(key,{open:e.target.checked})}/>{label}</label><input type="time" value={workingHours.days[key].start} disabled={!workingHours.days[key].open} onChange={e=>setDay(key,{start:e.target.value})}/><span>to</span><input type="time" value={workingHours.days[key].end} disabled={!workingHours.days[key].open} onChange={e=>setDay(key,{end:e.target.value})}/></div>)}</div></>}</div><button className="primary" onClick={copyWidget}>Copy installation code</button></section>:<section className="channel-workspace"><div className={`channel-context ${channel}`}><div className={channel==="whatsapp"?"wa-logo":"instagram-logo"}>{channel==="whatsapp"?"◉":"◎"}</div><div><span>{channel==="whatsapp"?"META BUSINESS MESSAGING":"META BUSINESS SUITE"}</span><strong>{channel==="whatsapp"?"WhatsApp Cloud API":"Instagram Messaging API"}</strong><small>{metaConnection&&channel==="whatsapp"?`${metaConnection.displayPhoneNumber||metaConnection.phoneNumberId} • Connected through Meta`:instagramConnected&&channel==="instagram"?`${instagramForm.handle} • Connected`:"Secure connection through Meta"}</small></div>{channel==="whatsapp"&&<div className="connection-mode"><small>Setup method</small><div><button className={connectionMode==="automatic"?"active":""} onClick={()=>setConnectionMode("automatic")}>Embedded signup</button><button className={connectionMode==="manual"?"active":""} onClick={()=>setConnectionMode("manual")}>Advanced</button></div></div>}<span className={`connection-health ${(metaConnection&&channel==="whatsapp")||(instagramConnected&&channel==="instagram")?"live":""}`}><i/>{(metaConnection&&channel==="whatsapp")||(instagramConnected&&channel==="instagram")?"Live":"Setup in progress"}</span></div><div className="wizard-rail">{labels.map((label,i)=><button key={label} onClick={()=>i<=activeStep&&setActiveStep(i)} className={i<activeStep?"done":i===activeStep?"active":""}><span>{i<activeStep?"✓":i+1}</span><div><strong>{label}</strong><small>{i<activeStep?"Completed":i===activeStep?"Current step":"Not started"}</small></div></button>)}</div><div className="wizard-panel">
+  return <><PageHeader title="Channels" description="Connect and manage your customer messaging channels." action={liveLabel?<span className="status-pill ready">{liveLabel}</span>:undefined}/><div className="channel-layout"><aside className="channel-list"><h3>Messaging channels</h3><button className={channel==="whatsapp"?"selected":""} onClick={()=>setChannel("whatsapp")}><span className="wa-logo">◉</span><div><strong>WhatsApp</strong><small>{metaConnection?`${metaConnection.displayPhoneNumber||"Cloud API"} connected`:"Official Cloud API channel"}</small></div></button><button className={channel==="instagram"?"selected":""} onClick={()=>setChannel("instagram")}><span className="instagram-logo">◎</span><div><strong>Instagram</strong><small>{instagramConnected?"Connected sandbox":"Instagram Messaging API"}</small></div></button><button className={channel==="webchat"?"selected":""} onClick={()=>setChannel("webchat")}><span className="web-logo">◌</span><div><strong>Web chat</strong><small>Website messaging widget</small></div></button></aside>{channel==="webchat"?<section className="channel-empty widget-customizer"><span className="web-logo">◌</span><h2>Web chat widget</h2><p>Add Qpy Engage to your website so visitors can talk with your AI assistant before opening WhatsApp or Instagram. Customize how the launcher looks below — changes apply instantly to your live installed widget.</p><div className="widget-preview-frame"><div className={`widget-preview-launcher effect-${widgetAppearance.effect}${widgetAppearance.glossy?" glossy":""}`} style={{background:widgetAppearance.color}}>{widgetAppearance.iconType==="custom"&&widgetAppearance.customIconUrl?<img src={widgetAppearance.customIconUrl} alt="Custom widget icon"/>:widgetIconGlyph(widgetAppearance.iconType)}</div><small>Live preview • {widgetAppearance.placement==="left"?"bottom-left":"bottom-right"}</small></div><div className="widget-icon-grid">{iconOptions.map(opt=><button key={opt.key} className={widgetAppearance.iconType===opt.key?"selected":""} onClick={()=>setWidgetAppearance({...widgetAppearance,iconType:opt.key})}><span style={{background:widgetAppearance.color}}>{widgetIconGlyph(opt.key)}</span><small>{opt.label}</small></button>)}<label className={`widget-icon-upload ${widgetAppearance.iconType==="custom"?"selected":""}`}>{widgetAppearance.customIconUrl?<img src={widgetAppearance.customIconUrl} alt="Your uploaded icon"/>:<span>＋</span>}<small>Custom</small><input type="file" accept="image/jpeg,image/png,image/webp,image/svg+xml" onChange={e=>uploadWidgetIcon(e.target.files?.[0])}/></label></div><div className="form-grid"><div className="connection-mode widget-placement"><small>Placement</small><div><button className={widgetAppearance.placement==="right"?"active":""} onClick={()=>setWidgetAppearance({...widgetAppearance,placement:"right"})}>Bottom right</button><button className={widgetAppearance.placement==="left"?"active":""} onClick={()=>setWidgetAppearance({...widgetAppearance,placement:"left"})}>Bottom left</button></div></div><div className="connection-mode widget-placement"><small>Surface style</small><div><button className={!widgetAppearance.glossy?"active":""} onClick={()=>setWidgetAppearance({...widgetAppearance,glossy:false})}>Flat</button><button className={widgetAppearance.glossy?"active":""} onClick={()=>setWidgetAppearance({...widgetAppearance,glossy:true})}>Glossy</button></div></div><label>Launcher effect<select value={widgetAppearance.effect} onChange={e=>setWidgetAppearance({...widgetAppearance,effect:e.target.value as WidgetAppearance["effect"]})}><option value="none">None</option><option value="pulse">Pulse</option><option value="bounce">Bounce</option></select></label><label>Accent color<input type="color" value={widgetAppearance.color} onChange={e=>setWidgetAppearance({...widgetAppearance,color:e.target.value})}/><small>Buttons, launcher and the visitor&apos;s own messages.</small></label><label>Chat header color<input type="color" value={widgetAppearance.headerColor||"#171923"} onChange={e=>setWidgetAppearance({...widgetAppearance,headerColor:e.target.value})}/><small>The bar across the top of the open chat window.</small></label></div><div className={`widget-header-preview${widgetAppearance.glossy?" glossy":""}`} style={{background:widgetAppearance.headerColor||"#171923"}}><strong>{workspaceName} Assistant</strong><small>AI assistant</small><span style={{background:widgetAppearance.color}}/></div><div className="working-hours"><div className="working-hours-head"><div><strong>Business hours</strong><small>When enabled, the AI knows when your team is offline and can say so instead of promising an instant human reply.</small></div><label className="switch"><input type="checkbox" checked={workingHours.enabled} onChange={e=>setWorkingHours({...workingHours,enabled:e.target.checked})}/><i/></label></div>{workingHours.enabled&&<><label className="full-label">Timezone<select value={workingHours.timezone} onChange={e=>setWorkingHours({...workingHours,timezone:e.target.value})}>{TIMEZONE_OPTIONS.map(tz=><option key={tz} value={tz}>{tz}</option>)}</select></label><div className="working-hours-days">{WEEKDAYS.map(([key,label])=><div key={key} className="working-hours-row"><label className="working-hours-toggle"><input type="checkbox" checked={workingHours.days[key].open} onChange={e=>setDay(key,{open:e.target.checked})}/>{label}</label><input type="time" value={workingHours.days[key].start} disabled={!workingHours.days[key].open} onChange={e=>setDay(key,{start:e.target.value})}/><span>to</span><input type="time" value={workingHours.days[key].end} disabled={!workingHours.days[key].open} onChange={e=>setDay(key,{end:e.target.value})}/></div>)}</div></>}</div><button className="primary" onClick={copyWidget}>Copy installation code</button></section>:<section className="channel-workspace"><div className={`channel-context ${channel}`}><div className={channel==="whatsapp"?"wa-logo":"instagram-logo"}>{channel==="whatsapp"?"◉":"◎"}</div><div><span>{channel==="whatsapp"?"META BUSINESS MESSAGING":"META BUSINESS SUITE"}</span><strong>{channel==="whatsapp"?"WhatsApp Cloud API":"Instagram Messaging API"}</strong><small>{metaConnection&&channel==="whatsapp"?`${metaConnection.displayPhoneNumber||metaConnection.phoneNumberId} • Connected through Meta`:instagramConnected&&channel==="instagram"?`${instagramForm.handle} • Connected`:"Secure connection through Meta"}</small></div>{channel==="whatsapp"&&<div className="connection-mode"><small>Setup method</small><div><button className={connectionMode==="automatic"?"active":""} onClick={()=>setConnectionMode("automatic")}>Embedded signup</button><button className={connectionMode==="manual"?"active":""} onClick={()=>setConnectionMode("manual")}>Advanced</button></div></div>}<span className={`connection-health ${(metaConnection&&channel==="whatsapp")||(instagramConnected&&channel==="instagram")?"live":""}`}><i/>{(metaConnection&&channel==="whatsapp")||(instagramConnected&&channel==="instagram")?"Live":"Setup in progress"}</span></div><div className="wizard-rail">{labels.map((label,i)=><button key={label} onClick={()=>i<=activeStep&&setActiveStep(i)} className={i<activeStep?"done":i===activeStep?"active":""}><span>{i<activeStep?"✓":i+1}</span><div><strong>{label}</strong><small>{i<activeStep?"Completed":i===activeStep?"Current step":"Not started"}</small></div></button>)}</div><div className="wizard-panel">
     {channel==="instagram"&&<>
       {instagramStep===0&&<><WizardTitle n="01" title="Instagram Messaging requirements" text="Prepare your professional account before connecting through Meta."/><div className="requirements instagram-requirements">{["An Instagram professional Business or Creator account","A Facebook Page linked to the Instagram account","Admin access to the connected Meta Business portfolio"].map((x,i)=><label key={x}><input type="checkbox" checked={instagramChecked[i]} onChange={()=>setInstagramChecked(instagramChecked.map((v,j)=>j===i?!v:v))}/><span>{x}</span><b>Required</b></label>)}</div><div className="wizard-actions"><span>Demo mode — authorization is simulated.</span><button className="primary" disabled={!instagramChecked.every(Boolean)} onClick={nextInstagram}>Proceed to connect →</button></div></>}
       {instagramStep===1&&<><WizardTitle n="02" title="Connect Instagram with Facebook" text="Authorize Qpy Engage to manage Instagram conversations for your business."/><div className="facebook-connect instagram-connect"><span className="instagram-logo large">◎</span><h3>Continue with Facebook</h3><p>Select the Facebook Page and linked Instagram professional account you want to use.</p><ul><li>View your Instagram professional profile</li><li>Read and respond to customer messages</li><li>Manage conversation metadata</li></ul><button className="facebook-btn" onClick={()=>{notify("Instagram authorization completed");nextInstagram()}}>Continue with Facebook</button><small>Qpy Engage never receives your Facebook password.</small></div></>}
@@ -777,6 +777,34 @@ function conversationTime(when:string|number):string{
   return d.toLocaleDateString([],sameYear?{day:"numeric",month:"short"}:{day:"numeric",month:"short",year:"2-digit"});
 }
 
+const CRM_FIELDS=[
+  {key:"name" as const,label:"Full name",icon:"◍",type:"text",placeholder:"Jane Doe"},
+  {key:"phone" as const,label:"Phone",icon:"✆",type:"tel",placeholder:"+971 50 000 0000"},
+  {key:"email" as const,label:"Email",icon:"✉",type:"email",placeholder:"jane@company.com"},
+  {key:"company" as const,label:"Company",icon:"▤",type:"text",placeholder:"Company name"},
+];
+
+// Bands match how a salesperson actually triages a list: act now, worth a follow-up, or leave it.
+function scoreBand(score:number):{label:string;cls:string}{
+  if(score>=70)return{label:"HOT LEAD",cls:"hot"};
+  if(score>=40)return{label:"WARM",cls:"warm"};
+  return{label:"COLD",cls:"cold"};
+}
+
+// Labels are free text, so their colour is derived from the text itself. Same label always gets the
+// same colour, which is what makes a list of them scannable.
+function labelTone(label:string):number{
+  let hash=0;
+  for(let i=0;i<label.length;i++)hash=(hash*31+label.charCodeAt(i))>>>0;
+  return hash%6;
+}
+
+function initialsOf(name?:string|null):string{
+  const parts=(name||"").trim().split(/\s+/).filter(Boolean);
+  if(!parts.length)return "◌";
+  return (parts[0][0]+(parts.length>1?parts[parts.length-1][0]:"")).toUpperCase();
+}
+
 type WidgetNote={authorName:string;note:string;createdAt:string};
 type UploadedDocument={id:string;docKey:string;docLabel:string;fileName:string;mimeType:string;sizeBytes:number;channel:string;createdAt:string};
 
@@ -794,6 +822,13 @@ function WebChatInbox({notify}:{notify:(s:string)=>void}){
   const [noteDraft,setNoteDraft]=useState("");
   const [savingNote,setSavingNote]=useState(false);
   const [lead,setLead]=useState<Submission|null>(null);
+  const [contact,setContact]=useState<CrmContact|null>(null);
+  const [labelDraft,setLabelDraft]=useState("");
+  const [scoring,setScoring]=useState(false);
+  const [editingContact,setEditingContact]=useState(false);
+  const [crmIntegrations,setCrmIntegrations]=useState<CrmIntegration[]>([]);
+  const [pushes,setPushes]=useState<CrmPush[]>([]);
+  const [pushing,setPushing]=useState("");
   const [documents,setDocuments]=useState<UploadedDocument[]>([]);
   const [handoffSummary,setHandoffSummary]=useState<{summary:string;focusOn:string;customerNotes:string}|null>(null);
   const lastTypingPingRef=useRef(0);
@@ -864,6 +899,66 @@ function WebChatInbox({notify}:{notify:(s:string)=>void}){
       .catch(()=>{});
   };
   useEffect(()=>loadLead(),[selectedSessionId,token]);
+  const loadContact=()=>{
+    if(!selectedSessionId||!token){setContact(null);return}
+    fetch(metaApi(`/api/crm/contact?sessionId=${encodeURIComponent(selectedSessionId)}`),{headers:authHeaders(token)})
+      .then(r=>r.json())
+      .then((data:{contact?:CrmContact})=>setContact(data.contact||null))
+      .catch(()=>{});
+  };
+  useEffect(()=>loadContact(),[selectedSessionId,token]);
+  const saveContact=async(patch:Partial<CrmContact>)=>{
+    if(!selectedSessionId||!token||!contact)return;
+    const previous=contact;
+    setContact({...contact,...patch});
+    try{
+      const response=await fetch(metaApi("/api/crm/contact"),{method:"PATCH",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({sessionId:selectedSessionId,...patch})});
+      const data=await response.json() as {contact?:CrmContact;error?:string};
+      if(!response.ok||!data.contact)throw new Error(data.error||"Could not save");
+      setContact(data.contact);
+    }catch{ setContact(previous); notify("Could not save that change"); }
+  };
+  const addLabel=()=>{
+    const label=labelDraft.trim();
+    if(!label||!contact)return;
+    if(contact.labels.some(l=>l.toLowerCase()===label.toLowerCase())){setLabelDraft("");return}
+    setLabelDraft("");
+    saveContact({labels:[...contact.labels,label]});
+  };
+  useEffect(()=>{
+    if(!token)return;
+    fetch(metaApi("/api/crm/integrations"),{headers:authHeaders(token)})
+      .then(r=>r.json()).then((d:{integrations?:CrmIntegration[]})=>setCrmIntegrations(d.integrations||[])).catch(()=>{});
+  },[token]);
+  const loadPushes=()=>{
+    if(!selectedSessionId||!token){setPushes([]);return}
+    fetch(metaApi(`/api/crm/pushes?sessionId=${encodeURIComponent(selectedSessionId)}`),{headers:authHeaders(token)})
+      .then(r=>r.json()).then((d:{pushes?:CrmPush[]})=>setPushes(d.pushes||[])).catch(()=>{});
+  };
+  useEffect(()=>loadPushes(),[selectedSessionId,token]);
+  const pushToCrm=async(provider:string)=>{
+    if(!selectedSessionId||!token||pushing)return;
+    setPushing(provider);
+    try{
+      const response=await fetch(metaApi("/api/crm/push"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({sessionId:selectedSessionId,provider})});
+      const data=await response.json() as {ok?:boolean;error?:string};
+      if(!response.ok||!data.ok)throw new Error(data.error||"Could not send this contact to the CRM");
+      notify(`Sent to ${provider==="hubspot"?"HubSpot":"Salesforce"}`);
+      loadPushes();
+    }catch(error){ notify(error instanceof Error?error.message:"Could not send this contact to the CRM") }
+    finally{ setPushing("") }
+  };
+  const scoreContact=async()=>{
+    if(!selectedSessionId||!token||scoring)return;
+    setScoring(true);
+    try{
+      const response=await fetch(metaApi("/api/crm/score"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({sessionId:selectedSessionId})});
+      const data=await response.json() as {contact?:CrmContact;error?:string};
+      if(!response.ok||!data.contact)throw new Error(data.error||"Could not score this conversation");
+      setContact(data.contact);
+    }catch(error){ notify(error instanceof Error?error.message:"Could not score this conversation") }
+    finally{ setScoring(false) }
+  };
   const updateLeadTag=async(field:"source"|"status"|"priority"|"segment",value:string)=>{
     if(!lead)return;
     const previous=lead;
@@ -920,7 +1015,7 @@ function WebChatInbox({notify}:{notify:(s:string)=>void}){
   };
   return <><PageHeader title="Web chat conversations" description="Real visitor conversations from your website chat widget. Take over any conversation to reply as a human instead of the AI." action={<button className="secondary-btn" onClick={()=>load()}>↻ Refresh</button>}/>
   {loading?<p className="empty-hint">Loading…</p>:!conversations.length?<div className="empty-state"><span>◌</span><h3>No web chat conversations yet</h3><p>When a visitor uses your website's chat widget, the conversation will appear here automatically.</p></div>:
-  <div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><strong>{conversations.length} conversation{conversations.length===1?"":"s"}</strong></div><div className="conversation-list">{conversations.map(c=><button key={c.sessionId} className={c.sessionId===selectedSessionId?"selected":""} onClick={()=>setSelectedSessionId(c.sessionId)}><span className="contact-avatar blue">◌<i/></span><div><strong>{c.customerName||"Website visitor"}{c.leadStatus==="New"&&<span className="new-badge">New</span>}{c.needsAttention&&<span className="attention-badge">Needs you</span>}</strong><small>{c.lastMessage.slice(0,60)}</small></div><span className="conv-meta"><small>{conversationTime(c.lastAt)}</small>{!c.aiActive&&<b>You</b>}</span></button>)}</div></aside><section className="chat-panel">{selected?<><div className="chat-head"><div className="chat-person"><span className="contact-avatar blue">◌<i/></span><div><strong>{selected.customerName||"Website visitor"}</strong><small>{selected.needsAttention?`Needs you — ${selected.attentionReason||"asked for a human"}`:`${selected.messageCount} messages`}</small></div></div><div className="ai-state"><span className={aiActive?"pulse":"pulse off"}>✦</span><div><strong>{aiActive?"AI is handling":"You're handling"}</strong><small>{aiActive?"Take over to reply yourself":"AI is paused for this visitor"}</small></div><button onClick={toggleTakeover}>{aiActive?"Take over":"Hand to AI"}</button></div></div><div className="chat-body tall"><div className="today">{new Date(selected.firstAt).toLocaleDateString()}</div>{loadingMessages?<p className="empty-hint">Loading…</p>:messages.map((m,i)=>m.role==="system"?<div key={i} className="today">{m.content}</div>:<div key={i} className={`message ${m.role==="user"?"customer":"ai"}`}><p>{m.content}</p><small>{m.role==="user"?"Visitor":m.role==="agent"?"You":"✦ Assistant"} • {new Date(m.createdAt).toLocaleTimeString()}</small></div>)}</div>{!aiActive&&<div className="composer"><div className="input-row"><input value={reply} onChange={e=>{setReply(e.target.value);pingTyping()}} onKeyDown={e=>e.key==="Enter"&&sendReply()} placeholder="Reply as yourself…" disabled={sendingReply}/><button className="send" disabled={sendingReply||!reply.trim()} onClick={sendReply}>➤</button></div></div>}</>:<div className="live-chat-placeholder">Select a conversation</div>}</section>{selected&&<aside className="notes-panel">{!aiActive&&handoffSummary&&<div className="handoff-summary"><h3>Handoff summary</h3><p><strong>What's happened:</strong> {handoffSummary.summary||"—"}</p><p><strong>Focus on:</strong> {handoffSummary.focusOn||"—"}</p>{handoffSummary.customerNotes&&<p><strong>Keep in mind:</strong> {handoffSummary.customerNotes}</p>}</div>}<h3>Lead details</h3>{!lead?<p className="empty-hint">No lead captured yet for this conversation.</p>:<>{Object.keys(lead.data).length>0&&<div className="lead-panel-data">{Object.entries(lead.data).map(([k,v])=><div key={k}><small>{k}:</small> {String(v)}</div>)}</div>}<div className="lead-panel-tags"><label>Source<select value={lead.source} onChange={e=>updateLeadTag("source",e.target.value)}><option value="">—</option>{LEAD_SOURCES.map(o=><option key={o}>{o}</option>)}</select></label><label>Status<select className={`status-select status-${lead.status.toLowerCase().replace(/[^a-z]/g,"-")}`} value={lead.status} onChange={e=>updateLeadTag("status",e.target.value)}>{LEAD_STATUSES.map(o=><option key={o}>{o}</option>)}</select></label><label>Priority<select className={`priority-select priority-${lead.priority.toLowerCase()}`} value={lead.priority} onChange={e=>updateLeadTag("priority",e.target.value)}><option value="">—</option>{LEAD_PRIORITIES.map(o=><option key={o}>{o}</option>)}</select></label><label>Segment<select value={lead.segment} onChange={e=>updateLeadTag("segment",e.target.value)}><option value="">—</option>{LEAD_SEGMENTS.map(o=><option key={o}>{o}</option>)}</select></label></div></>}<h3 className="notes-heading">Documents</h3>{!documents.length?<p className="empty-hint">No documents uploaded in this conversation.</p>:<div className="doc-list">{documents.map(d=><div key={d.id} className="doc-item"><div><strong>{d.docLabel||d.fileName}</strong><small>{d.fileName} • {(d.sizeBytes/1024).toFixed(0)} KB • {d.channel==="whatsapp"?"WhatsApp":"Web chat"}</small></div><button className="secondary-btn" onClick={()=>downloadDocument(d)}>Download</button></div>)}</div>}<h3 className="notes-heading">Internal notes</h3><small>Only your team can see these — the visitor never does.</small><div className="notes-list">{!notes.length?<p className="empty-hint">No notes yet</p>:notes.map((n,i)=><div key={i} className="note"><p>{n.note}</p><small>{n.authorName} • {new Date(n.createdAt).toLocaleString()}</small></div>)}</div><div className="note-composer"><textarea value={noteDraft} onChange={e=>setNoteDraft(e.target.value)} placeholder="Add a note for your team…" disabled={savingNote}/><button className="secondary-btn" disabled={savingNote||!noteDraft.trim()} onClick={addNote}>{savingNote?"Saving…":"Add note"}</button></div></aside>}</div>}
+  <div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><strong>{conversations.length} conversation{conversations.length===1?"":"s"}</strong></div><div className="conversation-list">{conversations.map(c=><button key={c.sessionId} className={c.sessionId===selectedSessionId?"selected":""} onClick={()=>setSelectedSessionId(c.sessionId)}><span className="contact-avatar blue">◌<i/></span><div><strong>{c.customerName||"Website visitor"}{c.leadStatus==="New"&&<span className="new-badge">New</span>}{c.needsAttention&&<span className="attention-badge">Needs you</span>}</strong><small>{c.lastMessage.slice(0,60)}</small></div><span className="conv-meta"><small>{conversationTime(c.lastAt)}</small>{!c.aiActive&&<b>You</b>}</span></button>)}</div></aside><section className="chat-panel">{selected?<><div className="chat-head"><div className="chat-person"><span className="contact-avatar blue">◌<i/></span><div><strong>{selected.customerName||"Website visitor"}</strong><small>{selected.needsAttention?`Needs you — ${selected.attentionReason||"asked for a human"}`:`${selected.messageCount} messages`}</small></div></div><div className="ai-state"><span className={aiActive?"pulse":"pulse off"}>✦</span><div><strong>{aiActive?"AI is handling":"You're handling"}</strong><small>{aiActive?"Take over to reply yourself":"AI is paused for this visitor"}</small></div><button onClick={toggleTakeover}>{aiActive?"Take over":"Hand to AI"}</button></div></div><div className="chat-body tall"><div className="today">{new Date(selected.firstAt).toLocaleDateString()}</div>{loadingMessages?<p className="empty-hint">Loading…</p>:messages.map((m,i)=>m.role==="system"?<div key={i} className="today">{m.content}</div>:<div key={i} className={`message ${m.role==="user"?"customer":"ai"}`}><p>{m.content}</p><small>{m.role==="user"?"Visitor":m.role==="agent"?"You":"✦ Assistant"} • {new Date(m.createdAt).toLocaleTimeString()}</small></div>)}</div>{!aiActive&&<div className="composer"><div className="input-row"><input value={reply} onChange={e=>{setReply(e.target.value);pingTyping()}} onKeyDown={e=>e.key==="Enter"&&sendReply()} placeholder="Reply as yourself…" disabled={sendingReply}/><button className="send" disabled={sendingReply||!reply.trim()} onClick={sendReply}>➤</button></div></div>}</>:<div className="live-chat-placeholder">Select a conversation</div>}</section>{selected&&<aside className="notes-panel crm-panel"><div className="crm-identity"><span className="crm-avatar">{initialsOf(contact?.name||selected.customerName)}</span><div><strong>{contact?.name||selected.customerName||"Website visitor"}</strong><small>{contact?.company||`${selected.messageCount} message${selected.messageCount===1?"":"s"}`}</small></div><button className="crm-edit" onClick={()=>setEditingContact(!editingContact)} title={editingContact?"Done editing":"Edit contact fields"}>{editingContact?"Done":"Edit"}</button></div>{!aiActive&&handoffSummary&&<div className="handoff-summary"><h3>Handoff summary</h3><p><strong>What’s happened:</strong> {handoffSummary.summary||"—"}</p><p><strong>Focus on:</strong> {handoffSummary.focusOn||"—"}</p>{handoffSummary.customerNotes&&<p><strong>Keep in mind:</strong> {handoffSummary.customerNotes}</p>}</div>}<h3>Contact fields</h3>{editingContact?<div className="crm-fields editing">{CRM_FIELDS.map(f=><label key={f.key}><small>{f.label}</small><input value={contact?.[f.key]||""} type={f.type} placeholder={f.placeholder} onChange={e=>setContact(contact?{...contact,[f.key]:e.target.value}:contact)} onBlur={e=>saveContact({[f.key]:e.target.value})}/></label>)}</div>:<div className="crm-fields">{CRM_FIELDS.filter(f=>contact?.[f.key]).map(f=><div key={f.key} className="crm-field"><span className="crm-field-icon">{f.icon}</span><span>{contact?.[f.key]}</span></div>)}{!CRM_FIELDS.some(f=>contact?.[f.key])&&<p className="empty-hint">No contact details captured yet. Use Edit to add them.</p>}</div>}<h3 className="notes-heading">Lead score</h3>{contact?.score===null||contact?.score===undefined?<div className="crm-score-empty"><p className="empty-hint">Not scored yet.</p><button className="secondary-btn" disabled={scoring} onClick={scoreContact}>{scoring?"Reading the chat…":"Score this lead"}</button></div>:<div className="crm-score"><div className="crm-score-head"><b>{contact.score}</b><span className={`crm-score-pill ${scoreBand(contact.score).cls}`}>{scoreBand(contact.score).label}</span><button className="crm-rescore" disabled={scoring} onClick={scoreContact} title="Score again from the latest messages">{scoring?"…":"↻"}</button></div>{contact.scoreReasons.length>0&&<ul className="crm-reasons">{contact.scoreReasons.map((r,i)=><li key={i}>{r}</li>)}</ul>}{contact.scoredAt&&<small className="crm-scored-at">Scored {conversationTime(contact.scoredAt)}</small>}</div>}<h3 className="notes-heading">Labels</h3><div className="crm-labels">{(contact?.labels||[]).map(label=><span key={label} className={`crm-chip tone-${labelTone(label)}`}>{label}<button onClick={()=>saveContact({labels:(contact?.labels||[]).filter(l=>l!==label)})} aria-label={`Remove ${label}`}>×</button></span>)}{!(contact?.labels||[]).length&&<p className="empty-hint">No labels yet</p>}</div><div className="crm-label-add"><input value={labelDraft} onChange={e=>setLabelDraft(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addLabel()} placeholder="Add a label…" maxLength={28}/><button className="secondary-btn" disabled={!labelDraft.trim()} onClick={addLabel}>Add</button></div><h3 className="notes-heading">Integrations</h3>{!crmIntegrations.some(i=>i.connected)?<p className="empty-hint">No CRM connected. Connect HubSpot or Salesforce in Settings → Integrations.</p>:<div className="crm-push">{crmIntegrations.filter(i=>i.connected).map(i=>{const sent=pushes.find(p=>p.provider===i.provider);return <div key={i.provider} className="crm-push-row"><span className={`integration-logo small ${i.provider}`}>{i.provider==="hubspot"?"◈":"☁"}</span><div><strong>{i.provider==="hubspot"?"HubSpot":"Salesforce"}</strong>{sent?<a href={sent.remoteUrl} target="_blank" rel="noreferrer">View record →</a>:<small>Not sent yet</small>}</div><button className="secondary-btn" disabled={pushing===i.provider} onClick={()=>pushToCrm(i.provider)}>{pushing===i.provider?"Sending…":sent?"Send again":"Send"}</button></div>;})}</div>}<h3 className="notes-heading">Lead record</h3>{!lead?<p className="empty-hint">No lead captured yet for this conversation.</p>:<>{Object.keys(lead.data).length>0&&<div className="lead-panel-data">{Object.entries(lead.data).map(([k,v])=><div key={k}><small>{k}:</small> {String(v)}</div>)}</div>}<div className="lead-panel-tags"><label>Source<select value={lead.source} onChange={e=>updateLeadTag("source",e.target.value)}><option value="">—</option>{LEAD_SOURCES.map(o=><option key={o}>{o}</option>)}</select></label><label>Status<select className={`status-select status-${lead.status.toLowerCase().replace(/[^a-z]/g,"-")}`} value={lead.status} onChange={e=>updateLeadTag("status",e.target.value)}>{LEAD_STATUSES.map(o=><option key={o}>{o}</option>)}</select></label><label>Priority<select className={`priority-select priority-${lead.priority.toLowerCase()}`} value={lead.priority} onChange={e=>updateLeadTag("priority",e.target.value)}><option value="">—</option>{LEAD_PRIORITIES.map(o=><option key={o}>{o}</option>)}</select></label><label>Segment<select value={lead.segment} onChange={e=>updateLeadTag("segment",e.target.value)}><option value="">—</option>{LEAD_SEGMENTS.map(o=><option key={o}>{o}</option>)}</select></label></div></>}<h3 className="notes-heading">Documents</h3>{!documents.length?<p className="empty-hint">No documents uploaded in this conversation.</p>:<div className="doc-list">{documents.map(d=><div key={d.id} className="doc-item"><div><strong>{d.docLabel||d.fileName}</strong><small>{d.fileName} • {(d.sizeBytes/1024).toFixed(0)} KB • {d.channel==="whatsapp"?"WhatsApp":"Web chat"}</small></div><button className="secondary-btn" onClick={()=>downloadDocument(d)}>Download</button></div>)}</div>}<h3 className="notes-heading">Internal notes</h3><small>Only your team can see these — the visitor never does.</small><div className="notes-list">{!notes.length?<p className="empty-hint">No notes yet</p>:notes.map((n,i)=><div key={i} className="note"><p>{n.note}</p><small>{n.authorName} • {new Date(n.createdAt).toLocaleString()}</small></div>)}</div><div className="note-composer"><textarea value={noteDraft} onChange={e=>setNoteDraft(e.target.value)} placeholder="Add a note for your team…" disabled={savingNote}/><button className="secondary-btn" disabled={savingNote||!noteDraft.trim()} onClick={addNote}>{savingNote?"Saving…":"Add note"}</button></div></aside>}</div>}
   </>;
 }
 
@@ -1571,26 +1666,25 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
 
   const [genPrompt,setGenPrompt]=useState("");
   const [generating,setGenerating]=useState(false);
-  const [genNote,setGenNote]=useState<{source:string;why:string;name:string;blocks:number}|null>(null);
+  // Only whether to show the draft reminder. Which route the build took — template or written from
+  // scratch — is our plumbing, not something the owner asked about or can act on.
+  const [showDraftHint,setShowDraftHint]=useState(false);
   const generateFromPrompt=async()=>{
     if(!token||genPrompt.trim().length<6){notify("Describe what the automation should do");return}
-    setGenerating(true); setGenNote(null);
+    setGenerating(true); setShowDraftHint(false);
     try{
       const response=await fetch(metaApi("/api/automations/generate"),{
         method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},
         body:JSON.stringify({prompt:genPrompt.trim(),channels:["webchat"]}),
       });
-      const data=await response.json() as {automation?:AutomationDef;source?:string;why?:string;error?:string};
+      const data=await response.json() as {automation?:AutomationDef;error?:string};
       if(!response.ok||!data.automation){notify(data.error||"Could not build that automation");return}
       setList([...list,data.automation]);
       setSelected(data.automation);
       setView("canvas");
       setGenPrompt("");
       revealGraph(data.automation.flow);
-      // Say which route it took. Reusing a starter template and writing a new flow are very
-      // different outcomes, and the owner should not have to guess which one they got.
-      setGenNote({source:data.source||"generated",why:data.why||"",name:data.automation.name,
-        blocks:Object.keys(data.automation.flow.nodes).length});
+      setShowDraftHint(true);
     }catch{notify("Could not build that automation")}
     finally{setGenerating(false)}
   };
@@ -1826,26 +1920,11 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
         <button className="secondary-btn" onClick={()=>{setTestOpen(true);setTestResult(null)}}>▷ Test</button>
         <button className={`toggle ${selected.status==="active"?"on":""}`} onClick={()=>toggleStatus(selected)} title={selected.status==="active"?"Active — click to deactivate":"Inactive — click to activate"}><i/></button>
       </div></div>
-      {genNote&&(()=>{
-        const headline=genNote.source==="template"
-          ? `Started from a matching template — ${genNote.blocks} blocks`
-          : `Built from your description — ${genNote.blocks} blocks`;
-        // The reason earns its line only if it explains something. Trying to detect duplication by
-        // comparing strings missed the real problem: a reply like "Written for you." isn't a
-        // duplicate of anything, it just says nothing. Length is the honest signal here — a genuine
-        // explanation names what the flow does or why no template fitted, and runs well past this.
-        const reason=(genNote.why||"").trim();
-        const worthShowing=reason.length>=30;
-        return <div className={`gen-note ${genNote.source}`}>
-          <span>{genNote.source==="template"?"▤":"✨"}</span>
-          <div>
-            <strong>{headline}</strong>
-            {worthShowing&&<small>{reason}</small>}
-            <small>Saved as a draft — read it through, then switch it on when you&apos;re happy.</small>
-          </div>
-          <button type="button" onClick={()=>setGenNote(null)} aria-label="Dismiss">×</button>
-        </div>;
-      })()}
+      {showDraftHint&&<div className="draft-hint">
+        <span>◔</span>
+        <p>This is saved as a draft — read it through, then switch it on with the toggle above.</p>
+        <button type="button" onClick={()=>setShowDraftHint(false)} aria-label="Dismiss">×</button>
+      </div>}
       <div className="automation-canvas graph-canvas">
         <AutoGraphTree
           graph={flow}
@@ -2683,6 +2762,8 @@ function FlowTestPanel({flow,token}:{flow:{startStepId:string;steps:FlowStep[]};
   </div>;
 }
 
+type CrmPush={provider:"hubspot"|"salesforce";remoteId:string;remoteUrl:string;pushedBy:string;createdAt:string};
+type CrmContact={sessionId:string;name:string;email:string;phone:string;company:string;labels:string[];score:number|null;scoreReasons:string[];scoredAt:string|null;updatedAt:string|null};
 type Submission={id:number;actionName:string;channel:string;data:Record<string,unknown>;createdAt:string;updatedAt:string;source:string;status:string;priority:string;segment:string};
 const LEAD_SOURCES=["Website","Referral","Event"];
 const LEAD_STATUSES=["New","Contacted","Qualified","Nurture","Closed-Lost"];
@@ -2786,12 +2867,89 @@ function Team({members,role,onInvite,onUpdateRole,onRemove,notify}:{members:Memb
 function Settings(props:{activeTab:string;setActiveTab:(s:string)=>void;connected:boolean;onChannels:()=>void;workspaceName:string;notify:(s:string)=>void}){
   if(props.activeTab==="Credits")return <CreditsSettings activeTab={props.activeTab} setActiveTab={props.setActiveTab} notify={props.notify}/>;
   if(props.activeTab==="API & OTP")return <ApiKeysSettings activeTab={props.activeTab} setActiveTab={props.setActiveTab} connected={props.connected} onChannels={props.onChannels} notify={props.notify}/>;
+  if(props.activeTab==="Integrations")return <IntegrationsSettings activeTab={props.activeTab} setActiveTab={props.setActiveTab} notify={props.notify}/>;
   if(props.activeTab!=="Billing")return <LegacySettings {...props}/>;
   return <SubscriptionSettings activeTab={props.activeTab} setActiveTab={props.setActiveTab} notify={props.notify}/>;
 }
 
+type CrmIntegration={provider:"hubspot"|"salesforce";configured:boolean;connected:boolean;accountLabel:string;connectedBy:string;connectedAt:string|null};
+const CRM_PROVIDER_META={
+  hubspot:{name:"HubSpot",glyph:"◈",blurb:"Push chat contacts into HubSpot as CRM contacts, with the lead score and labels attached as a note."},
+  salesforce:{name:"Salesforce",glyph:"☁",blurb:"Create Salesforce Leads from chat contacts, with the score mapped to the standard Hot/Warm/Cold rating."},
+} as const;
+
+function IntegrationsSettings({activeTab,setActiveTab,notify}:{activeTab:string;setActiveTab:(s:string)=>void;notify:(s:string)=>void}){
+  const token=useAuthToken();
+  const [integrations,setIntegrations]=useState<CrmIntegration[]>([]);
+  const [loading,setLoading]=useState(true);
+  const [busy,setBusy]=useState("");
+  const load=async()=>{
+    if(!token){setLoading(false);return}
+    try{
+      const response=await fetch(metaApi("/api/crm/integrations"),{headers:authHeaders(token)});
+      const data=await response.json() as {integrations?:CrmIntegration[]};
+      setIntegrations(data.integrations||[]);
+    }catch{ notify("Could not load integrations") }
+    finally{ setLoading(false) }
+  };
+  useEffect(()=>{load()},[token]);
+  // The CRM redirects back to a page that posts a message and closes itself, so the dashboard finds
+  // out the moment authorization finishes rather than making the user refresh.
+  useEffect(()=>{
+    const onMessage=(event:MessageEvent)=>{
+      const data=event.data as {type?:string;ok?:boolean}|null;
+      if(data&&data.type==="qpy-crm-oauth"){ if(data.ok)notify("CRM connected"); load(); }
+    };
+    window.addEventListener("message",onMessage);
+    return()=>window.removeEventListener("message",onMessage);
+  },[token]);
+  const connect=async(provider:string)=>{
+    if(!token||busy)return;
+    setBusy(provider);
+    try{
+      const response=await fetch(metaApi(`/api/crm/oauth/start?provider=${provider}`),{headers:authHeaders(token)});
+      const data=await response.json() as {authorizeUrl?:string;error?:string};
+      if(!response.ok||!data.authorizeUrl)throw new Error(data.error||"Could not start the connection");
+      window.open(data.authorizeUrl,"qpy-crm-oauth","width=680,height=760");
+    }catch(error){ notify(error instanceof Error?error.message:"Could not start the connection") }
+    finally{ setBusy("") }
+  };
+  const disconnect=async(provider:string)=>{
+    if(!token||busy)return;
+    setBusy(provider);
+    try{
+      const response=await fetch(metaApi(`/api/crm/integrations/${provider}`),{method:"DELETE",headers:authHeaders(token)});
+      if(!response.ok)throw new Error("Could not disconnect");
+      notify("Disconnected");
+      load();
+    }catch{ notify("Could not disconnect") }
+    finally{ setBusy("") }
+  };
+  return <><PageHeader title="Settings" description="Manage your workspace, assistant behavior, and subscription."/><div className="settings-layout"><aside>{SETTINGS_TABS.map(t=><button className={activeTab===t?"active":""} onClick={()=>setActiveTab(t)} key={t}>{t}</button>)}</aside><section className="subscription-content">
+    <h2>CRM integrations</h2>
+    <p>Connect the CRM your sales team already works in. Once connected, any conversation in the Inbox can be sent across as a contact or lead — with the details captured in chat, the lead score, and its labels.</p>
+    {loading?<p className="empty-hint">Loading…</p>:<div className="integration-cards">{integrations.map(row=>{
+      const meta=CRM_PROVIDER_META[row.provider];
+      return <div key={row.provider} className={`integration-card${row.connected?" connected":""}`}>
+        <span className={`integration-logo ${row.provider}`}>{meta.glyph}</span>
+        <div className="integration-body">
+          <strong>{meta.name}{row.connected&&<span className="integration-live">Connected</span>}</strong>
+          <small>{row.connected&&row.accountLabel?row.accountLabel:meta.blurb}</small>
+          {row.connected&&row.connectedAt&&<em>Connected {new Date(row.connectedAt).toLocaleDateString()}</em>}
+        </div>
+        {!row.configured
+          ? <span className="integration-blocked" title="The server is missing this provider's client id and secret">Needs server setup</span>
+          : row.connected
+            ? <button className="secondary-btn" disabled={busy===row.provider} onClick={()=>disconnect(row.provider)}>{busy===row.provider?"…":"Disconnect"}</button>
+            : <button className="primary" disabled={busy===row.provider} onClick={()=>connect(row.provider)}>{busy===row.provider?"Opening…":"Connect"}</button>}
+      </div>;
+    })}</div>}
+    {!loading&&integrations.some(i=>!i.configured)&&<div className="demo-note">⚠ A provider marked <strong>Needs server setup</strong> is missing its OAuth client id and secret on the server. Create a developer app on that platform, then set the matching secrets — <code>HUBSPOT_CLIENT_ID</code>/<code>HUBSPOT_CLIENT_SECRET</code> or <code>SALESFORCE_CLIENT_ID</code>/<code>SALESFORCE_CLIENT_SECRET</code> — with <code>wrangler secret put</code>. The redirect URL to register is <code>{META_BACKEND_ORIGIN}/api/crm/oauth/callback</code>.</div>}
+  </section></div></>;
+}
+
 type ApiKeyRow={id:string;name:string;keyPrefix:string;createdAt:string;lastUsedAt:string|null};
-const SETTINGS_TABS=["General","AI assistant","Notifications","Billing","Credits","API & OTP"];
+const SETTINGS_TABS=["General","AI assistant","Notifications","Integrations","Billing","Credits","API & OTP"];
 
 function ApiKeysSettings({activeTab,setActiveTab,connected,onChannels,notify}:{activeTab:string;setActiveTab:(s:string)=>void;connected:boolean;onChannels:()=>void;notify:(s:string)=>void}){
   const token=useAuthToken();

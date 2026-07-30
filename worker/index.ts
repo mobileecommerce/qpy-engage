@@ -7,6 +7,8 @@ import { handleAssistantRequest, type AssistantEnv } from "./assistant";
 import { handleKnowledgeRequest, type KnowledgeEnv } from "./knowledge";
 import { handleWidgetRequest, type WidgetEnv } from "./widget";
 import { handleLeadsRequest, type LeadsEnv } from "./leads";
+import { handleCrmRequest, type CrmEnv } from "./crm";
+import { handleIntegrationsRequest, type IntegrationsEnv } from "./integrations";
 import { handleAdminRequest, type AdminEnv } from "./admin";
 import { handleCreditsRequest, type CreditsEnv } from "./credits";
 import { handleContactsRequest, type ContactsEnv } from "./contacts";
@@ -18,7 +20,7 @@ import { handleAutomationsRequest, resumeDueAutomationWaits, type AutomationsEnv
 import { sendWhatsAppText, type ConnectionRow } from "./meta";
 import { json, corsPreflight, allowedOrigin } from "./shared";
 
-interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv, LeadsEnv, AdminEnv, CreditsEnv, ContactsEnv, CampaignsEnv, OtpEnv, ItemsEnv, FlowsEnv, AutomationsEnv {
+interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv, LeadsEnv, CrmEnv, IntegrationsEnv, AdminEnv, CreditsEnv, ContactsEnv, CampaignsEnv, OtpEnv, ItemsEnv, FlowsEnv, AutomationsEnv {
   ASSETS: Fetcher;
   DB: D1Database;
   ANTHROPIC_API_KEY?: string;
@@ -60,6 +62,12 @@ const worker = {
 
     const leadsResponse = await handleLeadsRequest(request, env);
     if (leadsResponse) return leadsResponse;
+
+    const integrationsResponse = await handleIntegrationsRequest(request, env);
+    if (integrationsResponse) return integrationsResponse;
+
+    const crmResponse = await handleCrmRequest(request, env);
+    if (crmResponse) return crmResponse;
 
     const adminResponse = await handleAdminRequest(request, env);
     if (adminResponse) return adminResponse;

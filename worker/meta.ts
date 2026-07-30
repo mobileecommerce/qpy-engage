@@ -89,7 +89,7 @@ async function encryptionKey(secret: string): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", digest, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
-async function encryptToken(token: string, secret: string): Promise<{ ciphertext: string; iv: string }> {
+export async function encryptToken(token: string, secret: string): Promise<{ ciphertext: string; iv: string }> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv: arrayBuffer(iv) }, await encryptionKey(secret), arrayBuffer(encoder.encode(token)));
   return { ciphertext: bytesToBase64(new Uint8Array(encrypted)), iv: bytesToBase64(iv) };

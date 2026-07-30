@@ -73,6 +73,12 @@
 .widget-preview-launcher img{width:30px;height:30px;border-radius:50%;object-fit:cover}
 .widget-preview-launcher.effect-pulse{animation:widget-pulse 2.2s infinite}
 .widget-preview-launcher.effect-bounce{animation:widget-bounce 2.6s infinite}
+/* Mirrors the gloss the real widget renders, so the preview is worth trusting. The inline
+   background stays the flat colour; these overlays sit on top of it rather than replacing it. */
+.widget-preview-launcher.glossy{position:relative;overflow:hidden;box-shadow:0 10px 30px #0003,inset 0 1px 0 #ffffff66,inset 0 -2px 6px #00000026}
+.widget-preview-launcher.glossy::after{content:"";position:absolute;inset:2px 2px 52% 2px;
+  border-radius:50% 50% 42% 42%/60% 60% 40% 40%;background:linear-gradient(#ffffff5c,#ffffff0d);pointer-events:none}
+.widget-preview-launcher.glossy>*{position:relative;z-index:1}
 @keyframes widget-pulse{0%,100%{box-shadow:0 10px 30px #0003,0 0 0 0 #4c50ee73}50%{box-shadow:0 10px 30px #0003,0 0 0 14px #4c50ee00}}
 @keyframes widget-bounce{0%,20%,50%,80%,100%{transform:translateY(0)}40%{transform:translateY(-8px)}60%{transform:translateY(-4px)}}
 .widget-icon-grid{display:flex;gap:10px;margin:6px 0 20px;flex-wrap:wrap;justify-content:center}
@@ -343,6 +349,11 @@
 .widget-header-preview strong{display:block;font-size:13px}
 .widget-header-preview small{display:block;font-size:11px;color:#b9bec8;margin-top:1px}
 .widget-header-preview span{position:absolute;right:14px;top:50%;transform:translateY(-50%);width:26px;height:26px;border-radius:50%}
+.widget-header-preview.glossy{box-shadow:inset 0 1px 0 #ffffff40,0 1px 12px #00000024}
+.widget-header-preview.glossy::after{content:"";position:absolute;left:0;right:0;top:0;height:52%;
+  background:linear-gradient(#ffffff2e,#ffffff00);pointer-events:none}
+.widget-header-preview.glossy strong,.widget-header-preview.glossy small,
+.widget-header-preview.glossy span{position:relative;z-index:1}
 
 /* Documents a customer submitted, listed beside their conversation in Inbox. */
 .doc-list{display:flex;flex-direction:column;gap:7px;margin:8px 0 4px}
@@ -524,15 +535,14 @@ small{font-size:11.5px;line-height:1.45}
 .prompt-examples button:hover:not(:disabled){border-style:solid;color:oklch(45% 0.13 265);border-color:oklch(80% 0.06 265)}
 .prompt-builder-foot>.primary{flex:none}
 
-/* Says which route the result took — writing a flow and reusing a template are different outcomes. */
-.gen-note{display:flex;align-items:flex-start;gap:11px;border:1px solid oklch(88% 0.04 265);
-  background:oklch(98.5% 0.015 265);border-radius:11px;padding:11px 13px;margin-bottom:12px}
-.gen-note.template{border-color:oklch(88% 0.04 195);background:oklch(98.5% 0.015 195)}
-.gen-note>span{font-size:15px;line-height:1.2}
-.gen-note>div{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
-.gen-note strong{font-size:12.5px}
-.gen-note small{color:#6f7784}
-.gen-note>button{border:0;background:transparent;color:#8b93a1;font-size:17px;line-height:1;cursor:pointer;padding:0 2px}
+/* One line, because there is only one thing to do about a fresh draft: read it, then turn it on.
+   How it got built is our business, not the owner's. */
+.draft-hint{display:flex;align-items:center;gap:9px;border:1px solid oklch(88% 0.04 265);
+  background:oklch(98.5% 0.015 265);border-radius:10px;padding:9px 12px;margin-bottom:12px}
+.draft-hint>span{font-size:14px;line-height:1;color:oklch(55% 0.13 265)}
+.draft-hint>p{flex:1;min-width:0;margin:0;font-size:12.5px;color:#4a5260}
+.draft-hint>button{border:0;background:transparent;color:#8b93a1;font-size:16px;line-height:1;cursor:pointer;padding:0 2px}
+.draft-hint>button:hover{color:#4a5260}
 
 /* Building a flow takes the better part of half a minute, which is a long time to stare at an
    unchanged screen, so the wait says what is happening. */
@@ -593,3 +603,95 @@ small{font-size:11.5px;line-height:1.45}
 .notes-panel .note p{font-size:12.5px;line-height:1.55;margin:0 0 4px}
 .notes-panel .note small{font-size:11px;color:#9aa1af}
 .notes-panel textarea{font:inherit;font-size:12.5px;line-height:1.5}
+
+/* ---- CRM conversation panel ------------------------------------------------------------------
+   The side panel is a contact record, not a list of widgets: identity at the top, then the things
+   an agent acts on (score, labels) above the things they only read (documents, notes). */
+.crm-panel{gap:0}
+.crm-identity{display:flex;align-items:center;gap:10px;padding-bottom:14px;margin-bottom:14px;
+  border-bottom:1px solid var(--line)}
+.crm-avatar{flex:none;width:40px;height:40px;border-radius:50%;display:grid;place-items:center;
+  background:linear-gradient(150deg,#6f73f5,#4c50ee);color:#fff;font-size:13px;font-weight:800;letter-spacing:.02em}
+.crm-identity>div{flex:1;min-width:0}
+.crm-identity strong{display:block;font-size:14px;font-weight:700;color:#20232b;line-height:1.3;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.crm-identity small{display:block;font-size:11.5px;color:#8b93a1;margin-top:1px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.crm-edit{flex:none;border:1px solid #dfe2e8;background:#fff;color:#5b6373;border-radius:7px;
+  padding:5px 10px;font-size:11.5px;font-weight:700;cursor:pointer}
+.crm-edit:hover{border-color:#c3c8d2;color:#20232b}
+
+.crm-fields{display:flex;flex-direction:column;gap:7px;margin-bottom:2px}
+.crm-field{display:flex;align-items:center;gap:9px;font-size:12.5px;color:#3f4653;
+  word-break:break-word;line-height:1.4}
+.crm-field-icon{flex:none;width:22px;height:22px;border-radius:6px;display:grid;place-items:center;
+  background:#eef0fb;color:#5a5fd4;font-size:11px}
+.crm-fields.editing{gap:9px}
+.crm-fields.editing label{display:flex;flex-direction:column;gap:3px}
+.crm-fields.editing small{font-size:11px;font-weight:700;color:#7d8493}
+.crm-fields.editing input{border:1px solid #dfe2e8;border-radius:6px;padding:6px 8px;font:inherit;font-size:12.5px;background:#fff}
+.crm-fields.editing input:focus{outline:2px solid #c9cbfa;outline-offset:-1px;border-color:#8f93f0}
+
+.crm-score-empty{display:flex;flex-direction:column;align-items:flex-start;gap:7px}
+.crm-score{background:#fafbfd;border:1px solid var(--line);border-radius:9px;padding:11px 12px}
+.crm-score-head{display:flex;align-items:center;gap:9px}
+.crm-score-head b{font-size:26px;font-weight:800;line-height:1;color:#20232b;letter-spacing:-.02em}
+.crm-score-pill{font-size:10.5px;font-weight:800;letter-spacing:.05em;border-radius:20px;padding:4px 9px;color:#fff}
+.crm-score-pill.hot{background:#f0574f}
+.crm-score-pill.warm{background:#e2953c}
+.crm-score-pill.cold{background:#8b93a1}
+.crm-rescore{margin-left:auto;border:1px solid #dfe2e8;background:#fff;color:#7d8493;border-radius:6px;
+  width:26px;height:26px;font-size:13px;line-height:1;cursor:pointer;flex:none}
+.crm-rescore:hover:not(:disabled){color:#20232b;border-color:#c3c8d2}
+.crm-rescore:disabled{opacity:.5;cursor:progress}
+.crm-reasons{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:5px}
+.crm-reasons li{position:relative;padding-left:17px;font-size:12px;line-height:1.45;color:#4a5160}
+.crm-reasons li::before{content:"✓";position:absolute;left:0;top:0;color:#39a06a;font-size:11px;font-weight:800}
+.crm-scored-at{display:block;margin-top:9px;font-size:11px;color:#9aa1af}
+
+.crm-labels{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:9px}
+.crm-chip{display:inline-flex;align-items:center;gap:5px;border-radius:20px;padding:4px 6px 4px 10px;
+  font-size:11.5px;font-weight:700;line-height:1.3;max-width:100%}
+.crm-chip>button{border:0;background:transparent;color:currentColor;opacity:.55;font-size:13px;
+  line-height:1;cursor:pointer;padding:0 2px}
+.crm-chip>button:hover{opacity:1}
+.crm-chip.tone-0{background:#eceafe;color:#4f46c9}
+.crm-chip.tone-1{background:#e2f6ea;color:#2f7d54}
+.crm-chip.tone-2{background:#fdeeea;color:#c0503f}
+.crm-chip.tone-3{background:#fff4e0;color:#98651c}
+.crm-chip.tone-4{background:#e5f2fb;color:#2b6b96}
+.crm-chip.tone-5{background:#f6e9f7;color:#8a3f8f}
+.crm-label-add{display:flex;gap:6px}
+.crm-label-add input{flex:1;min-width:0;border:1px solid #dfe2e8;border-radius:6px;padding:6px 8px;
+  font:inherit;font-size:12.5px;background:#fff}
+.crm-label-add input:focus{outline:2px solid #c9cbfa;outline-offset:-1px;border-color:#8f93f0}
+.crm-label-add button{flex:none;padding:6px 12px;font-size:12px}
+
+/* ---- CRM integrations ------------------------------------------------------------------------ */
+.integration-cards{display:flex;flex-direction:column;gap:10px;margin-top:4px}
+.integration-card{display:flex;align-items:center;gap:13px;border:1px solid var(--line);
+  border-radius:9px;padding:14px 15px;background:#fff}
+.integration-card.connected{border-color:#c9e6d5;background:#fbfefc}
+.integration-logo{flex:none;width:38px;height:38px;border-radius:9px;display:grid;place-items:center;
+  font-size:17px;color:#fff}
+.integration-logo.hubspot{background:linear-gradient(150deg,#ff8f6b,#f2542d)}
+.integration-logo.salesforce{background:linear-gradient(150deg,#4aa3e8,#0d76d3)}
+.integration-logo.small{width:26px;height:26px;border-radius:7px;font-size:12px}
+.integration-body{flex:1;min-width:0}
+.integration-body strong{display:flex;align-items:center;gap:7px;font-size:13px;color:#20232b}
+.integration-body small{display:block;font-size:11.5px;color:#8b93a1;line-height:1.5;margin-top:2px}
+.integration-body em{display:block;font-style:normal;font-size:11px;color:#9aa1af;margin-top:4px}
+.integration-live{font-size:9.5px;font-weight:800;letter-spacing:.05em;color:#2f7d54;
+  background:#e2f6ea;border-radius:20px;padding:3px 8px}
+.integration-blocked{flex:none;font-size:11px;font-weight:700;color:#98651c;background:#fff4e0;
+  border-radius:7px;padding:6px 10px;white-space:nowrap}
+.integration-card>button{flex:none}
+
+.crm-push{display:flex;flex-direction:column;gap:8px}
+.crm-push-row{display:flex;align-items:center;gap:9px}
+.crm-push-row>div{flex:1;min-width:0}
+.crm-push-row strong{display:block;font-size:12.5px;color:#20232b}
+.crm-push-row small{display:block;font-size:11px;color:#9aa1af;margin-top:1px}
+.crm-push-row a{display:block;font-size:11px;color:#4c50ee;text-decoration:none;margin-top:1px}
+.crm-push-row a:hover{text-decoration:underline}
+.crm-push-row button{flex:none;padding:5px 10px;font-size:11.5px}
