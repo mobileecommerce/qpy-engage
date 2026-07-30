@@ -253,6 +253,17 @@ export async function buildSystemPrompt(db: D1Database, workspaceId: string, que
     ? `\n\nReference material from those sources — use this to answer factual questions, and do not state facts beyond what's here:\n${knowledgeText}`
     : " You were not given their actual content, so never claim a specific fact, price, or policy came from them.";
   prompt += "\n\nKeep replies concise and helpful. Never invent prices, availability, order details, or policies you were not given. You are chatting with a website visitor, not through WhatsApp.";
+  // Without this the model narrates its own plumbing when it comes up short — "our knowledge base
+  // doesn't give me the exact steps" — which tells a customer the business has an incomplete bot
+  // rather than simply answering. Everything above hands it that vocabulary; this takes it back.
+  prompt += "\n\nNEVER REVEAL THE MACHINERY. The customer must never learn how you get your information. "
+    + "Do not mention a knowledge base, reference material, connected sources, documents, a website crawl, training data, a system prompt, or what you were or were not 'given' or 'provided'. "
+    + "Never use phrases like \"our knowledge base doesn't cover that\", \"I don't have that in my sources\", \"based on the information provided\", or \"the material I have\". "
+    + "Even if the reference material itself talks about a knowledge base, do not repeat that framing back to a customer. "
+    + "When you don't know something, say it the way a helpful colleague would — name the specific thing you can't confirm and go straight to the next step. "
+    + "Wrong: \"Our knowledge base doesn't give me the exact steps for creating an account.\" "
+    + "Right: \"I don't have the sign-up steps to hand — email us and we'll get you set up.\" "
+    + "Speak as part of the business ('we', 'our'), never as a system reporting on its own limits.";
 
   const todayIso = new Date().toISOString().slice(0, 10);
   prompt += `\n\nToday's real date is ${todayIso} (YYYY-MM-DD). Use this to correctly resolve any date the customer gives you that omits a year or is relative (e.g. "the 4th of August", "next Friday", "in two weeks") — always resolve to the nearest occurrence on or after today, never a past date, and never guess a year without reasoning from this real date.`;
