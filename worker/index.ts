@@ -9,6 +9,7 @@ import { handleWidgetRequest, type WidgetEnv } from "./widget";
 import { handleLeadsRequest, type LeadsEnv } from "./leads";
 import { handleCrmRequest, type CrmEnv } from "./crm";
 import { handleIntegrationsRequest, type IntegrationsEnv } from "./integrations";
+import { handleFollowupsRequest, type FollowupsEnv } from "./followups";
 import { handleAdminRequest, type AdminEnv } from "./admin";
 import { handleCreditsRequest, type CreditsEnv } from "./credits";
 import { handleContactsRequest, type ContactsEnv } from "./contacts";
@@ -20,7 +21,7 @@ import { handleAutomationsRequest, resumeDueAutomationWaits, type AutomationsEnv
 import { sendWhatsAppText, type ConnectionRow } from "./meta";
 import { json, corsPreflight, allowedOrigin } from "./shared";
 
-interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv, LeadsEnv, CrmEnv, IntegrationsEnv, AdminEnv, CreditsEnv, ContactsEnv, CampaignsEnv, OtpEnv, ItemsEnv, FlowsEnv, AutomationsEnv {
+interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv, LeadsEnv, CrmEnv, IntegrationsEnv, FollowupsEnv, AdminEnv, CreditsEnv, ContactsEnv, CampaignsEnv, OtpEnv, ItemsEnv, FlowsEnv, AutomationsEnv {
   ASSETS: Fetcher;
   DB: D1Database;
   ANTHROPIC_API_KEY?: string;
@@ -68,6 +69,9 @@ const worker = {
 
     const crmResponse = await handleCrmRequest(request, env);
     if (crmResponse) return crmResponse;
+
+    const followupsResponse = await handleFollowupsRequest(request, env);
+    if (followupsResponse) return followupsResponse;
 
     const adminResponse = await handleAdminRequest(request, env);
     if (adminResponse) return adminResponse;

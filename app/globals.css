@@ -695,3 +695,40 @@ small{font-size:11.5px;line-height:1.45}
 .crm-push-row a{display:block;font-size:11px;color:#4c50ee;text-decoration:none;margin-top:1px}
 .crm-push-row a:hover{text-decoration:underline}
 .crm-push-row button{flex:none;padding:5px 10px;font-size:11.5px}
+
+/* ---- Daily follow-ups ------------------------------------------------------------------------
+   A worklist, not a report: the action comes first and largest, the evidence sits under it, and
+   the only control on each row is the one that clears it. */
+.followup-summary{display:flex;align-items:center;gap:26px;padding:14px 18px;margin-bottom:14px;
+  background:#fff;border:1px solid var(--line);border-radius:9px}
+.followup-summary>div{display:flex;flex-direction:column;gap:1px}
+.followup-summary b{font-size:20px;font-weight:800;line-height:1.1;color:#20232b;letter-spacing:-.02em}
+.followup-summary small{font-size:11.5px;color:#8b93a1}
+.followup-summary .urgent b{color:#d94a40}
+.followup-summary .text-action{margin-left:auto}
+
+.followup-list{display:flex;flex-direction:column;gap:8px}
+.followup-row{display:flex;gap:12px;align-items:flex-start;background:#fff;border:1px solid var(--line);
+  border-left:3px solid #c3c8d2;border-radius:9px;padding:13px 15px}
+.followup-row.priority-high{border-left-color:#e8564c}
+.followup-row.priority-medium{border-left-color:#e2953c}
+.followup-row.priority-low{border-left-color:#a9b0bd}
+.followup-row.done{opacity:.5}
+.followup-row.done .followup-body strong{text-decoration:line-through}
+.followup-check{flex:none;width:20px;height:20px;margin-top:1px;border:1.5px solid #c3c8d2;background:#fff;
+  border-radius:5px;cursor:pointer;font-size:11px;line-height:1;color:#2f7d54;font-weight:800;
+  display:grid;place-items:center;padding:0}
+.followup-check:hover{border-color:#8b93a1}
+.followup-row.done .followup-check{background:#e2f6ea;border-color:#8ecfa8}
+.followup-body{flex:1;min-width:0}
+.followup-body strong{display:block;font-size:13.5px;font-weight:700;color:#20232b;line-height:1.4}
+.followup-body>small{display:block;font-size:11.5px;color:#8b93a1;line-height:1.5;margin-top:5px}
+.followup-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin-top:6px}
+.followup-meta>span{font-size:11px;color:#9aa1af}
+.followup-tag{font-size:10.5px;font-weight:700;letter-spacing:.02em;border-radius:20px;padding:3px 9px}
+.followup-tag.escalation{background:#fdeeea;color:#c0503f}
+.followup-tag.waiting{background:#fff4e0;color:#98651c}
+.followup-tag.promise{background:#eceafe;color:#4f46c9}
+.followup-tag.hot_lead{background:#e2f6ea;color:#2f7d54}
+.followup-tag.went_quiet{background:#eef0f4;color:#6b7280}
+@media(max-width:800px){.followup-summary{gap:18px;flex-wrap:wrap}}

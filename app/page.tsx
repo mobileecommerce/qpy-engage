@@ -1071,7 +1071,7 @@ function useWebchatSummaries(token:string|null):{summaries:WidgetConversationSum
   return {summaries,loaded};
 }
 
-type InboxChannelKey="all"|"whatsapp"|"instagram"|"webchat";
+type InboxChannelKey="all"|"whatsapp"|"instagram"|"webchat"|"followups";
 
 function InboxHub(props:{connected:boolean;conversations:Conversation[];setConversations:(v:Conversation[])=>void;selected:Conversation;setSelectedId:(s:string)=>void;messages:Message[];draft:string;setDraft:(s:string)=>void;sendMessage:()=>void;aiActive:boolean;setAiActive:(v:boolean)=>void;onConnect:()=>void;notify:(s:string)=>void}){
   const token=useAuthToken();
@@ -1093,12 +1093,13 @@ function InboxHub(props:{connected:boolean;conversations:Conversation[];setConve
   const visibleTabs:{key:InboxChannelKey;label:string}[]=showAll
     ?[{key:"all",label:"◆ All"},...activeChannels]
     :(activeChannels.length?activeChannels:channels);
+  const barTabs:{key:InboxChannelKey;label:string}[]=[...visibleTabs,{key:"followups",label:"✓ Follow-ups"}];
   const visibleKeys=visibleTabs.map(t=>t.key).join(",");
   const [tab,setTab]=useState<InboxChannelKey>("whatsapp");
   useEffect(()=>{
     if(!ready)return;
     const keys=visibleKeys.split(",") as InboxChannelKey[];
-    if(!keys.includes(tab))setTab(keys[0]);
+    if(tab!=="followups"&&!keys.includes(tab))setTab(keys[0]);
   },[visibleKeys,ready]);
 
   const merged=[
@@ -1109,7 +1110,7 @@ function InboxHub(props:{connected:boolean;conversations:Conversation[];setConve
   if(!ready)return<><PageHeader title="Inbox" description="Manage every customer conversation from one place."/><p className="empty-hint">Loading…</p></>;
 
   return <>
-    <div className="test-mode-tabs">{visibleTabs.map(t=><button key={t.key} className={tab===t.key?"active":""} onClick={()=>setTab(t.key)}>{t.label}</button>)}</div>
+    <div className="test-mode-tabs">{barTabs.map(t=><button key={t.key} className={tab===t.key?"active":""} onClick={()=>setTab(t.key)}>{t.label}</button>)}</div>
     {tab==="all"&&<>
       <PageHeader title="All conversations" description="Every channel with an active conversation, in one place."/>
       <div className="conversation-list all-conversation-list">{merged.map(item=><button key={item.key} onClick={()=>setTab(item.channel)}><span className={`contact-avatar ${item.channel==="whatsapp"?"green":"blue"}`}>{item.channel==="whatsapp"?"WA":"◌"}<i/></span><div><strong>{item.name}</strong><small>{item.preview}</small></div><span className="conv-meta"><small>{conversationTime(item.at)}</small><em>{item.channel==="whatsapp"?"WhatsApp":"Web chat"}</em></span></button>)}</div>
@@ -1117,6 +1118,82 @@ function InboxHub(props:{connected:boolean;conversations:Conversation[];setConve
     {tab==="whatsapp"&&(props.connected?<LiveInbox notify={props.notify}/>:props.conversations.length?<Inbox conversations={props.conversations} setConversations={props.setConversations} selected={props.selected} setSelectedId={props.setSelectedId} messages={props.messages} draft={props.draft} setDraft={props.setDraft} sendMessage={props.sendMessage} aiActive={props.aiActive} setAiActive={props.setAiActive} notify={props.notify}/>:<EmptyInbox onConnect={props.onConnect}/>)}
     {tab==="instagram"&&<div className="empty-state"><span>◎</span><h3>No Instagram conversations yet</h3><p>Real Instagram messaging isn't connected yet — this tab will fill in once that channel is wired up.</p></div>}
     {tab==="webchat"&&<WebChatInbox notify={props.notify}/>}
+    {tab==="followups"&&<FollowupsPanel notify={props.notify}/>}
+  </>;
+}
+
+type Followup={sessionId:string;reason:string;reasonLabel:string;customerName:string;action:string;why:string;priority:string;score:number|null;lastAt:string;done:boolean};
+
+function FollowupsPanel({notify}:{notify:(s:string)=>void}){
+  const token=useAuthToken();
+  const [items,setItems]=useState<Followup[]>([]);
+  const [day,setDay]=useState("");
+  const [loading,setLoading]=useState(true);
+  const [refreshing,setRefreshing]=useState(false);
+  const [showDone,setShowDone]=useState(false);
+  const apply=(data:{day?:string;followups?:Followup[]})=>{ setItems(data.followups||[]); if(data.day)setDay(data.day); };
+  useEffect(()=>{
+    if(!token){setLoading(false);return}
+    fetch(metaApi("/api/followups"),{headers:authHeaders(token)})
+      .then(r=>r.json()).then(apply).catch(()=>{}).finally(()=>setLoading(false));
+  },[token]);
+  const refresh=async()=>{
+    if(!token||refreshing)return;
+    setRefreshing(true);
+    try{
+      const response=await fetch(metaApi("/api/followups/refresh"),{method:"POST",headers:authHeaders(token)});
+      const data=await response.json() as {day?:string;followups?:Followup[];error?:string};
+      if(!response.ok)throw new Error(data.error||"Could not rebuild the list");
+      apply(data);
+    }catch(error){ notify(error instanceof Error?error.message:"Could not rebuild the list") }
+    finally{ setRefreshing(false) }
+  };
+  const toggle=async(item:Followup)=>{
+    if(!token)return;
+    const previous=items;
+    setItems(items.map(i=>i.sessionId===item.sessionId?{...i,done:!i.done}:i));
+    try{
+      const response=await fetch(metaApi("/api/followups/status"),{method:"PATCH",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({sessionId:item.sessionId,day,done:!item.done})});
+      const data=await response.json() as {day?:string;followups?:Followup[]};
+      if(!response.ok)throw new Error();
+      apply(data);
+    }catch{ setItems(previous); notify("Could not update that follow-up") }
+  };
+  const open=items.filter(i=>!i.done);
+  const done=items.filter(i=>i.done);
+  const visible=showDone?items:open;
+  const highCount=open.filter(i=>i.priority==="high").length;
+
+  return <>
+    <PageHeader title="Follow-ups" description="Conversations that stalled and need a person today — rebuilt from your inbox on demand."
+      action={<button className="secondary-btn" disabled={refreshing} onClick={refresh}>{refreshing?"Reading the inbox…":"↻ Rebuild list"}</button>}/>
+    {loading?<p className="empty-hint">Loading…</p>:!items.length
+      ? <div className="empty-state"><span>✓</span><h3>Nothing outstanding</h3>
+          <p>No conversation is waiting on a reply, and nothing was promised that hasn&apos;t been delivered. Rebuild the list to check again against the latest messages.</p>
+          <button className="primary" disabled={refreshing} onClick={refresh}>{refreshing?"Reading the inbox…":"Rebuild list"}</button></div>
+      : <>
+        <div className="followup-summary">
+          <div><b>{open.length}</b><small>{open.length===1?"follow-up open":"follow-ups open"}</small></div>
+          {highCount>0&&<div className="urgent"><b>{highCount}</b><small>{highCount===1?"needs you now":"need you now"}</small></div>}
+          <div><b>{done.length}</b><small>done today</small></div>
+          {done.length>0&&<button className="text-action" onClick={()=>setShowDone(!showDone)}>{showDone?"Hide completed":"Show completed"}</button>}
+        </div>
+        <div className="followup-list">{visible.map(item=>
+          <div key={item.sessionId} className={`followup-row priority-${item.priority}${item.done?" done":""}`}>
+            <button className="followup-check" onClick={()=>toggle(item)} aria-label={item.done?"Mark as not done":"Mark as done"}>{item.done?"✓":""}</button>
+            <div className="followup-body">
+              <strong>{item.action}</strong>
+              <div className="followup-meta">
+                <span className={`followup-tag ${item.reason}`}>{item.reasonLabel}</span>
+                {item.customerName&&<span>{item.customerName}</span>}
+                {item.score!==null&&<span>score {item.score}</span>}
+                <span>last message {conversationTime(item.lastAt)}</span>
+              </div>
+              {item.why&&<small>{item.why}</small>}
+            </div>
+          </div>)}
+        </div>
+      </>}
   </>;
 }
 

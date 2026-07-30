@@ -216,8 +216,43 @@ function computeBusinessHoursStatus(hours: WorkingHours | null, now: Date): stri
 // `question` is the customer's current message. It is optional so every existing caller keeps
 // working, but passing it lets the crawled site be searched for the pages that actually answer it
 // instead of handing over whatever fits in the budget first.
+// A tone setting was previously dropped into the prompt as its bare label — "Tone: Luxury
+// concierge." — one line among two thousand tokens of hard rules. It read as decoration and the
+// model treated it that way, which is why switching presets changed almost nothing. A voice only
+// bites when it says what to do to the sentences themselves, so each preset is spelled out with
+// concrete mechanics and a worked example.
+const VOICE_PRESETS: Record<string, string> = {
+  "Warm & helpful":
+    "Write like a friendly colleague who is genuinely pleased to help. Use contractions. Open by acknowledging what they asked before answering it. "
+    + "Keep sentences short and plain — no corporate vocabulary (no 'kindly', 'please be advised', 'as per'). At most one exclamation mark in a reply, usually none. "
+    + "Example: \"Happy to help with that. Our kitchen closes at 11pm, so you've got plenty of time.\"",
+  "Professional & concise":
+    "Lead with the answer in the first sentence, then add only the detail that changes what the customer does next. "
+    + "No pleasantries, no filler openers ('Great question!', 'Absolutely!'), no exclamation marks, no emoji. Two or three sentences is usually the whole reply. Courteous but never chatty. "
+    + "Example: \"The kitchen closes at 11pm. Last orders are taken at 10:45.\"",
+  "Friendly & energetic":
+    "Upbeat and quick. Contractions throughout, short punchy sentences, and real enthusiasm for what the business offers — but earned, not performed. "
+    + "At most one exclamation mark per reply. Never use emoji unless the customer does first. Never let the energy delay the actual answer. "
+    + "Example: \"Good news — kitchen's open until 11pm, so you've got time.\"",
+  "Luxury concierge":
+    "Refined and unhurried. Full sentences, no contractions, no slang, no exclamation marks. Address the guest with quiet courtesy and anticipate the next thing they will need without being asked. "
+    + "Never sound like a salesperson and never rush them toward a decision. "
+    + "Example: \"The kitchen serves until 11pm this evening. I would be glad to arrange a table, should you wish.\"",
+};
+
+// Presets are a starting point, not a ceiling: anything the business types that isn't a known
+// preset is treated as the voice instruction itself, so a custom voice works without a code change.
+function voiceInstruction(tone: string): string {
+  const preset = VOICE_PRESETS[tone.trim()];
+  if (preset) return preset;
+  const custom = tone.trim();
+  return custom
+    ? `Write in this voice, and let it govern your word choice, sentence length and rhythm: ${custom}`
+    : VOICE_PRESETS["Warm & helpful"];
+}
+
 export async function buildSystemPrompt(db: D1Database, workspaceId: string, question?: string): Promise<string> {
-  const config = await readWorkspaceState<{ role?: string; tone?: string; language?: string; fallback?: string }>(db, workspaceId, "qpy-engage-assistant-config-v2");
+  const config = await readWorkspaceState<{ name?: string; purpose?: string; role?: string; tone?: string; language?: string; fallback?: string; signoff?: string }>(db, workspaceId, "qpy-engage-assistant-config-v2");
   const policies = await readWorkspaceState<{ restricted?: string }>(db, workspaceId, "qpy-engage-assistant-policies");
   const selectedSources = (await readWorkspaceState<number[]>(db, workspaceId, "qpy-engage-assistant-sources")) || [];
   const sources = (await readWorkspaceState<Array<{ id: number; name: string }>>(db, workspaceId, "qpy-engage-sources")) || [];
@@ -232,6 +267,11 @@ export async function buildSystemPrompt(db: D1Database, workspaceId: string, que
   const tone = config?.tone || "Warm & helpful";
   const language = config?.language || "English";
   const fallback = config?.fallback || "If you are unsure or the request is sensitive, say so and offer to connect the customer with a human.";
+  // name, purpose and signoff were all editable in the dashboard but read by nobody, so changing
+  // them did nothing — the assistant did not even know what it was called.
+  const assistantName = (config?.name || "").trim();
+  const purpose = (config?.purpose || "").trim();
+  const signoff = (config?.signoff || "").trim();
 
   let prompt = "FORMATTING RULE, applies to every reply you send: this chat widget renders your text exactly as-is, with no Markdown support. "
     + "Absolutely no **bold**, *italics*, `code`, bullet characters (-, *, •), numbered lists (1., 2.), or # headings — those will show up as literal, ugly punctuation to the customer. "
@@ -242,7 +282,12 @@ export async function buildSystemPrompt(db: D1Database, workspaceId: string, que
   // Reply in whatever the customer wrote, rather than forcing one configured language on everyone.
   // The model is already multilingual; the old fixed setting meant an Arabic-speaking guest got
   // English back from a hotel sitting in the UAE.
-  prompt += `${role}\n\nTone: ${tone}.\n\nLANGUAGE: Always answer in the same language the customer writes in, `
+  prompt += role;
+  if (assistantName) prompt += `\n\nYour name is ${assistantName}. If a customer asks who or what you are, say you are ${assistantName}, the assistant for this business — never say you are Claude, an AI model, or made by Anthropic.`;
+  if (purpose) prompt += `\n\nWhat you are here to do: ${purpose}. When a conversation could go several ways, steer it toward this.`;
+  prompt += `\n\nVOICE — this governs how every reply is written, and outranks any habit of yours to the contrary. ${voiceInstruction(tone)}`;
+  if (signoff) prompt += `\n\nWhen a customer's need looks fully resolved and the conversation is winding down, close with this, in your own voice and in their language: "${signoff}" Use it once at the end, not after every reply.`;
+  prompt += `\n\nLANGUAGE: Always answer in the same language the customer writes in, `
     + `matching their script (reply to Arabic in Arabic, to Hindi in Hindi). If their language is genuinely unclear, use ${language}. `
     + `Reference material below may be in a different language — translate the relevant facts into the customer's language rather than quoting them in the wrong one. `
     + `Never mention that you translated anything, and never comment on which language they used.`
