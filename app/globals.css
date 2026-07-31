@@ -1020,3 +1020,58 @@ small{font-size:11.5px;line-height:1.45}
   border-radius:7px;padding:6px;font-size:11.5px;font-weight:700;cursor:pointer}
 .cx-score-again:hover:not(:disabled){border-color:#c3c8d2;color:#20232b}
 .cx-score-again:disabled{opacity:.6;cursor:progress}
+
+/* ---- Profiles: the hub viewed as a person, not a thread --------------------------------------- */
+.cx-profiles{display:grid;grid-template-columns:300px minmax(0,1fr);border:1px solid var(--line);
+  border-radius:10px;overflow:hidden;background:#fff;height:calc(100vh - 210px);min-height:560px}
+.cx-profile-list{display:flex;flex-direction:column;min-width:0;min-height:0;
+  border-right:1px solid var(--line);background:#fcfcfd}
+.cx-profile-detail{display:flex;flex-direction:column;min-width:0;min-height:0}
+.cx-profile-head{display:flex;align-items:center;gap:13px;padding:15px 18px;border-bottom:1px solid var(--line);flex:none}
+.cx-profile-head>div{flex:1;min-width:0}
+.cx-profile-head strong{display:block;font-size:16px;color:#20232b}
+.cx-profile-head small{display:block;font-size:11.5px;color:#8b93a1;margin-top:2px}
+
+.cx-merge-bar{display:flex;align-items:center;gap:11px;padding:12px 18px;background:#fffdf5;
+  border-bottom:1px solid #f0e4b8;flex:none}
+.cx-merge-bar>div{flex:1;min-width:0}
+.cx-merge-bar strong{display:block;font-size:12.5px;color:#4a5160}
+.cx-merge-bar small{display:block;font-size:11px;color:#9a8f66;line-height:1.45;margin-top:2px}
+.cx-merge-bar select{border:1px solid #dfe2e8;border-radius:7px;padding:7px 9px;font-size:12px;background:#fff;max-width:220px}
+
+.cx-profile-body{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 280px}
+.cx-profile-main{min-width:0;min-height:0;display:flex;flex-direction:column;padding:16px 18px;overflow-y:auto;background:#f7f8fa}
+.cx-profile-main h4,.cx-profile-side h4{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:700;
+  letter-spacing:.06em;text-transform:uppercase;color:#9aa1af;margin:0 0 11px}
+.cx-profile-side h4 i{font-style:normal;font-size:9.5px;font-weight:800;background:#eef0f4;color:#6b7280;
+  border-radius:20px;padding:2px 7px}
+.cx-timeline{display:flex;flex-direction:column;gap:14px}
+/* Each bubble carries its channel, so a WhatsApp reply and a web chat reply are never confused
+   even though they sit in one stream. */
+.cx-timeline .cx-bubble{max-width:80%}
+.cx-timeline .cx-bubble small{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+
+.cx-profile-side{border-left:1px solid var(--line);padding:16px;overflow-y:auto;min-height:0;background:#fcfcfd}
+.cx-profile-side h4:not(:first-child){margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}
+.cx-identity-list{display:flex;flex-direction:column;gap:7px}
+.cx-identity,.cx-conv-link{display:flex;align-items:center;gap:9px;width:100%;text-align:left;
+  border:1px solid var(--line);background:#fff;border-radius:8px;padding:8px 10px}
+.cx-conv-link{cursor:pointer}
+.cx-conv-link:hover{border-color:#c3c8d2;background:#f7f8fa}
+.cx-identity>div,.cx-conv-link>div{flex:1;min-width:0}
+.cx-identity strong,.cx-conv-link strong{display:block;font-size:12px;font-weight:700;color:#20232b;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cx-identity small,.cx-conv-link small{display:block;font-size:10.5px;color:#8b93a1;margin-top:1px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cx-identity>b{flex:none;color:#2f7d54;font-size:12px}
+
+@media(max-width:1240px){
+  .cx-profiles{grid-template-columns:264px minmax(0,1fr)}
+  .cx-profile-body{grid-template-columns:1fr}
+  .cx-profile-side{display:none}
+}
+@media(max-width:900px){
+  .cx-profiles{grid-template-columns:1fr;height:auto}
+  .cx-profile-list{border-right:0;border-bottom:1px solid var(--line);max-height:280px}
+  .cx-profile-main{min-height:340px}
+}

@@ -3254,7 +3254,7 @@ function cxScoreBand(score:number){return score>=70?{label:"HOT LEAD",cls:"hot"}
 
 function ConversationsModule({notify}:{notify:(s:string)=>void}){
   const token=useAuthToken();
-  const [tab,setTab]=useState<"conversations"|"leads">("conversations");
+  const [tab,setTab]=useState<"conversations"|"leads"|"profiles">("conversations");
   const [conversations,setConversations]=useState<CxConversation[]>([]);
   const [leads,setLeads]=useState<CxLead[]>([]);
   const [counts,setCounts]=useState<CxCounts>({all:0,unread:0,needsYou:0,newLeads:0,followUp:0,closed:0});
@@ -3418,6 +3418,11 @@ function ConversationsModule({notify}:{notify:(s:string)=>void}){
     setDrawerLeadId("");
     setTab("leads");
   };
+  const openThreadFromProfile=(channel:CxChannel,threadKey:string)=>{
+    const match=conversations.find(c=>c.channel===channel&&c.threadKey===threadKey);
+    if(match)setSelectedId(match.id);
+    setTab("conversations");
+  };
   const openFullWorkspace=(lead:CxLead)=>{
     if(!lead.conversation)return;
     const match=conversations.find(c=>c.threadKey===lead.conversation!.threadKey&&c.channel===lead.conversation!.channel);
@@ -3430,9 +3435,12 @@ function ConversationsModule({notify}:{notify:(s:string)=>void}){
     <div className="cx-tabs">
       <button className={tab==="conversations"?"active":""} onClick={()=>setTab("conversations")}>Conversations{counts.unread>0&&<b>{counts.unread}</b>}</button>
       <button className={tab==="leads"?"active":""} onClick={()=>setTab("leads")}>Leads{leads.length>0&&<b>{leads.length}</b>}</button>
+      <button className={tab==="profiles"?"active":""} onClick={()=>setTab("profiles")}>Profiles</button>
     </div>
 
-    {tab==="conversations"
+    {tab==="profiles"
+      ? <CxProfilesTab notify={notify} onOpenThread={openThreadFromProfile}/>
+      : tab==="conversations"
       ? <CxConversationsTab loading={loading} conversations={visibleConversations} total={conversations.length}
           counts={counts} search={search} setSearch={setSearch} channelFilter={channelFilter} setChannelFilter={setChannelFilter}
           pill={pill} setPill={setPill} selected={selected} setSelectedId={setSelectedId}
@@ -3821,6 +3829,161 @@ function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer,onFullLead,hand
       <p className="empty-hint">Push this contact to HubSpot or Salesforce from Settings → Integrations.</p>
     </CxAccordion>
   </aside>;
+}
+
+
+/* ---- Tab 3: Profiles — the hub, as a person rather than a thread ------------------------------ */
+
+type CxIdentity={id:string;channel:string;kind:string;value:string;normalized:string;verified:boolean};
+type CxProfileRow={id:string;name:string;company:string;avatarTone:number;identityCount:number;
+  conversationCount:number;channels:string[];lastAt:string;unread:boolean;lead:{id:string;stage:string;priority:string}|null};
+type CxTimelineEntry={channel:string;threadKey:string;role:string;content:string;createdAt:string};
+type CxProfileDetail={profile:{id:string;name:string;company:string;avatarTone:number;createdAt:string};
+  identities:CxIdentity[];conversations:{id:string;channel:CxChannel;threadKey:string;lastMessage:string;lastAt:string;messageCount:number;unread:boolean}[];
+  lead:{id:string;stage:string;priority:string;segment:string;source:string;owner:string}|null;
+  timeline:CxTimelineEntry[]};
+
+const CX_KIND_ICON:Record<string,string>={phone:"✆",email:"✉",handle:"◎",visitor:"◌"};
+
+function CxProfilesTab({notify,onOpenThread}:{notify:(s:string)=>void;onOpenThread:(channel:CxChannel,threadKey:string)=>void}){
+  const token=useAuthToken();
+  const [profiles,setProfiles]=useState<CxProfileRow[]>([]);
+  const [loading,setLoading]=useState(true);
+  const [search,setSearch]=useState("");
+  const [selectedId,setSelectedId]=useState("");
+  const [detail,setDetail]=useState<CxProfileDetail|null>(null);
+  const [loadingDetail,setLoadingDetail]=useState(false);
+  const [mergeMode,setMergeMode]=useState(false);
+  const [mergeWith,setMergeWith]=useState("");
+  const [merging,setMerging]=useState(false);
+
+  const load=async(silent?:boolean)=>{
+    if(!token){setLoading(false);return}
+    if(!silent)setLoading(true);
+    try{
+      const response=await fetch(metaApi("/api/cx/profiles"),{headers:authHeaders(token)});
+      const data=await response.json() as {profiles?:CxProfileRow[]};
+      setProfiles(data.profiles||[]);
+    }catch{ if(!silent)notify("Could not load profiles") }
+    finally{ setLoading(false) }
+  };
+  useEffect(()=>{load()},[token]);
+  useEffect(()=>{
+    if(!selectedId||!token){setDetail(null);return}
+    setLoadingDetail(true);
+    fetch(metaApi(`/api/cx/profile?profileId=${encodeURIComponent(selectedId)}`),{headers:authHeaders(token)})
+      .then(r=>r.json()).then((d:CxProfileDetail)=>setDetail(d.profile?d:null))
+      .catch(()=>{}).finally(()=>setLoadingDetail(false));
+  },[selectedId,token]);
+
+  const runMerge=async()=>{
+    if(!token||!selectedId||!mergeWith||merging)return;
+    setMerging(true);
+    try{
+      // The selected profile survives; the one picked in the dropdown is absorbed into it.
+      const response=await fetch(metaApi("/api/profiles/merge"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},
+        body:JSON.stringify({sourceProfileId:mergeWith,targetProfileId:selectedId})});
+      const data=await response.json() as {ok?:boolean;movedConversations?:number;leadAction?:string;error?:string};
+      if(!response.ok||!data.ok)throw new Error(data.error||"Merge failed");
+      notify(`Merged — ${data.movedConversations||0} conversation${data.movedConversations===1?"":"s"} moved across`);
+      setMergeMode(false); setMergeWith("");
+      await load(true);
+      const refreshed=await fetch(metaApi(`/api/cx/profile?profileId=${encodeURIComponent(selectedId)}`),{headers:authHeaders(token)});
+      setDetail(await refreshed.json() as CxProfileDetail);
+    }catch(error){ notify(error instanceof Error?error.message:"Merge failed") }
+    finally{ setMerging(false) }
+  };
+
+  const q=search.trim().toLowerCase();
+  const visible=profiles.filter(p=>!q||`${p.name} ${p.company}`.toLowerCase().includes(q));
+
+  return <div className="cx-profiles">
+    <aside className="cx-profile-list">
+      <div className="cx-feed-top"><input className="cx-search" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search people…"/></div>
+      <div className="cx-feed-list">
+        {loading?<p className="empty-hint" style={{padding:"14px"}}>Loading…</p>
+        :!visible.length?<div className="cx-feed-empty"><span>◍</span>
+            <strong>{profiles.length?"Nobody matches":"No profiles yet"}</strong>
+            <small>{profiles.length?"Try a different search.":"A profile appears once a conversation captures a phone, email or handle. Import your history from the Leads tab."}</small></div>
+        :visible.map(p=>
+          <button key={p.id} className={`cx-feed-row${selectedId===p.id?" selected":""}${p.unread?" unread":""}`} onClick={()=>{setSelectedId(p.id);setMergeMode(false)}}>
+            <span className={`cx-avatar tone-${p.avatarTone}`}>{cxInitials(p.name)}</span>
+            <div className="cx-feed-body">
+              <div className="cx-feed-line"><strong>{p.name}</strong><time>{p.lastAt?conversationTime(p.lastAt):""}</time></div>
+              <div className="cx-feed-line"><small>{p.company||`${p.conversationCount} conversation${p.conversationCount===1?"":"s"}`}</small>{p.unread&&<i className="cx-dot"/>}</div>
+              <div className="cx-feed-tags">
+                {p.channels.map(c=><span key={c} className={`cx-chan ${c}`}>{CX_CHANNEL_META[c as CxChannel]?.glyph||"◌"}</span>)}
+                {p.conversationCount>1&&<span className="cx-badge stage-qualified">{p.conversationCount} threads</span>}
+                {p.lead&&<span className={`cx-badge stage-${p.lead.stage.toLowerCase().replace(/\W+/g,"-")}`}>{p.lead.stage}</span>}
+              </div>
+            </div>
+          </button>)}
+      </div>
+    </aside>
+
+    <section className="cx-profile-detail">
+      {!selectedId?<div className="cx-thread-empty"><span>◍</span><h3>Select a person</h3>
+          <p>Every channel they have ever used, and every message, in one place.</p></div>
+      :loadingDetail||!detail?<p className="empty-hint" style={{padding:"20px"}}>Loading…</p>
+      :<>
+        <header className="cx-profile-head">
+          <span className={`cx-avatar large tone-${detail.profile.avatarTone}`}>{cxInitials(detail.profile.name)}</span>
+          <div><strong>{detail.profile.name}</strong>
+            <small>{detail.profile.company||"—"} · {detail.conversations.length} conversation{detail.conversations.length===1?"":"s"} across {new Set(detail.conversations.map(c=>c.channel)).size} channel{new Set(detail.conversations.map(c=>c.channel)).size===1?"":"s"}</small></div>
+          <button className="secondary-btn" onClick={()=>setMergeMode(!mergeMode)}>{mergeMode?"Cancel":"Merge duplicate"}</button>
+        </header>
+
+        {mergeMode&&<div className="cx-merge-bar">
+          <div><strong>Merge another profile into {detail.profile.name}</strong>
+            <small>Their conversations, identities and lead move across. The absorbed profile is kept as a tombstone, never deleted, so old links keep working.</small></div>
+          <select value={mergeWith} onChange={e=>setMergeWith(e.target.value)}>
+            <option value="">Choose a profile…</option>
+            {profiles.filter(p=>p.id!==selectedId).map(p=><option key={p.id} value={p.id}>{p.name}{p.company?` · ${p.company}`:""}</option>)}
+          </select>
+          <button className="primary" disabled={!mergeWith||merging} onClick={runMerge}>{merging?"Merging…":"Merge"}</button>
+        </div>}
+
+        <div className="cx-profile-body">
+          <div className="cx-profile-main">
+            <h4>Unified timeline</h4>
+            {!detail.timeline.length?<p className="empty-hint">No messages yet.</p>
+            :<div className="cx-timeline">{detail.timeline.map((m,i)=>
+              <div key={i} className={`cx-bubble ${m.role==="user"?"visitor":m.role==="agent"?"agent":"ai"}`}>
+                <p>{m.content}</p>
+                <small><span className={`cx-chan ${m.channel}`}>{CX_CHANNEL_META[m.channel as CxChannel]?.glyph} {CX_CHANNEL_META[m.channel as CxChannel]?.label}</span>
+                  {" · "}{m.role==="user"?"Them":m.role==="agent"?"You":"✦ Assistant"}{" · "}{conversationTime(m.createdAt)}</small>
+              </div>)}
+            </div>}
+          </div>
+
+          <aside className="cx-profile-side">
+            <h4>Identities <i>{detail.identities.length}</i></h4>
+            <div className="cx-identity-list">
+              {!detail.identities.length&&<p className="empty-hint">None recorded yet.</p>}
+              {detail.identities.map(idn=>
+                <div key={idn.id} className="cx-identity">
+                  <span className="cx-field-icon">{CX_KIND_ICON[idn.kind]||"◌"}</span>
+                  <div><strong>{idn.kind==="visitor"?`${idn.value.slice(0,14)}…`:idn.value}</strong>
+                    <small>{idn.channel.replace("_"," ")}{idn.normalized!==idn.value?` · ${idn.normalized}`:""}</small></div>
+                  {idn.verified&&<b title="Verified — arrived over this channel">✓</b>}
+                </div>)}
+            </div>
+
+            <h4>Conversations <i>{detail.conversations.length}</i></h4>
+            <div className="cx-identity-list">
+              {detail.conversations.map(c=>
+                <button key={c.id} className="cx-conv-link" onClick={()=>onOpenThread(c.channel,c.threadKey)}>
+                  <span className={`cx-chan ${c.channel}`}>{CX_CHANNEL_META[c.channel]?.glyph}</span>
+                  <div><strong>{CX_CHANNEL_META[c.channel]?.label}</strong>
+                    <small>{c.messageCount} messages · {conversationTime(c.lastAt)}</small></div>
+                  {c.unread&&<i className="cx-dot"/>}
+                </button>)}
+            </div>
+          </aside>
+        </div>
+      </>}
+    </section>
+  </div>;
 }
 
 /* ---- Tab 2: leads (table + board) ------------------------------------------------------------- */

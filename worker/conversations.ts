@@ -657,6 +657,135 @@ async function setTakeover(request: Request, env: ConversationsEnv): Promise<Res
   return json(request, { ok: true, aiActive: Boolean(body.active) });
 }
 
+
+/* ------------------------------------------------------------------ profiles (hub view) */
+
+interface ProfileListRow {
+  id: string; full_name: string; company: string; avatar_tone: number; created_at: string;
+  identity_count: number; conversation_count: number; channels: string | null;
+  lead_id: string | null; stage: string | null; priority: string | null;
+  last_at: string | null; unread_count: number;
+}
+
+// The hub as the customer sees it: one row per person, with everything they have ever used to
+// reach the business folded in. Counting identities and conversations here rather than in the
+// client is what keeps the list one query instead of one-per-profile.
+async function listProfiles(request: Request, env: ConversationsEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  await ensureSchema(env.DB);
+  if (new URL(request.url).searchParams.get("sync") !== "0") await syncFeed(env.DB, session.workspaceId);
+
+  const rows = await env.DB.prepare(`SELECT p.id, p.full_name, p.company, p.avatar_tone, p.created_at,
+      (SELECT count(*) FROM crm_identities i WHERE i.workspace_id = p.workspace_id AND i.profile_id = p.id) identity_count,
+      (SELECT count(*) FROM crm_conversations c WHERE c.workspace_id = p.workspace_id AND c.person_id = p.id) conversation_count,
+      (SELECT group_concat(DISTINCT c.channel) FROM crm_conversations c WHERE c.workspace_id = p.workspace_id AND c.person_id = p.id) channels,
+      (SELECT max(c.last_at) FROM crm_conversations c WHERE c.workspace_id = p.workspace_id AND c.person_id = p.id) last_at,
+      (SELECT count(*) FROM crm_conversations c WHERE c.workspace_id = p.workspace_id AND c.person_id = p.id AND c.unread = 1) unread_count,
+      l.id lead_id, l.stage, l.priority
+    FROM crm_people p
+    LEFT JOIN crm_leads l ON l.person_id = p.id AND l.workspace_id = p.workspace_id
+    WHERE p.workspace_id = ? AND p.is_active = 1
+    ORDER BY last_at DESC NULLS LAST, p.created_at DESC LIMIT ?`)
+    .bind(session.workspaceId, FEED_LIMIT).all<ProfileListRow>();
+
+  return json(request, {
+    profiles: (rows.results || []).map((r) => ({
+      id: r.id, name: r.full_name || "Unnamed contact", company: r.company || "", avatarTone: r.avatar_tone || 0,
+      identityCount: r.identity_count, conversationCount: r.conversation_count,
+      channels: (r.channels || "").split(",").filter(Boolean),
+      lastAt: r.last_at || "", unread: r.unread_count > 0,
+      lead: r.lead_id ? { id: r.lead_id, stage: r.stage || "New", priority: r.priority || "" } : null,
+    })),
+  });
+}
+
+/**
+ * One profile, everything about them — including the merged timeline.
+ *
+ * This is the payoff of the hub-and-spoke model: messages from every channel interleaved in true
+ * chronological order and tagged with where each arrived, so a WhatsApp exchange and a web chat two
+ * days later read as one conversation with one person rather than two unrelated threads.
+ */
+async function getProfile(request: Request, env: ConversationsEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const profileId = (new URL(request.url).searchParams.get("profileId") || "").trim();
+  if (!profileId) return json(request, { error: "Missing profileId." }, 400);
+  await ensureSchema(env.DB);
+
+  const person = await env.DB.prepare(`SELECT id, full_name, company, phone, email, instagram_handle, avatar_tone, created_at, is_active, merged_into_id
+    FROM crm_people WHERE workspace_id = ? AND id = ?`)
+    .bind(session.workspaceId, profileId).first<{ id: string; full_name: string; company: string; phone: string; email: string; instagram_handle: string; avatar_tone: number; created_at: string; is_active: number; merged_into_id: string }>();
+  if (!person) return json(request, { error: "Profile not found." }, 404);
+
+  const [identities, conversations, lead] = await Promise.all([
+    env.DB.prepare(`SELECT id, channel, kind, identifier_value, normalized_value, is_verified, created_at
+      FROM crm_identities WHERE workspace_id = ? AND profile_id = ? ORDER BY created_at ASC`)
+      .bind(session.workspaceId, profileId).all<{ id: string; channel: string; kind: string; identifier_value: string; normalized_value: string; is_verified: number; created_at: string }>()
+      .catch(() => null),
+    env.DB.prepare(`SELECT id, channel, thread_key, last_message, last_at, message_count, unread, ai_active
+      FROM crm_conversations WHERE workspace_id = ? AND person_id = ? ORDER BY last_at DESC`)
+      .bind(session.workspaceId, profileId).all<{ id: string; channel: string; thread_key: string; last_message: string; last_at: string; message_count: number; unread: number; ai_active: number }>(),
+    env.DB.prepare(`SELECT id, stage, priority, segment, source, owner, next_followup FROM crm_leads
+      WHERE workspace_id = ? AND person_id = ?`).bind(session.workspaceId, profileId)
+      .first<{ id: string; stage: string; priority: string; segment: string; source: string; owner: string; next_followup: string }>(),
+  ]);
+
+  const threads = conversations.results || [];
+  const timeline: Array<{ channel: string; threadKey: string; role: string; content: string; createdAt: string }> = [];
+  // Bounded per thread rather than in total: a chatty web chat must not crowd out the WhatsApp
+  // exchange that actually matters, which is precisely what a global LIMIT would do.
+  const perThread = Math.max(20, Math.floor(MESSAGE_LIMIT / Math.max(1, threads.length)));
+  for (const thread of threads) {
+    if (thread.channel === "webchat") {
+      const rows = await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages
+        WHERE workspace_id = ? AND session_id = ? ORDER BY created_at DESC LIMIT ?`)
+        .bind(session.workspaceId, thread.thread_key, perThread).all<{ role: string; content: string; created_at: string }>();
+      for (const m of rows.results || []) timeline.push({ channel: "webchat", threadKey: thread.thread_key, role: m.role, content: m.content, createdAt: m.created_at });
+    } else if (thread.channel === "whatsapp") {
+      const rows = await env.DB.prepare(`SELECT direction, message_text, created_at FROM whatsapp_messages
+        WHERE workspace_id = ? AND wa_id = ? ORDER BY created_at DESC LIMIT ?`)
+        .bind(session.workspaceId, thread.thread_key, perThread).all<{ direction: string; message_text: string | null; created_at: string }>();
+      for (const m of rows.results || []) timeline.push({
+        channel: "whatsapp", threadKey: thread.thread_key,
+        role: m.direction === "inbound" ? "user" : "assistant",
+        content: m.message_text || "(attachment)", createdAt: m.created_at,
+      });
+    }
+  }
+  timeline.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+  return json(request, {
+    profile: {
+      id: person.id, name: person.full_name || "Unnamed contact", company: person.company || "",
+      avatarTone: person.avatar_tone || 0, createdAt: person.created_at,
+      isActive: person.is_active === 1, mergedIntoId: person.merged_into_id || "",
+    },
+    // Falls back to the legacy hub columns when the backfill has not run yet, so this view is
+    // never blank on a workspace that has not been migrated.
+    identities: (identities?.results || []).length
+      ? (identities!.results || []).map((r) => ({
+          id: r.id, channel: r.channel, kind: r.kind, value: r.identifier_value,
+          normalized: r.normalized_value, verified: r.is_verified === 1,
+        }))
+      : [
+          person.phone ? { id: "legacy-phone", channel: "whatsapp", kind: "phone", value: person.phone, normalized: person.phone, verified: false } : null,
+          person.email ? { id: "legacy-email", channel: "email", kind: "email", value: person.email, normalized: person.email, verified: false } : null,
+          person.instagram_handle ? { id: "legacy-ig", channel: "instagram", kind: "handle", value: person.instagram_handle, normalized: person.instagram_handle, verified: false } : null,
+        ].filter(Boolean),
+    conversations: threads.map((t) => ({
+      id: t.id, channel: t.channel, threadKey: t.thread_key, lastMessage: t.last_message,
+      lastAt: t.last_at, messageCount: t.message_count, unread: t.unread === 1, aiActive: t.ai_active === 1,
+    })),
+    lead: lead ? {
+      id: lead.id, stage: lead.stage || "New", priority: lead.priority || "", segment: lead.segment || "",
+      source: lead.source || "", owner: lead.owner || "", nextFollowup: lead.next_followup || "",
+    } : null,
+    timeline,
+  });
+}
+
 export async function handleConversationsRequest(request: Request, env: ConversationsEnv): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/cx/")) return null;
@@ -667,6 +796,8 @@ export async function handleConversationsRequest(request: Request, env: Conversa
   if (url.pathname === "/api/cx/conversations" && request.method === "GET") return listConversations(request, env);
   if (url.pathname === "/api/cx/messages" && request.method === "GET") return getMessages(request, env);
   if (url.pathname === "/api/cx/leads" && request.method === "GET") return listLeads(request, env);
+  if (url.pathname === "/api/cx/profiles" && request.method === "GET") return listProfiles(request, env);
+  if (url.pathname === "/api/cx/profile" && request.method === "GET") return getProfile(request, env);
   if (url.pathname === "/api/cx/qualify" && request.method === "POST") return qualify(request, env);
   if (url.pathname === "/api/cx/sync" && request.method === "GET") return sync(request, env);
   if (url.pathname === "/api/cx/takeover" && request.method === "POST") return setTakeover(request, env);
