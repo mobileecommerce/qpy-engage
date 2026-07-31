@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, Fragment, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import "./live-inbox.css";
 
 type Section = "Overview" | "Assistants" | "Channels" | "Conversations" | "Campaigns" | "Audiences" | "Automations" | "Flows" | "Knowledge" | "Analytics" | "Team" | "Settings";
@@ -1204,6 +1204,277 @@ function Inbox({conversations,setConversations,selected,setSelectedId,messages,d
   return <><PageHeader title="Unified inbox" description="Manage every customer conversation from one place." action={<div className="header-buttons"><button className="secondary-btn" onClick={()=>notify("Inbox refreshed")}>↻ Refresh</button><button className="primary" onClick={resolve}>{selected.status==="open"?"✓ Resolve":"Reopen"}</button></div>}/><div className="full-inbox"><aside className="inbox-list"><div className="inbox-tools"><input placeholder="Search conversations" value={query} onChange={e=>setQuery(e.target.value)}/><div>{["All","Open","Resolved"].map(x=><button className={filter===x?"active":""} onClick={()=>setFilter(x)} key={x}>{x}</button>)}</div></div><div className="conversation-list">{visible.map(c=><button key={c.id} className={selected.id===c.id?"selected":""} onClick={()=>setSelectedId(c.id)}><span className={`contact-avatar ${c.tone}`}>{c.initials}<i/></span><div><strong>{c.name}</strong><small>{c.preview}</small></div><span className="conv-meta"><small>{c.time}</small>{c.unread>0&&<b>{c.unread}</b>}</span></button>)}</div></aside><section className="chat-panel"><div className="chat-head"><div className="chat-person"><span className={`contact-avatar ${selected.tone}`}>{selected.initials}<i/></span><div><strong>{selected.name}</strong><small>WhatsApp • Online</small></div></div><div className="ai-state"><span className={aiActive?"pulse":"pulse off"}>✦</span><div><strong>{aiActive?"AI is handling":"You’re handling"}</strong><small>{aiActive?"Confident response":"Manual takeover"}</small></div><button onClick={()=>setAiActive(!aiActive)}>{aiActive?"Take over":"Hand to AI"}</button></div></div><div className="chat-body tall"><div className="today">Today</div>{messages.map((m,i)=><div key={i} className={`message ${m.from}`}><p>{m.text}</p><small>{m.from==="ai"&&"✦ AI • "}{m.from==="agent"&&"You • "}{m.time} {m.from!=="customer"&&"✓✓"}</small></div>)}</div><div className="composer"><div className="suggestion"><span>✦</span><p><strong>Suggested reply</strong> Ask if they need anything else</p><button onClick={()=>setDraft("Is there anything else I can help you with today?")}>Use</button></div><div className="input-row"><label className="attach-button" title="Attach file">＋<input type="file" onChange={e=>{const file=e.target.files?.[0];if(file){setDraft(`[Attachment: ${file.name}]`);notify("Attachment added")}}}/></label><input value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>e.key==="Enter"&&sendMessage()} placeholder="Type a message…"/><button title="Add emoji" onClick={()=>setDraft(`${draft} 😊`)}>☺</button><button className="send" onClick={sendMessage}>➤</button></div></div></section><aside className="customer-panel"><span className={`contact-avatar large ${selected.tone}`}>{selected.initials}</span><h3>{selected.name}</h3><small>Customer since March 2026</small><div className="details-list"><label>Phone<strong>{selected.phone}</strong></label><label>Email<strong>{selected.email}</strong></label><label>Status<strong className="status-text">{selected.status}</strong></label><label>Tags<div>{selected.tags.map(t=><span key={t}>{t}</span>)}</div></label></div>{selected.notes?.length?<div className="customer-notes">{selected.notes.map((note,i)=><p key={i}>“{note}”</p>)}</div>:null}<button className="secondary-btn" onClick={addNote}>＋ Add internal note</button></aside></div></>;
 }
 
+
+/* ---- Message template composer ---------------------------------------------------------------- */
+
+type TplButton={type:"QUICK_REPLY"|"URL"|"PHONE_NUMBER";text:string;url?:string;phone?:string};
+type TplDraft={id?:string;name:string;language:string;category:"MARKETING"|"UTILITY"|"AUTHENTICATION";
+  headerType:""|"TEXT"|"IMAGE"|"VIDEO"|"DOCUMENT";headerText:string;body:string;footer:string;
+  buttons:TplButton[];examples:string[];status?:string;rejectReason?:string;updatedAt?:string};
+type TplIssue={field:string;message:string};
+
+const TPL_LANGS=[["en_US","English (US)"],["en_GB","English (UK)"],["ar","Arabic"],["hi","Hindi"],["ur","Urdu"],["fr","French"]] as const;
+const TPL_STATUS_TONE:Record<string,string>={DRAFT:"grey",PENDING:"amber",APPROVED:"green",REJECTED:"red",IN_APPEAL:"amber",PAUSED:"amber"};
+const emptyTemplate=():TplDraft=>({name:"",language:"en_US",category:"MARKETING",headerType:"",
+  headerText:"",body:"",footer:"",buttons:[],examples:[]});
+
+const tplVariables=(text:string)=>[...new Set([...(text||"").matchAll(/\{\{\s*(\d+)\s*\}\}/g)].map(m=>Number(m[1])))].sort((a,b)=>a-b);
+
+/** Substitutes the sample values so the preview shows what a customer would actually receive. */
+function tplRender(text:string,examples:string[]):string{
+  return (text||"").replace(/\{\{\s*(\d+)\s*\}\}/g,(_,n)=>examples[Number(n)-1]||`{{${n}}}`);
+}
+
+function TemplateComposer({draft,setDraft,issues,onSave,onSubmit,onCancel,saving,submitting}:{
+  draft:TplDraft;setDraft:(d:TplDraft)=>void;issues:TplIssue[];onSave:()=>void;onSubmit:()=>void;
+  onCancel:()=>void;saving:boolean;submitting:boolean}){
+  const bodyRef=useRef<HTMLTextAreaElement|null>(null);
+  const vars=tplVariables(draft.body);
+  const issueFor=(field:string)=>issues.find(i=>i.field===field)?.message;
+  const locked=Boolean(draft.status&&draft.status!=="DRAFT"&&draft.status!=="REJECTED");
+
+  // Inserts the next sequential variable at the caret. Numbering is derived rather than typed
+  // because an out-of-order variable is one of the rejections Meta takes a day to report.
+  const insertVariable=()=>{
+    const next=vars.length?Math.max(...vars)+1:1;
+    const el=bodyRef.current;
+    const at=el?el.selectionStart:draft.body.length;
+    const body=`${draft.body.slice(0,at)}{{${next}}}${draft.body.slice(at)}`;
+    setDraft({...draft,body,examples:[...draft.examples,""]});
+    requestAnimationFrame(()=>{ if(el){ el.focus(); el.selectionStart=el.selectionEnd=at+`{{${next}}}`.length; } });
+  };
+  const setButton=(i:number,patch:Partial<TplButton>)=>setDraft({...draft,buttons:draft.buttons.map((b,j)=>j===i?{...b,...patch}:b)});
+
+  return <div className="tpl-composer">
+    <div className="tpl-form">
+      {locked&&<div className="tpl-locked">This template is <b>{draft.status}</b> on Meta and can no longer be edited. Duplicate it under a new name to make changes.</div>}
+      {draft.status==="REJECTED"&&draft.rejectReason&&<div className="tpl-rejected"><strong>Meta rejected this</strong><p>{draft.rejectReason}</p></div>}
+
+      <div className="tpl-row">
+        <label className="tpl-field"><small>Template name</small>
+          <input value={draft.name} disabled={locked} placeholder="summer_promo"
+            onChange={e=>setDraft({...draft,name:e.target.value})}/>
+          {issueFor("name")&&<em>{issueFor("name")}</em>}
+        </label>
+        <label className="tpl-field"><small>Language</small>
+          <select value={draft.language} disabled={locked} onChange={e=>setDraft({...draft,language:e.target.value})}>
+            {TPL_LANGS.map(([code,label])=><option key={code} value={code}>{label}</option>)}
+          </select></label>
+      </div>
+
+      <label className="tpl-field"><small>Category</small>
+        <div className="tpl-categories">
+          {(["MARKETING","UTILITY","AUTHENTICATION"] as const).map(c=>
+            <button key={c} type="button" disabled={locked} className={draft.category===c?"active":""}
+              onClick={()=>setDraft({...draft,category:c})}>{c[0]+c.slice(1).toLowerCase()}</button>)}
+        </div>
+        <em className="tpl-hint">Category decides how Meta bills each send, and it must match what the campaign is set to.</em>
+      </label>
+
+      <div className="tpl-row">
+        <label className="tpl-field"><small>Header</small>
+          <select value={draft.headerType} disabled={locked} onChange={e=>setDraft({...draft,headerType:e.target.value as TplDraft["headerType"]})}>
+            <option value="">No header</option><option value="TEXT">Text</option>
+            <option value="IMAGE">Image</option><option value="VIDEO">Video</option><option value="DOCUMENT">Document</option>
+          </select></label>
+        {draft.headerType==="TEXT"&&<label className="tpl-field grow"><small>Header text</small>
+          <input value={draft.headerText} disabled={locked} maxLength={60} placeholder="Order update"
+            onChange={e=>setDraft({...draft,headerText:e.target.value})}/>
+          {issueFor("header")&&<em>{issueFor("header")}</em>}</label>}
+      </div>
+
+      <label className="tpl-field"><small>Message body
+        <button type="button" className="tpl-insert" disabled={locked} onClick={insertVariable}>+ Add variable</button>
+        <i>{draft.body.length}/1024</i></small>
+        <textarea ref={bodyRef} rows={6} value={draft.body} disabled={locked}
+          placeholder="Hi {{1}}, your table is confirmed for {{2}}. See you soon!"
+          onChange={e=>setDraft({...draft,body:e.target.value})}/>
+        {issueFor("body")&&<em>{issueFor("body")}</em>}
+      </label>
+
+      {vars.length>0&&<div className="tpl-examples">
+        <small>Example values <i>Meta shows these to its reviewer</i></small>
+        {vars.map((n,i)=><div key={n} className="tpl-example-row">
+          <span>{`{{${n}}}`}</span>
+          <input value={draft.examples[i]||""} disabled={locked} placeholder="e.g. Praveen"
+            onChange={e=>{const examples=[...draft.examples]; examples[i]=e.target.value; setDraft({...draft,examples})}}/>
+        </div>)}
+        {issueFor("examples")&&<em>{issueFor("examples")}</em>}
+      </div>}
+
+      <label className="tpl-field"><small>Footer <i>optional, no variables</i></small>
+        <input value={draft.footer} disabled={locked} maxLength={60} placeholder="Qpy Engage"
+          onChange={e=>setDraft({...draft,footer:e.target.value})}/>
+        {issueFor("footer")&&<em>{issueFor("footer")}</em>}</label>
+
+      <div className="tpl-field"><small>Buttons <i>optional</i></small>
+        {draft.buttons.map((button,i)=><div key={i} className="tpl-button-row">
+          <select value={button.type} disabled={locked} onChange={e=>setButton(i,{type:e.target.value as TplButton["type"]})}>
+            <option value="QUICK_REPLY">Quick reply</option><option value="URL">Link</option><option value="PHONE_NUMBER">Call</option>
+          </select>
+          <input value={button.text} disabled={locked} maxLength={25} placeholder="Button label" onChange={e=>setButton(i,{text:e.target.value})}/>
+          {button.type==="URL"&&<input value={button.url||""} disabled={locked} placeholder="https://…" onChange={e=>setButton(i,{url:e.target.value})}/>}
+          {button.type==="PHONE_NUMBER"&&<input value={button.phone||""} disabled={locked} placeholder="+971…" onChange={e=>setButton(i,{phone:e.target.value})}/>}
+          <button type="button" className="seg-remove" disabled={locked} onClick={()=>setDraft({...draft,buttons:draft.buttons.filter((_,j)=>j!==i)})}>×</button>
+        </div>)}
+        {issueFor("buttons")&&<em>{issueFor("buttons")}</em>}
+        {draft.buttons.length<10&&!locked&&<button type="button" className="text-action"
+          onClick={()=>setDraft({...draft,buttons:[...draft.buttons,{type:"QUICK_REPLY",text:""}]})}>+ Add button</button>}
+      </div>
+
+      <div className="tpl-actions">
+        <button className="secondary-btn" onClick={onCancel}>Cancel</button>
+        <button className="secondary-btn" disabled={saving||locked||!draft.name.trim()} onClick={onSave}>{saving?"Saving…":"Save draft"}</button>
+        <button className="primary" disabled={submitting||locked||issues.length>0} onClick={onSubmit}
+          title={issues.length?"Fix the highlighted problems first":"Send to Meta for approval"}>
+          {submitting?"Submitting…":"Submit for approval"}</button>
+      </div>
+      {issues.length>0&&<p className="tpl-blocked">{issues.length} thing{issues.length===1?"":"s"} to fix before Meta will accept this.</p>}
+    </div>
+
+    {/* What the customer sees. Worth the space: every rule above exists to make this render properly. */}
+    <aside className="tpl-preview">
+      <small>Preview</small>
+      <div className="tpl-phone">
+        <div className="tpl-bubble">
+          {draft.headerType==="TEXT"&&draft.headerText&&<strong>{tplRender(draft.headerText,draft.examples)}</strong>}
+          {draft.headerType&&draft.headerType!=="TEXT"&&<div className="tpl-media">{draft.headerType[0]+draft.headerType.slice(1).toLowerCase()}</div>}
+          <p>{draft.body?tplRender(draft.body,draft.examples):<span className="tpl-placeholder">Your message will appear here…</span>}</p>
+          {draft.footer&&<small className="tpl-foot">{draft.footer}</small>}
+        </div>
+        {draft.buttons.length>0&&<div className="tpl-preview-buttons">
+          {draft.buttons.map((b,i)=><div key={i}>{b.type==="URL"?"↗ ":b.type==="PHONE_NUMBER"?"✆ ":""}{b.text||"Button"}</div>)}
+        </div>}
+      </div>
+    </aside>
+  </div>;
+}
+
+function TemplateLibrary({notify,onClose}:{notify:(s:string)=>void;onClose:()=>void}){
+  const token=useAuthToken();
+  const [drafts,setDrafts]=useState<TplDraft[]>([]);
+  const [loading,setLoading]=useState(true);
+  const [editing,setEditing]=useState<TplDraft|null>(null);
+  const [issues,setIssues]=useState<TplIssue[]>([]);
+  const [saving,setSaving]=useState(false);
+  const [submitting,setSubmitting]=useState(false);
+  const [refreshing,setRefreshing]=useState(false);
+
+  const load=async()=>{
+    if(!token){setLoading(false);return}
+    try{
+      const response=await fetch(metaApi("/api/templates"),{headers:authHeaders(token)});
+      setDrafts(((await response.json()) as {drafts?:TplDraft[]}).drafts||[]);
+    }catch{ notify("Could not load templates") }
+    finally{ setLoading(false) }
+  };
+  useEffect(()=>{load()},[token]);
+
+  // Validation runs server-side so the composer and the submit gate can never disagree about
+  // whether something is acceptable.
+  useEffect(()=>{
+    if(!editing||!token){setIssues([]);return}
+    const timer=setTimeout(async()=>{
+      try{
+        const response=await fetch(metaApi("/api/templates/validate"),{method:"POST",
+          headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify(editing)});
+        setIssues(((await response.json()) as {issues?:TplIssue[]}).issues||[]);
+      }catch{ /* keep the last known result rather than clearing the warnings */ }
+    },300);
+    return()=>clearTimeout(timer);
+  },[editing,token]);
+
+  const save=async()=>{
+    if(!editing||!token)return;
+    setSaving(true);
+    try{
+      const response=await fetch(metaApi("/api/templates"),{method:"POST",
+        headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify(editing)});
+      const data=await response.json() as {ok?:boolean;id?:string;error?:string};
+      if(!response.ok||!data.ok)throw new Error(data.error||"Could not save");
+      setEditing({...editing,id:data.id});
+      notify("Draft saved");
+      await load();
+    }catch(error){ notify(error instanceof Error?error.message:"Could not save") }
+    finally{ setSaving(false) }
+  };
+
+  const submit=async()=>{
+    if(!editing||!token)return;
+    setSubmitting(true);
+    try{
+      // Always save first: submitting reads from the stored row, so an unsaved edit would be
+      // silently left out of what Meta receives.
+      const saveResponse=await fetch(metaApi("/api/templates"),{method:"POST",
+        headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify(editing)});
+      const saved=await saveResponse.json() as {ok?:boolean;id?:string;error?:string};
+      if(!saveResponse.ok||!saved.ok)throw new Error(saved.error||"Could not save before submitting");
+
+      const response=await fetch(metaApi("/api/templates/submit"),{method:"POST",
+        headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({id:saved.id})});
+      const data=await response.json() as {ok?:boolean;status?:string;error?:string;issues?:TplIssue[]};
+      if(!response.ok||!data.ok){ if(data.issues)setIssues(data.issues); throw new Error(data.error||"Meta rejected the submission") }
+      notify(`Submitted — Meta says ${data.status}. Review usually takes minutes but can take a day.`);
+      setEditing(null);
+      await load();
+    }catch(error){ notify(error instanceof Error?error.message:"Could not submit") }
+    finally{ setSubmitting(false) }
+  };
+
+  const refresh=async()=>{
+    if(!token)return;
+    setRefreshing(true);
+    try{
+      const response=await fetch(metaApi("/api/templates/refresh"),{method:"POST",headers:authHeaders(token)});
+      const data=await response.json() as {ok?:boolean;updated?:number;error?:string};
+      if(!response.ok)throw new Error(data.error||"Could not refresh");
+      notify(data.updated?`Updated ${data.updated} template${data.updated===1?"":"s"} from Meta`:"No approval changes yet");
+      await load();
+    }catch(error){ notify(error instanceof Error?error.message:"Could not refresh") }
+    finally{ setRefreshing(false) }
+  };
+
+  const remove=async(id?:string)=>{
+    if(!id||!token)return;
+    try{
+      await fetch(metaApi("/api/templates/delete"),{method:"POST",
+        headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({id})});
+      await load();
+    }catch{ notify("Could not delete") }
+  };
+
+  return <div className="cx-drawer-scrim" onClick={editing?undefined:onClose}>
+    <div className="tpl-modal" onClick={e=>e.stopPropagation()} role="dialog" aria-label="Message templates">
+      <header>
+        <div><strong>Message templates</strong>
+          <small>WhatsApp requires Meta to approve any message sent outside a 24-hour conversation window.</small></div>
+        {!editing&&<button className="secondary-btn" disabled={refreshing} onClick={refresh}>{refreshing?"…":"↻ Check status"}</button>}
+        {!editing&&<button className="primary" onClick={()=>setEditing(emptyTemplate())}>+ New template</button>}
+        <button className="cx-icon-btn" onClick={onClose} aria-label="Close">×</button>
+      </header>
+
+      {editing
+        ? <TemplateComposer draft={editing} setDraft={setEditing} issues={issues} onSave={save} onSubmit={submit}
+            onCancel={()=>setEditing(null)} saving={saving} submitting={submitting}/>
+        : loading?<p className="empty-hint" style={{padding:"20px"}}>Loading…</p>
+        : !drafts.length?<div className="empty-state"><span>◈</span><h3>No templates yet</h3>
+            <p>Write one here, submit it to Meta, and use it in a campaign once approved.</p>
+            <button className="primary" onClick={()=>setEditing(emptyTemplate())}>Create your first template</button></div>
+        : <div className="tpl-list">{drafts.map(d=>
+            <div key={d.id} className="tpl-item">
+              <div className="tpl-item-main">
+                <strong>{d.name}<span className={`tpl-status ${TPL_STATUS_TONE[d.status||"DRAFT"]||"grey"}`}>{d.status||"DRAFT"}</span></strong>
+                <small>{d.category[0]+d.category.slice(1).toLowerCase()} · {d.language} · {(d.body||"").slice(0,64)||"Empty"}</small>
+                {d.status==="REJECTED"&&d.rejectReason&&<em className="tpl-item-reason">{d.rejectReason}</em>}
+              </div>
+              <button className="secondary-btn" onClick={()=>setEditing(d)}>{d.status&&d.status!=="DRAFT"&&d.status!=="REJECTED"?"View":"Edit"}</button>
+              <button className="cx-icon-btn" onClick={()=>remove(d.id)} aria-label="Delete">×</button>
+            </div>)}
+          </div>}
+    </div>
+  </div>;
+}
+
 function Campaigns({notify,onManageAudiences}:{notify:(s:string)=>void;onManageAudiences:()=>void}){
   const [campaigns,setCampaigns]=useStoredState("qpy-engage-campaigns",initialCampaigns);
   const [creating,setCreating]=useState(false);
@@ -1228,6 +1499,27 @@ function Campaigns({notify,onManageAudiences}:{notify:(s:string)=>void;onManageA
   useEffect(loadCreditsAndPricing,[token]);
   const emptyForm=()=>({name:"",channel:"WhatsApp" as "WhatsApp"|"Instagram",objective:"Promote products",audience:"",audienceId:"",message:"Hi {{first_name}} 👋\n\nDiscover Atelier Home’s newest collection, created for effortless summer living. Shop now and enjoy complimentary UAE delivery.",mediaUrl:"",mediaName:"",cta:"Shop collection",url:"https://atelierhome.com/collections/summer",templateName:"",templateLanguage:"en_US",scheduleType:"Now",date:"2026-07-19",time:"10:00",recurrence:"One-time",excludeRecent:false,messageCategory:"Marketing" as "Marketing"|"Utility"});
   const [form,setForm]=useState(emptyForm());
+  const [showTemplates,setShowTemplates]=useState(false);
+  const [approvedTemplates,setApprovedTemplates]=useState<{name:string;language:string;category:string}[]>([]);
+  const campaignToken=useAuthToken();
+  // Only approved templates are offered. Meta refuses anything else, so listing drafts here would
+  // just be a way to pick something that cannot be sent.
+  const loadApproved=useCallback(async()=>{
+    if(!campaignToken)return;
+    try{
+      const [metaRes,localRes]=await Promise.all([
+        fetch(metaApi("/api/wa/templates"),{headers:authHeaders(campaignToken)}),
+        fetch(metaApi("/api/templates"),{headers:authHeaders(campaignToken)}),
+      ]);
+      const synced=((await metaRes.json()) as {templates?:{name:string;language:string;category:string;status:string}[]}).templates||[];
+      const local=((await localRes.json()) as {drafts?:{name:string;language:string;category:string;status?:string}[]}).drafts||[];
+      const byKey=new Map<string,{name:string;language:string;category:string}>();
+      for(const t of synced) if(t.status==="APPROVED") byKey.set(`${t.name}:${t.language}`,{name:t.name,language:t.language,category:t.category});
+      for(const d of local) if(d.status==="APPROVED") byKey.set(`${d.name}:${d.language}`,{name:d.name,language:d.language,category:d.category});
+      setApprovedTemplates([...byKey.values()]);
+    }catch{ /* leave the picker empty rather than blocking the campaign form */ }
+  },[campaignToken]);
+  useEffect(()=>{loadApproved()},[loadApproved]);
   const selectedAudience=realAudiences.find(a=>a.id===form.audienceId)||null;
   const baseRecipients=selectedAudience?selectedAudience.consentedCount:0;
   const recipients=Math.round(baseRecipients*(form.excludeRecent?0.92:1));
@@ -1273,10 +1565,10 @@ function Campaigns({notify,onManageAudiences}:{notify:(s:string)=>void;onManageA
   const duplicate=(campaign:Campaign)=>{const defaults=emptyForm();setCampaigns([{...campaign,objective:campaign.objective||defaults.objective,message:campaign.message||defaults.message,mediaUrl:campaign.mediaUrl||"",mediaName:campaign.mediaName||"",cta:campaign.cta||defaults.cta,url:campaign.url||defaults.url,templateName:campaign.templateName||"",templateLanguage:campaign.templateLanguage||defaults.templateLanguage,scheduleType:campaign.scheduleType||defaults.scheduleType,date:campaign.date||defaults.date,time:campaign.time||defaults.time,recurrence:campaign.recurrence||defaults.recurrence,excludeRecent:Boolean(campaign.excludeRecent),messageCategory:campaign.messageCategory||defaults.messageCategory,estimatedCost:campaign.estimatedCost||0,id:Date.now(),name:`${campaign.name} copy`,status:"Draft",schedule:"Not scheduled",delivered:"—",clicks:"—"},...campaigns]);notify("Campaign duplicated")};
   const remove=(id:number)=>{if(window.confirm("Delete this campaign?")){setCampaigns(campaigns.filter(c=>c.id!==id));notify("Campaign deleted")}};
   const visibleCampaigns=campaigns.filter(c=>c.name.toLowerCase().includes(query.toLowerCase())&&(channelFilter==="All channels"||c.channel===channelFilter)&&(statusFilter==="All statuses"||c.status===statusFilter));
-  if(creating)return <><PageHeader eyebrow="Campaign builder" title={form.name||(editingId?"Edit campaign":"Create campaign")} description="Build a targeted broadcast for opted-in WhatsApp or Instagram customers." action={<button className="secondary-btn" onClick={saveExit}>Save & exit</button>}/><div className="campaign-builder"><div className="campaign-steps">{["Details","Audience","Message","Schedule","Review"].map((label,i)=><button key={label} className={i<step?"done":i===step?"active":""} onClick={()=>i<=step&&setStep(i)}><span>{i<step?"✓":i+1}</span><div><strong>{label}</strong><small>{i<step?"Complete":i===step?"In progress":"Not started"}</small></div></button>)}</div><section className="campaign-stage">
+  if(creating)return <>{showTemplates&&<TemplateLibrary notify={notify} onClose={()=>{setShowTemplates(false);loadApproved()}}/>}<PageHeader eyebrow="Campaign builder" title={form.name||(editingId?"Edit campaign":"Create campaign")} description="Build a targeted broadcast for opted-in WhatsApp or Instagram customers." action={<button className="secondary-btn" onClick={saveExit}>Save & exit</button>}/><div className="campaign-builder"><div className="campaign-steps">{["Details","Audience","Message","Schedule","Review"].map((label,i)=><button key={label} className={i<step?"done":i===step?"active":""} onClick={()=>i<=step&&setStep(i)}><span>{i<step?"✓":i+1}</span><div><strong>{label}</strong><small>{i<step?"Complete":i===step?"In progress":"Not started"}</small></div></button>)}</div><section className="campaign-stage">
     {step===0&&<><WizardTitle n="01" title="Campaign details" text="Name the campaign and choose where the message will be delivered."/><div className="form-grid"><label>Campaign name<input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="e.g. Summer collection launch"/></label><label>Campaign objective<select value={form.objective} onChange={e=>setForm({...form,objective:e.target.value})}><option>Promote products</option><option>Announce an event</option><option>Recover customers</option><option>Share an update</option></select></label></div><div className="form-grid"><label>Message category<select value={form.messageCategory} onChange={e=>setForm({...form,messageCategory:e.target.value as "Marketing"|"Utility"})}><option value="Marketing">Marketing</option><option value="Utility">Utility</option></select><small>Meta bills these differently — Marketing for promotions, Utility for order/account updates.</small></label></div><div className="campaign-channel-choice">{[["WhatsApp","◉","Template or session broadcast","wa"],["Instagram","◎","Direct message campaign","ig"]].map(([name,icon,copy,tone])=><button key={name} className={form.channel===name?"selected":""} onClick={()=>setForm({...form,channel:name as "WhatsApp"|"Instagram"})}><span className={tone}>{icon}</span><div><strong>{name}</strong><small>{copy}</small></div><b>{form.channel===name?"✓":""}</b></button>)}</div><div className="wizard-actions"><span>Only customers with valid marketing consent can receive campaigns.</span><button className="primary" disabled={!form.name.trim()} onClick={()=>setStep(1)}>Choose audience →</button></div></>}
     {step===1&&<><WizardTitle n="02" title="Select an audience" text="Choose a real audience of consented contacts to send this campaign to."/><div className="audience-layout"><div className="audience-segments"><h3>Your audiences</h3>{!realAudiences.length&&<p className="empty-hint">No audiences yet.</p>}{realAudiences.map(a=><button key={a.id} className={form.audienceId===a.id?"selected":""} onClick={()=>setForm({...form,audienceId:a.id,audience:a.name})}><span>♟</span><div><strong>{a.name}</strong><small>{a.consentedCount.toLocaleString()} consented of {a.memberCount.toLocaleString()} total</small></div><b>{a.consentedCount.toLocaleString()}</b></button>)}</div><div className="audience-import"><span>♟</span><h3>Manage audiences</h3><p>Create audiences and add or import real contacts from the Audiences section.</p><button className="secondary-btn" onClick={onManageAudiences}>Go to Audiences →</button></div></div><label className="exclude-recent-toggle"><input type="checkbox" checked={form.excludeRecent} onChange={e=>setForm({...form,excludeRecent:e.target.checked})}/><div><strong>Exclude customers messaged in the last 24 hours</strong><small>Avoid double-messaging people already contacted by another campaign or automation</small></div></label><div className="audience-total"><span>Estimated audience</span><strong>{recipients.toLocaleString()}</strong><small>eligible (consented) recipients</small></div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(0)}>Back</button><button className="primary" disabled={!recipients} onClick={()=>setStep(2)}>Compose message →</button></div></>}
-    {step===2&&<><WizardTitle n="03" title="Compose your message" text={`Create the ${form.channel} message your selected audience will receive.`}/><div className="composer-layout"><div className="campaign-compose"><div className="campaign-media"><div><strong>Header image</strong><small>JPG, PNG, or WebP • maximum 5 MB</small></div>{form.mediaUrl?<div className="campaign-media-ready"><img src={form.mediaUrl} alt="Campaign attachment preview"/><div><strong>{form.mediaName}</strong><small>Ready to send</small></div><button onClick={()=>setForm({...form,mediaUrl:"",mediaName:""})}>Remove</button></div>:<label className="campaign-image-upload">＋ Add image<input type="file" accept="image/jpeg,image/png,image/webp" onChange={e=>uploadCampaignImage(e.target.files?.[0])}/></label>}</div><label>Message<textarea value={form.message} onChange={e=>setForm({...form,message:e.target.value})}/><small>{form.message.length}/1024 characters</small></label><div className="variable-buttons"><span>Personalize:</span>{["{{first_name}}","{{company}}","{{city}}"].map(v=><button key={v} onClick={()=>setForm({...form,message:`${form.message} ${v}`})}>{v}</button>)}</div><div className="form-grid"><label>Button text<input value={form.cta} onChange={e=>setForm({...form,cta:e.target.value})}/></label><label>Destination URL<input value={form.url} onChange={e=>setForm({...form,url:e.target.value})}/></label></div>{form.channel==="WhatsApp"&&<div className="form-grid"><label>Meta template name<input value={form.templateName} onChange={e=>setForm({...form,templateName:e.target.value})} placeholder="e.g. summer_launch_promo"/><small>Must exactly match a template already approved in Meta Business Manager.</small></label><label>Template language code<input value={form.templateLanguage} onChange={e=>setForm({...form,templateLanguage:e.target.value})} placeholder="en_US"/></label></div>}<div className="template-note">ⓘ {form.channel==="WhatsApp"?"Sending immediately calls the real WhatsApp Cloud API using the template above — component/variable substitution isn't supported yet, so the template must work with no parameters. The message text below is used only for the preview and for Instagram/Scheduled sends.":"WhatsApp campaigns outside the 24-hour service window require an approved Meta message template."}</div><button className="secondary-btn" disabled={!form.message.trim()} onClick={sendTest}>▶ Send test to myself</button></div><div className={`campaign-preview ${form.channel.toLowerCase()}`}><div className="preview-phone"><div className="preview-head"><span>{form.channel==="WhatsApp"?"WA":"IG"}</span><div><strong>Atelier Home</strong><small>{form.channel} business</small></div></div><div className={`preview-body ${form.mediaUrl?"with-media":""}`}>{form.mediaUrl&&<img className="campaign-preview-image" src={form.mediaUrl} alt="Campaign message attachment"/>}<div>{form.message.replace("{{first_name}}","Aisha")}</div><span className="preview-cta">{form.cta||"Learn more"}</span><small>10:24 ✓✓</small></div></div></div></div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(1)}>Back</button><button className="primary" disabled={!form.message.trim()} onClick={()=>setStep(3)}>Set delivery →</button></div></>}
+    {step===2&&<><WizardTitle n="03" title="Compose your message" text={`Create the ${form.channel} message your selected audience will receive.`}/><div className="composer-layout"><div className="campaign-compose"><div className="campaign-media"><div><strong>Header image</strong><small>JPG, PNG, or WebP • maximum 5 MB</small></div>{form.mediaUrl?<div className="campaign-media-ready"><img src={form.mediaUrl} alt="Campaign attachment preview"/><div><strong>{form.mediaName}</strong><small>Ready to send</small></div><button onClick={()=>setForm({...form,mediaUrl:"",mediaName:""})}>Remove</button></div>:<label className="campaign-image-upload">＋ Add image<input type="file" accept="image/jpeg,image/png,image/webp" onChange={e=>uploadCampaignImage(e.target.files?.[0])}/></label>}</div><label>Message<textarea value={form.message} onChange={e=>setForm({...form,message:e.target.value})}/><small>{form.message.length}/1024 characters</small></label><div className="variable-buttons"><span>Personalize:</span>{["{{first_name}}","{{company}}","{{city}}"].map(v=><button key={v} onClick={()=>setForm({...form,message:`${form.message} ${v}`})}>{v}</button>)}</div><div className="form-grid"><label>Button text<input value={form.cta} onChange={e=>setForm({...form,cta:e.target.value})}/></label><label>Destination URL<input value={form.url} onChange={e=>setForm({...form,url:e.target.value})}/></label></div>{form.channel==="WhatsApp"&&<div className="form-grid"><label>Meta template<div className="tpl-picker"><select value={form.templateName} onChange={e=>{const picked=approvedTemplates.find(t=>t.name===e.target.value); setForm({...form,templateName:e.target.value,templateLanguage:picked?picked.language:form.templateLanguage,messageCategory:picked&&picked.category==="UTILITY"?"Utility":picked?"Marketing":form.messageCategory})}}><option value="">{approvedTemplates.length?"Choose an approved template…":"No approved templates yet"}</option>{approvedTemplates.map(t=><option key={`${t.name}:${t.language}`} value={t.name}>{t.name} · {t.language}</option>)}</select><button type="button" className="secondary-btn" onClick={()=>setShowTemplates(true)}>Manage</button></div><small>{approvedTemplates.length?"Language and category follow the template, because Meta requires them to match.":"Create one and submit it for approval — Meta must approve a template before it can be sent."}</small></label><label>Template language code<input value={form.templateLanguage} onChange={e=>setForm({...form,templateLanguage:e.target.value})} placeholder="en_US"/></label></div>}<div className="template-note">ⓘ {form.channel==="WhatsApp"?"Sending immediately calls the real WhatsApp Cloud API using the template above — component/variable substitution isn't supported yet, so the template must work with no parameters. The message text below is used only for the preview and for Instagram/Scheduled sends.":"WhatsApp campaigns outside the 24-hour service window require an approved Meta message template."}</div><button className="secondary-btn" disabled={!form.message.trim()} onClick={sendTest}>▶ Send test to myself</button></div><div className={`campaign-preview ${form.channel.toLowerCase()}`}><div className="preview-phone"><div className="preview-head"><span>{form.channel==="WhatsApp"?"WA":"IG"}</span><div><strong>Atelier Home</strong><small>{form.channel} business</small></div></div><div className={`preview-body ${form.mediaUrl?"with-media":""}`}>{form.mediaUrl&&<img className="campaign-preview-image" src={form.mediaUrl} alt="Campaign message attachment"/>}<div>{form.message.replace("{{first_name}}","Aisha")}</div><span className="preview-cta">{form.cta||"Learn more"}</span><small>10:24 ✓✓</small></div></div></div></div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(1)}>Back</button><button className="primary" disabled={!form.message.trim()} onClick={()=>setStep(3)}>Set delivery →</button></div></>}
     {step===3&&<><WizardTitle n="04" title="Choose delivery time" text="Send immediately or schedule for the best time in your audience’s time zone."/><div className="schedule-options">{[["Now","Send immediately","Start sending as soon as the campaign is launched."],["Schedule","Choose date and time","Qpy Engage will queue the campaign for your selected time."],["Optimized","Best time per contact","Deliver when each customer is most likely to engage."]].map(([value,title,copy])=><label className={form.scheduleType===value?"selected":""} key={value}><input type="radio" name="schedule" checked={form.scheduleType===value} onChange={()=>setForm({...form,scheduleType:value})}/><span>{value==="Now"?"➤":value==="Schedule"?"◷":"✦"}</span><div><strong>{title}</strong><small>{copy}</small></div></label>)}</div>{form.scheduleType==="Schedule"&&<div className="schedule-fields"><label>Delivery date<input type="date" value={form.date} onChange={e=>setForm({...form,date:e.target.value})}/></label><label>Delivery time<input type="time" value={form.time} onChange={e=>setForm({...form,time:e.target.value})}/></label><label>Time zone<select><option>Asia/Dubai (GST)</option><option>Recipient local time</option></select></label></div>}<label className="full-label">Repeat<select value={form.recurrence} onChange={e=>setForm({...form,recurrence:e.target.value})}><option>One-time</option><option>Daily</option><option>Weekly</option><option>Monthly</option></select><small>Recurring campaigns resend to the same audience on this schedule until paused.</small></label><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(2)}>Back</button><button className="primary" onClick={()=>setStep(4)}>Review campaign →</button></div></>}
     {step===4&&<><WizardTitle n="05" title="Review and launch" text="Confirm the channel, audience, message, and delivery settings."/><div className="campaign-review"><div><span>◈</span><label>Campaign<strong>{form.name}</strong><small>{form.objective}</small></label><button onClick={()=>setStep(0)}>Edit</button></div><div><span>♙</span><label>Audience<strong>{form.audience}</strong><small>{recipients.toLocaleString()} opted-in recipients</small></label><button onClick={()=>setStep(1)}>Edit</button></div><div><span>{form.channel==="WhatsApp"?"◉":"◎"}</span><label>Channel<strong>{form.channel}</strong><small>{form.mediaName?`Image: ${form.mediaName} • `:""}{form.message.slice(0,72)}…</small></label><button onClick={()=>setStep(2)}>Edit</button></div><div><span>◷</span><label>Delivery<strong>{form.scheduleType==="Now"?"Send immediately":form.scheduleType==="Schedule"?`${form.date} at ${form.time}`:"Optimized delivery"}{form.recurrence!=="One-time"?` • Repeats ${form.recurrence.toLowerCase()}`:""}</strong><small>Asia/Dubai time zone{form.excludeRecent?" • excluding recently-messaged customers":""}</small></label><button onClick={()=>setStep(3)}>Edit</button></div><div><span>◈</span><label>Message credits needed<strong>{form.messageCategory} • {recipients.toLocaleString()} messages</strong><small>You have {(balances[form.messageCategory]||0).toLocaleString()} {form.messageCategory} credits available (est. value ${estimatedCost.toFixed(2)} at ${(pricing[form.messageCategory]||0).toFixed(3)}/message)</small></label><button onClick={()=>setStep(0)}>Edit</button></div></div>{form.scheduleType==="Now"&&!hasEnoughBalance&&<div className="meta-error">⚠ Not enough {form.messageCategory} message credits — you need {recipients.toLocaleString()} but have {(balances[form.messageCategory]||0).toLocaleString()}. Buy more in Settings → Credits.</div>}{form.scheduleType==="Now"&&form.channel==="WhatsApp"&&!form.templateName.trim()&&<div className="meta-error">⚠ Enter the Meta-approved template name on the Message step to send for real.</div>}{form.scheduleType==="Now"&&form.channel==="WhatsApp"&&!form.audienceId&&<div className="meta-error">⚠ Select a real audience on the Audience step.</div>}<div className="compliance-check"><span>✓</span><div><strong>Audience and message compliance</strong><p>By launching, you confirm these recipients have consented to marketing and that this message follows Meta’s commerce and messaging policies.</p></div></div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(3)}>Back</button><button className="primary" disabled={launching||(form.scheduleType==="Now"&&!hasEnoughBalance)||(form.scheduleType==="Now"&&form.channel==="WhatsApp"&&(!form.templateName.trim()||!form.audienceId))} onClick={()=>launch(form.scheduleType==="Now"?"Sent":"Scheduled")}>{launching?"Sending…":form.scheduleType==="Now"?`Send to ${recipients.toLocaleString()} recipients`:"Schedule campaign"}</button></div></>}
   </section></div></>;

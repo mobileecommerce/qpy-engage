@@ -14,6 +14,7 @@ import { handleConversationsRequest, type ConversationsEnv } from "./conversatio
 import { handleIdentityRequest, type IdentityEnv } from "./identity";
 import { handleSegmentsRequest, type SegmentsEnv } from "./segments";
 import { handleWaFlowsRequest, type WaFlowsEnv } from "./waflows";
+import { handleTemplatesRequest, type TemplatesEnv } from "./templates";
 import { handleAdminRequest, type AdminEnv } from "./admin";
 import { handleCreditsRequest, type CreditsEnv } from "./credits";
 import { handleContactsRequest, type ContactsEnv } from "./contacts";
@@ -25,7 +26,7 @@ import { handleAutomationsRequest, resumeDueAutomationWaits, type AutomationsEnv
 import { sendWhatsAppText, type ConnectionRow } from "./meta";
 import { json, corsPreflight, allowedOrigin } from "./shared";
 
-interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv, LeadsEnv, CrmEnv, IntegrationsEnv, FollowupsEnv, ConversationsEnv, IdentityEnv, SegmentsEnv, WaFlowsEnv, AdminEnv, CreditsEnv, ContactsEnv, CampaignsEnv, OtpEnv, ItemsEnv, FlowsEnv, AutomationsEnv {
+interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv, LeadsEnv, CrmEnv, IntegrationsEnv, FollowupsEnv, ConversationsEnv, IdentityEnv, SegmentsEnv, WaFlowsEnv, TemplatesEnv, AdminEnv, CreditsEnv, ContactsEnv, CampaignsEnv, OtpEnv, ItemsEnv, FlowsEnv, AutomationsEnv {
   ASSETS: Fetcher;
   DB: D1Database;
   ANTHROPIC_API_KEY?: string;
@@ -88,6 +89,9 @@ const worker = {
 
     const waFlowsResponse = await handleWaFlowsRequest(request, env);
     if (waFlowsResponse) return waFlowsResponse;
+
+    const templatesResponse = await handleTemplatesRequest(request, env);
+    if (templatesResponse) return templatesResponse;
 
     const adminResponse = await handleAdminRequest(request, env);
     if (adminResponse) return adminResponse;
