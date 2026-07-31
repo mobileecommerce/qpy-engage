@@ -3730,34 +3730,35 @@ function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer,onFullLead}:{co
       </div>
     </div>
 
+    {/* The score is about what THIS conversation shows, independent of whether contact details
+        have been captured yet — an anonymous visitor with strong buying intent is exactly who this
+        is meant to surface, so scoring must never be gated on qualification. */}
+    {threadKey&&(score!==null
+      ? <div className="cx-score">
+          <div className="cx-score-head">
+            <b>{score}</b><span className={`cx-score-pill ${cxScoreBand(score).cls}`}>{cxScoreBand(score).label}</span>
+            {reasons.length>0&&<button className="cx-score-toggle" onClick={()=>setReasonsOpen(!reasonsOpen)}>{reasonsOpen?"Hide reasoning":"Why?"}</button>}
+          </div>
+          {reasonsOpen&&reasons.length>0&&<ul className="cx-reasons">{reasons.map((r,i)=><li key={i}>{r}</li>)}</ul>}
+          <button className="cx-score-again" disabled={scoring} onClick={runScore}>{scoring?"Reading the conversation…":"↻ Score again"}</button>
+        </div>
+      : <div className="cx-score unscored">
+          <div><strong>AI Lead Score</strong><small>Reads what this customer actually asked for and rates the intent.</small></div>
+          <button className="secondary-btn" disabled={scoring} onClick={runScore}>{scoring?"Reading…":"Score lead"}</button>
+        </div>)}
+
     {!summary
       ? <div className="cx-unqualified">
           <strong>Not a lead yet</strong>
           <p>This is still an anonymous conversation. Once a phone number, email or Instagram handle is captured, a lead is created automatically and appears in the Leads tab.</p>
         </div>
-      : <>
-        {score!==null
-          ? <div className="cx-score">
-              <div className="cx-score-head">
-                <b>{score}</b><span className={`cx-score-pill ${cxScoreBand(score).cls}`}>{cxScoreBand(score).label}</span>
-                {reasons.length>0&&<button className="cx-score-toggle" onClick={()=>setReasonsOpen(!reasonsOpen)}>{reasonsOpen?"Hide reasoning":"Why?"}</button>}
-              </div>
-              {reasonsOpen&&reasons.length>0&&<ul className="cx-reasons">{reasons.map((r,i)=><li key={i}>{r}</li>)}</ul>}
-              <button className="cx-score-again" disabled={scoring} onClick={runScore}>{scoring?"Reading the conversation…":"↻ Score again"}</button>
-            </div>
-          : <div className="cx-score unscored">
-              <div><strong>AI Lead Score</strong><small>Reads what this customer actually asked for and rates the intent.</small></div>
-              <button className="secondary-btn" disabled={scoring} onClick={runScore}>{scoring?"Reading…":"Score lead"}</button>
-            </div>}
-
-        <div className="cx-fields">
+      : <div className="cx-fields">
           <label className="cx-field"><small>Status</small>
             <select value={summary.stage} onChange={e=>saveLead(summary.id,{stage:e.target.value})}>{CX_STAGES.map(o=><option key={o}>{o}</option>)}</select></label>
           {field("Priority",summary.priority,CX_PRIORITIES,"priority")}
           {field("Segment",summary.segment,CX_SEGMENTS,"segment")}
           {field("Source",summary.source,CX_SOURCES,"source")}
-        </div>
-      </>}
+        </div>}
 
     <CxAccordion title="Labels" count={labels.length} defaultOpen>
       <div className="cx-labels">{labels.map(l=><span key={l} className={`crm-chip tone-${labelTone(l)}`}>{l}
