@@ -1,5 +1,6 @@
 import { callClaude, json, corsPreflight, allowedOrigin, type ChatMessage } from "./shared";
 import { requireSession, type AuthEnv } from "./auth";
+import { resolveIdentity, resolveTombstone, absorbProfile, type IdentityChannel, type ResolutionTier } from "./identity";
 
 export interface ConversationsEnv extends AuthEnv {
   DB: D1Database;
@@ -196,26 +197,60 @@ async function recordEvent(db: D1Database, workspaceId: string, kind: string, en
 // appears. Calling it again with the same details is a no-op, which is what keeps it duplicate-free.
 export async function qualifyConversation(
   db: D1Database, workspaceId: string, channel: Channel, threadKey: string, hints: IdentityHints,
-): Promise<{ personId: string; leadId: string } | null> {
+): Promise<{ personId: string; leadId: string; tier?: ResolutionTier } | null> {
   if (!hasQualifyingInfo(hints)) return null;
-  const person = await resolvePerson(db, workspaceId, hints);
-  if (!person) return null;
 
+  // Every identifier this capture carried goes through the waterfall, strongest first. Running the
+  // phone before the email matters: a phone is the identifier a WhatsApp thread is already keyed
+  // on, so leading with it is what lets a web chat visitor collapse into an existing WhatsApp
+  // customer instead of opening a second record for someone already in the pipeline.
+  const attempts: Array<{ channel: IdentityChannel; raw: string }> = [];
+  if (hints.phone) attempts.push({ channel: channel === "whatsapp" ? "whatsapp" : "manual", raw: hints.phone });
+  if (hints.email) attempts.push({ channel: "email", raw: hints.email });
+  if (hints.instagramHandle) attempts.push({ channel: "instagram", raw: hints.instagramHandle });
+
+  let personId = "";
+  let tier: ResolutionTier | undefined;
+  for (const attempt of attempts) {
+    const resolved = await resolveIdentity(db, workspaceId, attempt.channel, attempt.raw, {
+      name: hints.name,
+      company: hints.company,
+      // Only a web chat thread carries a visitor token; for WhatsApp the thread key IS the phone.
+      visitorId: channel === "webchat" ? threadKey : undefined,
+      verified: true,
+    });
+    if (!resolved) continue;
+    if (!personId) { personId = resolved.profileId; tier = resolved.tier; }
+    // A later identifier resolving to a different existing profile means this capture just proved
+    // the two are the same human — exactly the deterministic evidence a merge is allowed to act on.
+    else if (resolved.profileId !== personId) {
+      await absorbProfile(db, workspaceId, resolved.profileId, personId, "deterministic:shared-capture");
+    }
+  }
+  if (!personId) {
+    // Every identifier normalised to nothing usable — fall back rather than drop the capture.
+    const person = await resolvePerson(db, workspaceId, hints);
+    if (!person) return null;
+    personId = person.id;
+  }
+  personId = await resolveTombstone(db, workspaceId, personId);
+
+  const displayName = (hints.name || "").trim();
   await db.prepare(`UPDATE crm_conversations SET person_id = ?, display_name = CASE WHEN ? != '' THEN ? ELSE display_name END,
     updated_at = CURRENT_TIMESTAMP WHERE workspace_id = ? AND channel = ? AND thread_key = ?`)
-    .bind(person.id, person.full_name, person.full_name, workspaceId, channel, threadKey).run();
+    .bind(personId, displayName, displayName, workspaceId, channel, threadKey).run();
 
   const existingLead = await db.prepare(`SELECT id FROM crm_leads WHERE workspace_id = ? AND person_id = ?`)
-    .bind(workspaceId, person.id).first<{ id: string }>();
+    .bind(workspaceId, personId).first<{ id: string }>();
   let leadId = existingLead?.id || "";
   if (!leadId) {
     leadId = newId("lead");
     const sourceFor: Record<Channel, string> = { whatsapp: "WhatsApp", instagram: "Instagram", webchat: "Website" };
     await db.prepare(`INSERT INTO crm_leads (id, workspace_id, person_id, stage, source) VALUES (?, ?, ?, 'New', ?)`)
-      .bind(leadId, workspaceId, person.id, sourceFor[channel] || "Website").run();
+      .bind(leadId, workspaceId, personId, sourceFor[channel] || "Website").run();
   }
   await recordEvent(db, workspaceId, "lead", leadId);
-  return { personId: person.id, leadId };
+  return { personId, leadId, tier };
 }
 
 /* ------------------------------------------------------------------ feed projection */
