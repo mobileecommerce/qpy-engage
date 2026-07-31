@@ -196,15 +196,23 @@ async function scoreContact(request: Request, env: CrmEnv): Promise<Response> {
   const session = await requireSession(request, env);
   if (session instanceof Response) return session;
   if (!env.ANTHROPIC_API_KEY) return json(request, { error: "AI is not configured for this workspace." }, 503);
-  const body = await request.json() as { sessionId?: string };
+  const body = await request.json() as { sessionId?: string; channel?: string };
   const sessionId = (body.sessionId || "").trim();
   if (!sessionId) return json(request, { error: "Missing sessionId." }, 400);
   await ensureCrmSchema(env.DB);
 
-  const history = await env.DB.prepare(`SELECT role, content FROM widget_messages
-    WHERE workspace_id = ? AND session_id = ? ORDER BY created_at DESC LIMIT ?`)
-    .bind(session.workspaceId, sessionId, SCORING_TURNS).all<{ role: string; content: string }>();
-  const turns = (history.results || []).reverse();
+  // Each channel keeps its own message table, so intent has to be read from whichever one owns this
+  // thread. Defaulting to web chat kept WhatsApp conversations permanently unscoreable.
+  const channel = (body.channel || "webchat").trim();
+  const history = channel === "whatsapp"
+    ? await env.DB.prepare(`SELECT direction AS role, message_text AS content FROM whatsapp_messages
+        WHERE workspace_id = ? AND wa_id = ? AND message_text IS NOT NULL ORDER BY created_at DESC LIMIT ?`)
+        .bind(session.workspaceId, sessionId, SCORING_TURNS).all<{ role: string; content: string }>()
+    : await env.DB.prepare(`SELECT role, content FROM widget_messages
+        WHERE workspace_id = ? AND session_id = ? ORDER BY created_at DESC LIMIT ?`)
+        .bind(session.workspaceId, sessionId, SCORING_TURNS).all<{ role: string; content: string }>();
+  const turns = (history.results || []).reverse()
+    .map((t) => ({ role: t.role === "inbound" ? "user" : t.role === "outbound" ? "assistant" : t.role, content: t.content }));
   if (!turns.length) return json(request, { error: "This conversation has no messages to score yet." }, 400);
 
   const transcript = turns

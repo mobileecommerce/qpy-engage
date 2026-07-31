@@ -3651,15 +3651,34 @@ function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer,onFullLead}:{co
   const person=lead?.person||conversation?.person||null;
   const summary=lead||conversation?.lead||null;
   const threadKey=lead?.conversation?.threadKey||conversation?.threadKey||"";
-  const score=lead?.score??conversation?.lead?.score??null;
-  const reasons=lead?.scoreReasons||conversation?.lead?.scoreReasons||[];
+  const storedScore=lead?.score??conversation?.lead?.score??null;
+  const storedReasons=lead?.scoreReasons||conversation?.lead?.scoreReasons||[];
+  const channel=lead?.conversation?.channel||conversation?.channel||"webchat";
   const [reasonsOpen,setReasonsOpen]=useState(true);
+  const [liveScore,setLiveScore]=useState<{score:number;reasons:string[]}|null>(null);
+  const [scoring,setScoring]=useState(false);
   const [notes,setNotes]=useState<WidgetNote[]>([]);
   const [noteDraft,setNoteDraft]=useState("");
   const [labels,setLabels]=useState<string[]>([]);
   const [labelDraft,setLabelDraft]=useState("");
   const [documents,setDocuments]=useState<UploadedDocument[]>([]);
 
+  // A score just computed here should show immediately, without waiting for the feed to be
+  // re-fetched and the whole panel re-rendered from server state.
+  const score=liveScore?liveScore.score:storedScore;
+  const reasons=liveScore?liveScore.reasons:storedReasons;
+  useEffect(()=>{setLiveScore(null)},[threadKey]);
+  const runScore=async()=>{
+    if(!threadKey||!token||scoring)return;
+    setScoring(true);
+    try{
+      const response=await fetch(metaApi("/api/crm/score"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({sessionId:threadKey,channel})});
+      const data=await response.json() as {contact?:CrmContact;error?:string};
+      if(!response.ok||!data.contact)throw new Error(data.error||"Could not score this conversation");
+      setLiveScore({score:data.contact.score??0,reasons:data.contact.scoreReasons||[]});
+    }catch(error){ notify(error instanceof Error?error.message:"Could not score this conversation") }
+    finally{ setScoring(false) }
+  };
   useEffect(()=>{
     if(!threadKey||!token){setNotes([]);setLabels([]);setDocuments([]);return}
     fetch(metaApi(`/api/widget/notes?sessionId=${encodeURIComponent(threadKey)}`),{headers:authHeaders(token)})
@@ -3717,13 +3736,19 @@ function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer,onFullLead}:{co
           <p>This is still an anonymous conversation. Once a phone number, email or Instagram handle is captured, a lead is created automatically and appears in the Leads tab.</p>
         </div>
       : <>
-        {score!==null&&<div className="cx-score">
-          <div className="cx-score-head">
-            <b>{score}</b><span className={`cx-score-pill ${cxScoreBand(score).cls}`}>{cxScoreBand(score).label}</span>
-            {reasons.length>0&&<button className="cx-score-toggle" onClick={()=>setReasonsOpen(!reasonsOpen)}>{reasonsOpen?"Hide reasoning":"Why?"}</button>}
-          </div>
-          {reasonsOpen&&reasons.length>0&&<ul className="cx-reasons">{reasons.map((r,i)=><li key={i}>{r}</li>)}</ul>}
-        </div>}
+        {score!==null
+          ? <div className="cx-score">
+              <div className="cx-score-head">
+                <b>{score}</b><span className={`cx-score-pill ${cxScoreBand(score).cls}`}>{cxScoreBand(score).label}</span>
+                {reasons.length>0&&<button className="cx-score-toggle" onClick={()=>setReasonsOpen(!reasonsOpen)}>{reasonsOpen?"Hide reasoning":"Why?"}</button>}
+              </div>
+              {reasonsOpen&&reasons.length>0&&<ul className="cx-reasons">{reasons.map((r,i)=><li key={i}>{r}</li>)}</ul>}
+              <button className="cx-score-again" disabled={scoring} onClick={runScore}>{scoring?"Reading the conversation…":"↻ Score again"}</button>
+            </div>
+          : <div className="cx-score unscored">
+              <div><strong>AI Lead Score</strong><small>Reads what this customer actually asked for and rates the intent.</small></div>
+              <button className="secondary-btn" disabled={scoring} onClick={runScore}>{scoring?"Reading…":"Score lead"}</button>
+            </div>}
 
         <div className="cx-fields">
           <label className="cx-field"><small>Status</small>
