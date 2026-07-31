@@ -322,7 +322,7 @@ function Workspace({session,onLogout,isSuperadmin,isImpersonating,onExitImperson
     section === "Channels" ? <Channels step={channelStep} setStep={setChannelStep} connected={connected} setConnected={setConnected} workspaceId={session.workspace.id} workspaceName={session.workspace.name} notify={notify}/> :
     section === "Conversations" ? <ConversationsModule notify={notify}/> :
     section === "Campaigns" ? <Campaigns notify={notify} onManageAudiences={()=>go("Audiences")}/> :
-    section === "Audiences" ? <Audiences notify={notify}/> :
+    section === "Audiences" ? <DynamicAudiences notify={notify}/> :
     section === "Automations" ? <AutomationBuilder notify={notify}/> :
     section === "Flows" ? <Flows notify={notify}/> :
     section === "Knowledge" ? <Knowledge sources={sources} setSources={setSources} onAdd={()=>setModal("source")} notify={notify}/> :
@@ -1288,6 +1288,201 @@ function Campaigns({notify,onManageAudiences}:{notify:(s:string)=>void;onManageA
 
 type Contact={id:string;name:string;phone:string;consent:boolean;tags:string[];createdAt:string;updatedAt:string};
 type AudienceSummary={id:string;name:string;createdAt:string;memberCount:number;consentedCount:number};
+
+
+/* ---- Dynamic segment rule builder ------------------------------------------------------------- */
+
+type SegRule={field:string;op:string;value:string};
+type SegGroup={match:"all"|"any";rules:SegRule[]};
+type SegFilter={match:"all"|"any";groups:SegGroup[]};
+type SegFieldMeta={field:string;label:string;ops:string[];options?:string[];input?:string};
+
+const SEG_OP_LABEL:Record<string,string>={is:"is",is_not:"is not",gte:"is at least",lte:"is at most",
+  contains:"contains",has:"has",not_has:"does not have",within_days:"the last N days"};
+const SEG_CHANNEL_LABEL:Record<string,string>={whatsapp:"WhatsApp",instagram:"Instagram",webchat:"Web chat",email:"Email"};
+const SEG_VALUE_LABEL=(field:string,value:string)=>
+  field==="channel"?(SEG_CHANNEL_LABEL[value]||value)
+  :field==="opt_in"?(value==="in"?"Reachable":"Not reachable"):value;
+
+const emptyFilter=():SegFilter=>({match:"all",groups:[{match:"all",rules:[{field:"lead_stage",op:"is",value:"New"}]}]});
+
+function RuleBuilder({filter,setFilter,fields,count,counting}:{filter:SegFilter;setFilter:(f:SegFilter)=>void;
+  fields:SegFieldMeta[];count:number|null;counting:boolean}){
+  const metaFor=(field:string)=>fields.find(f=>f.field===field);
+  const patch=(gi:number,ri:number,next:Partial<SegRule>)=>setFilter({...filter,
+    groups:filter.groups.map((g,i)=>i!==gi?g:{...g,rules:g.rules.map((r,j)=>j!==ri?r:{...r,...next})})});
+  // Changing the field invalidates the operator and value, so both are reset to that field's
+  // first legal option rather than left pointing at something the parser would discard.
+  const changeField=(gi:number,ri:number,field:string)=>{
+    const meta=metaFor(field);
+    patch(gi,ri,{field,op:meta?.ops[0]||"is",value:meta?.options?.[0]||""});
+  };
+  const addRule=(gi:number)=>setFilter({...filter,groups:filter.groups.map((g,i)=>i!==gi?g:{...g,rules:[...g.rules,{field:"lead_stage",op:"is",value:"New"}]})});
+  const removeRule=(gi:number,ri:number)=>setFilter({...filter,groups:filter.groups
+    .map((g,i)=>i!==gi?g:{...g,rules:g.rules.filter((_,j)=>j!==ri)}).filter(g=>g.rules.length)});
+  const addGroup=()=>setFilter({...filter,groups:[...filter.groups,{match:"all",rules:[{field:"channel",op:"has",value:"whatsapp"}]}]});
+
+  return <div className="seg-builder">
+    <div className="seg-head">
+      <div>
+        <strong>Who is in this audience?</strong>
+        <small>Rules are checked every time the audience is used, so it stays current on its own.</small>
+      </div>
+      <span className={`seg-count${counting?" counting":""}`}>
+        {counting?"Counting…":count===null?"—":`Matching profiles: ${count.toLocaleString()}`}
+      </span>
+    </div>
+
+    {filter.groups.map((group,gi)=><div key={gi} className="seg-group">
+      {gi>0&&<div className="seg-joiner">
+        <button className={filter.match==="all"?"active":""} onClick={()=>setFilter({...filter,match:"all"})}>AND</button>
+        <button className={filter.match==="any"?"active":""} onClick={()=>setFilter({...filter,match:"any"})}>OR</button>
+      </div>}
+      <div className="seg-group-head">
+        <span>Match</span>
+        <select value={group.match} onChange={e=>setFilter({...filter,groups:filter.groups.map((g,i)=>i!==gi?g:{...g,match:e.target.value as "all"|"any"})})}>
+          <option value="all">all of</option><option value="any">any of</option>
+        </select>
+        <span>these rules</span>
+      </div>
+      {group.rules.map((rule,ri)=>{
+        const meta=metaFor(rule.field);
+        return <div key={ri} className="seg-rule">
+          <select value={rule.field} onChange={e=>changeField(gi,ri,e.target.value)}>
+            {fields.map(f=><option key={f.field} value={f.field}>{f.label}</option>)}
+          </select>
+          <select value={rule.op} onChange={e=>patch(gi,ri,{op:e.target.value})}>
+            {(meta?.ops||["is"]).map(o=><option key={o} value={o}>{SEG_OP_LABEL[o]||o}</option>)}
+          </select>
+          {meta?.options
+            ? <select value={rule.value} onChange={e=>patch(gi,ri,{value:e.target.value})}>
+                {meta.options.map(o=><option key={o} value={o}>{SEG_VALUE_LABEL(rule.field,o)}</option>)}
+              </select>
+            : <input type={meta?.input==="number"?"number":"text"} value={rule.value}
+                onChange={e=>patch(gi,ri,{value:e.target.value})}
+                placeholder={meta?.input==="number"?"0":"Type a value…"}/>}
+          <button className="seg-remove" onClick={()=>removeRule(gi,ri)} aria-label="Remove rule">×</button>
+        </div>;
+      })}
+      <button className="text-action" onClick={()=>addRule(gi)}>+ Add rule</button>
+    </div>)}
+
+    <button className="secondary-btn seg-add-group" onClick={addGroup}>+ Add rule group</button>
+  </div>;
+}
+
+function DynamicAudiences({notify}:{notify:(s:string)=>void}){
+  const token=useAuthToken();
+  const [fields,setFields]=useState<SegFieldMeta[]>([]);
+  const [audiences,setAudiences]=useState<{id:string;name:string;isDynamic:boolean;filter:SegFilter|null;count:number}[]>([]);
+  const [loading,setLoading]=useState(true);
+  const [editing,setEditing]=useState<{id:string;name:string;filter:SegFilter}|null>(null);
+  const [count,setCount]=useState<number|null>(null);
+  const [counting,setCounting]=useState(false);
+  const [saving,setSaving]=useState(false);
+  const [channelCheck,setChannelCheck]=useState<{id:string;channel:string;matched:number;reachable:number;optedOut:number;noId:number}|null>(null);
+
+  const load=async()=>{
+    if(!token){setLoading(false);return}
+    try{
+      const [fieldRes,audRes]=await Promise.all([
+        fetch(metaApi("/api/segments/fields"),{headers:authHeaders(token)}),
+        fetch(metaApi("/api/segments/audiences"),{headers:authHeaders(token)}),
+      ]);
+      setFields(((await fieldRes.json()) as {fields?:SegFieldMeta[]}).fields||[]);
+      setAudiences(((await audRes.json()) as {audiences?:typeof audiences}).audiences||[]);
+    }catch{ notify("Could not load audiences") }
+    finally{ setLoading(false) }
+  };
+  useEffect(()=>{load()},[token]);
+
+  // Debounced so dragging through a dropdown does not fire a query per keystroke; 400ms is long
+  // enough to coalesce typing and short enough that the badge still feels live.
+  useEffect(()=>{
+    if(!editing||!token){setCount(null);return}
+    setCounting(true);
+    const timer=setTimeout(async()=>{
+      try{
+        const response=await fetch(metaApi("/api/segments/preview"),{method:"POST",
+          headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({filter:editing.filter})});
+        const data=await response.json() as {count?:number;valid?:boolean};
+        setCount(data.valid?(data.count??0):null);
+      }catch{ setCount(null) }
+      finally{ setCounting(false) }
+    },400);
+    return()=>clearTimeout(timer);
+  },[editing?.filter,token]);
+
+  const save=async()=>{
+    if(!editing||!token||saving)return;
+    setSaving(true);
+    try{
+      const response=await fetch(metaApi("/api/segments/audiences"),{method:"POST",
+        headers:{"content-type":"application/json",...authHeaders(token)},
+        body:JSON.stringify({id:editing.id||undefined,name:editing.name,isDynamic:true,filter:editing.filter})});
+      const data=await response.json() as {ok?:boolean;error?:string};
+      if(!response.ok||!data.ok)throw new Error(data.error||"Could not save");
+      notify("Audience saved");
+      setEditing(null);
+      await load();
+    }catch(error){ notify(error instanceof Error?error.message:"Could not save") }
+    finally{ setSaving(false) }
+  };
+
+  const checkChannel=async(audienceId:string,channel:string)=>{
+    if(!token)return;
+    try{
+      const response=await fetch(metaApi("/api/segments/channel-preview"),{method:"POST",
+        headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({audienceId,channel})});
+      const d=await response.json() as {matched?:number;reachable?:number;excludedOptedOut?:number;excludedNoIdentifier?:number;error?:string};
+      if(!response.ok)throw new Error(d.error||"Could not check");
+      setChannelCheck({id:audienceId,channel,matched:d.matched??0,reachable:d.reachable??0,optedOut:d.excludedOptedOut??0,noId:d.excludedNoIdentifier??0});
+    }catch(error){ notify(error instanceof Error?error.message:"Could not check reach") }
+  };
+
+  if(editing)return <>
+    <PageHeader title={editing.id?"Edit audience":"New dynamic audience"}
+      description="Describe who belongs, and the audience keeps itself up to date."
+      action={<div className="seg-actions">
+        <button className="secondary-btn" onClick={()=>setEditing(null)}>Cancel</button>
+        <button className="primary" disabled={saving||!editing.name.trim()} onClick={save}>{saving?"Saving…":"Save audience"}</button>
+      </div>}/>
+    <div className="data-card seg-card">
+      <label className="seg-name">Audience name
+        <input value={editing.name} onChange={e=>setEditing({...editing,name:e.target.value})} placeholder="e.g. Hot leads on WhatsApp"/>
+      </label>
+      <RuleBuilder filter={editing.filter} setFilter={f=>setEditing({...editing,filter:f})}
+        fields={fields} count={count} counting={counting}/>
+    </div>
+  </>;
+
+  return <>
+    <PageHeader title="Audiences" description="Static lists and dynamic segments that keep themselves current."
+      action={<button className="primary" onClick={()=>setEditing({id:"",name:"",filter:emptyFilter()})}>+ New dynamic audience</button>}/>
+    {loading?<p className="empty-hint">Loading…</p>
+    :!audiences.length?<div className="empty-state"><span>♟</span><h3>No audiences yet</h3>
+        <p>A dynamic audience is a set of rules — hot leads reachable on WhatsApp, say — that re-evaluates every time you use it, so a broadcast never goes to a stale list.</p>
+        <button className="primary" onClick={()=>setEditing({id:"",name:"",filter:emptyFilter()})}>Create your first audience</button></div>
+    :<div className="seg-list">{audiences.map(a=>
+      <div key={a.id} className="seg-item">
+        <div className="seg-item-main">
+          <strong>{a.name}{a.isDynamic&&<span className="seg-tag">Dynamic</span>}</strong>
+          <small>{a.count.toLocaleString()} {a.count===1?"profile":"profiles"}{a.isDynamic&&a.filter?` · ${a.filter.groups.reduce((n,g)=>n+g.rules.length,0)} rule${a.filter.groups.reduce((n,g)=>n+g.rules.length,0)===1?"":"s"}`:" · static list"}</small>
+          {channelCheck?.id===a.id&&<div className="seg-reach">
+            <b>{channelCheck.reachable}</b> of {channelCheck.matched} reachable on {SEG_CHANNEL_LABEL[channelCheck.channel]}
+            {channelCheck.optedOut>0&&<span> · {channelCheck.optedOut} opted out</span>}
+            {channelCheck.noId>0&&<span> · {channelCheck.noId} no {channelCheck.channel==="whatsapp"?"number":"identifier"}</span>}
+          </div>}
+        </div>
+        <select defaultValue="" onChange={e=>{if(e.target.value)checkChannel(a.id,e.target.value)}}>
+          <option value="">Check reach…</option>
+          {Object.entries(SEG_CHANNEL_LABEL).map(([k,v])=><option key={k} value={k}>{v}</option>)}
+        </select>
+        {a.isDynamic&&a.filter&&<button className="secondary-btn" onClick={()=>setEditing({id:a.id,name:a.name,filter:a.filter!})}>Edit rules</button>}
+      </div>)}
+    </div>}
+  </>;
+}
 
 function Audiences({notify}:{notify:(s:string)=>void}){
   const token=useAuthToken();

@@ -1,4 +1,5 @@
 import { requireSession, type AuthEnv } from "./auth";
+import { resolveForChannel, parseFilter } from "./segments";
 import { json, corsPreflight, allowedOrigin } from "./shared";
 import { decryptToken, graphVersion, metaError, hmacHex, type MetaEnv, type ConnectionRow } from "./meta";
 import { MESSAGE_CATEGORIES, deductMessageBalance, incrementSentCount } from "./messageBalance";
@@ -29,13 +30,31 @@ async function sendCampaign(request: Request, env: CampaignsEnv): Promise<Respon
   const connection = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(session.workspaceId).first<ConnectionRow>();
   if (!connection) return json(request, { error: "Connect WhatsApp Business in Channels before sending a real campaign." }, 409);
 
-  const audience = await env.DB.prepare("SELECT id FROM audiences WHERE id = ? AND workspace_id = ?").bind(audienceId, session.workspaceId).first();
+  const audience = await env.DB.prepare("SELECT id, name, is_dynamic, filter_rules FROM audiences WHERE id = ? AND workspace_id = ?")
+    .bind(audienceId, session.workspaceId).first<{ id: string; name: string; is_dynamic: number; filter_rules: string }>();
   if (!audience) return json(request, { error: "Audience not found." }, 404);
-  const membersResult = await env.DB.prepare(`SELECT c.phone as phone FROM contacts c JOIN audience_members am ON am.contact_id = c.id WHERE am.audience_id = ? AND c.consent = 1`)
-    .bind(audienceId).all<{ phone: string }>();
-  const recipients = (membersResult.results || []).map((r) => r.phone).filter(Boolean);
-  if (!recipients.length) return json(request, { error: "This audience has no consented contacts to send to." }, 400);
-  if (recipients.length > MAX_SEND_RECIPIENTS) return json(request, { error: `This audience has ${recipients.length.toLocaleString()} consented contacts — real sends are currently capped at ${MAX_SEND_RECIPIENTS} recipients per campaign.` }, 400);
+
+  // Channel compliance is applied here rather than in the UI, because the UI is advisory and this
+  // is the only path that actually spends message credits. A dynamic audience is re-evaluated at
+  // this moment, so a segment built last week sends to who qualifies today.
+  const resolution = await resolveForChannel(
+    env.DB, session.workspaceId,
+    audience.is_dynamic === 1 ? parseFilter(audience.filter_rules) : null,
+    audienceId, "whatsapp",
+  );
+  const recipients = resolution.reachable.map((r) => r.identifier).filter(Boolean);
+  if (!recipients.length) {
+    // Say which of the two reasons applies: "nobody matched" and "nobody consented" need
+    // completely different fixes, and one error message for both would send the operator hunting.
+    const detail = resolution.matched === 0
+      ? "No profiles currently match this audience."
+      : `${resolution.matched} profile${resolution.matched === 1 ? "" : "s"} match, but none can be messaged on WhatsApp`
+        + (resolution.excludedOptedOut ? ` — ${resolution.excludedOptedOut} opted out` : "")
+        + (resolution.excludedNoIdentifier ? `${resolution.excludedOptedOut ? " and" : " —"} ${resolution.excludedNoIdentifier} have no usable number` : "")
+        + ".";
+    return json(request, { error: detail }, 400);
+  }
+  if (recipients.length > MAX_SEND_RECIPIENTS) return json(request, { error: `This audience has ${recipients.length.toLocaleString()} reachable contacts — real sends are currently capped at ${MAX_SEND_RECIPIENTS} recipients per campaign.` }, 400);
 
   const token = await decryptToken(connection.token_ciphertext, connection.token_iv, env.META_TOKEN_ENCRYPTION_KEY);
   const proof = await hmacHex(env.META_APP_SECRET, token);
@@ -62,7 +81,10 @@ async function sendCampaign(request: Request, env: CampaignsEnv): Promise<Respon
     await incrementSentCount(env.DB, session.workspaceId, messageCategory, sent).catch(() => {});
   }
 
-  return json(request, { sent, failed, total: recipients.length, deliveredPercent: Math.round((sent / recipients.length) * 1000) / 10, errors, balances });
+  return json(request, { sent, failed, total: recipients.length,
+    deliveredPercent: Math.round((sent / recipients.length) * 1000) / 10, errors, balances,
+    targeting: { matched: resolution.matched, reachable: recipients.length,
+      excludedOptedOut: resolution.excludedOptedOut, excludedNoIdentifier: resolution.excludedNoIdentifier } });
 }
 
 export async function handleCampaignsRequest(request: Request, env: CampaignsEnv): Promise<Response | null> {
