@@ -1,5 +1,6 @@
 import { requireSession, type AuthEnv } from "./auth";
 import { resolveForChannel, parseFilter } from "./segments";
+import { validateTemplate } from "./waflows";
 import { json, corsPreflight, allowedOrigin } from "./shared";
 import { decryptToken, graphVersion, metaError, hmacHex, type MetaEnv, type ConnectionRow } from "./meta";
 import { MESSAGE_CATEGORIES, deductMessageBalance, incrementSentCount } from "./messageBalance";
@@ -29,6 +30,12 @@ async function sendCampaign(request: Request, env: CampaignsEnv): Promise<Respon
 
   const connection = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(session.workspaceId).first<ConnectionRow>();
   if (!connection) return json(request, { error: "Connect WhatsApp Business in Channels before sending a real campaign." }, 409);
+
+  // Checked before a single credit is spent. Meta would reject an unapproved template per message,
+  // so the difference between validating here and finding out from the API is the whole campaign's
+  // worth of failed attempts.
+  const templateCheck = await validateTemplate(env.DB, session.workspaceId, templateName, templateLanguage, messageCategory);
+  if (!templateCheck.ok) return json(request, { error: templateCheck.reason || "This template cannot be sent." }, 400);
 
   const audience = await env.DB.prepare("SELECT id, name, is_dynamic, filter_rules FROM audiences WHERE id = ? AND workspace_id = ?")
     .bind(audienceId, session.workspaceId).first<{ id: string; name: string; is_dynamic: number; filter_rules: string }>();

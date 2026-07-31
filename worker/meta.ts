@@ -5,7 +5,8 @@ import { runAutomations, continueAfterUpload, type RunCtx } from "./automations"
 import { loadSession } from "./automation-session";
 import { toGraph } from "./automation-graph";
 import { saveDocument, validateAgainstSpec, receivedKeysAtNode, MAX_UPLOAD_BYTES } from "./documents";
-import { isAiPaused } from "./conversations";
+import { isAiPaused, qualifyConversation } from "./conversations";
+import { recordFlowReply } from "./waflows";
 
 const DEFAULT_GRAPH_VERSION = "v25.0";
 
@@ -414,6 +415,23 @@ async function verifyWebhook(request: Request, env: MetaEnv): Promise<Response> 
   return new Response("Webhook verification failed", { status: 403 });
 }
 
+
+// Flow field names are author-defined, so identity is recognised by what a key means rather than an
+// exact match — the same approach the AI Action capture path uses.
+function flowHints(fields: Record<string, string>): { name?: string; phone?: string; email?: string; company?: string } {
+  const found: { name?: string; phone?: string; email?: string; company?: string } = {};
+  for (const [rawKey, rawValue] of Object.entries(fields)) {
+    const value = String(rawValue ?? "").trim();
+    if (!value) continue;
+    const key = rawKey.toLowerCase().replace(/[^a-z]/g, "");
+    if (!found.email && (key.includes("email") || /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value))) found.email = value;
+    else if (!found.phone && (key.includes("phone") || key.includes("mobile") || key.includes("contact"))) found.phone = value;
+    else if (!found.company && (key.includes("company") || key.includes("business") || key.includes("organisation"))) found.company = value;
+    else if (!found.name && (key === "name" || key.includes("fullname") || key.includes("firstname"))) found.name = value;
+  }
+  return found;
+}
+
 async function receiveWebhook(request: Request, env: MetaEnv): Promise<Response> {
   if (!env.META_APP_SECRET) return new Response("Webhook secret unavailable", { status: 503 });
   const raw = new Uint8Array(await request.arrayBuffer());
@@ -436,6 +454,7 @@ async function receiveWebhook(request: Request, env: MetaEnv): Promise<Response>
   // are the only ones eligible to trigger an automation, so a webhook retry never double-replies.
   const toAutomate: Array<{ connection: ConnectionRow; from: string; text: string }> = [];
   const toStore: Array<{ connection: ConnectionRow; from: string; media: { id: string; caption?: string; filename?: string } }> = [];
+  const toFlowReplies: Array<{ connection: ConnectionRow; from: string; item: Record<string, unknown> }> = [];
   for (const entry of payload.entry || []) for (const change of entry.changes || []) {
     const value = change.value || {}; const phoneNumberId = value.metadata?.phone_number_id || null;
     const connection = await resolveConnection(phoneNumberId);
@@ -454,6 +473,12 @@ async function receiveWebhook(request: Request, env: MetaEnv): Promise<Response>
         const media = (item.document || item.image) as { id?: string; caption?: string; filename?: string } | undefined;
         if (media?.id) toStore.push({ connection, from: String(item.from), media: { id: String(media.id), caption: media.caption, filename: media.filename } });
       }
+      // A submitted WhatsApp Flow. This is the richest inbound event the platform produces —
+      // structured, labelled answers rather than free text — so it goes straight into lead
+      // qualification instead of sitting in a table waiting to be looked at.
+      if (wasNew && connection && item.from && String(item.type) === "interactive") {
+        toFlowReplies.push({ connection, from: String(item.from), item: item as Record<string, unknown> });
+      }
     }
     for (const item of value.statuses || []) {
       const id = String(item.id || crypto.randomUUID());
@@ -464,6 +489,16 @@ async function receiveWebhook(request: Request, env: MetaEnv): Promise<Response>
   // Run automations for the newly-received text messages. Done synchronously (this environment's
   // webhook handler has no ExecutionContext to waitUntil on) but only for messages that actually
   // matched a new insert, so a slow run + Meta retry never produces a duplicate reply.
+  for (const reply of toFlowReplies) {
+    const parsed = await recordFlowReply(env.DB, reply.connection.workspace_id, reply.from, reply.item).catch(() => null);
+    if (!parsed) continue;
+    // The submitting number is itself a reachable identifier, so a flow reply always qualifies
+    // even when the form did not ask for a phone number.
+    const hints = flowHints(parsed.fields);
+    if (!hints.phone) hints.phone = reply.from;
+    await qualifyConversation(env.DB, reply.connection.workspace_id, "whatsapp", reply.from, hints).catch(() => null);
+  }
+
   for (const item of toAutomate) {
     // An agent who has taken this conversation over must not be talked over by the assistant.
     if (await isAiPaused(env.DB, item.connection.workspace_id, item.from).catch(() => false)) continue;
