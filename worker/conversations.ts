@@ -1,8 +1,9 @@
-import { json, corsPreflight, allowedOrigin } from "./shared";
+import { callClaude, json, corsPreflight, allowedOrigin, type ChatMessage } from "./shared";
 import { requireSession, type AuthEnv } from "./auth";
 
 export interface ConversationsEnv extends AuthEnv {
   DB: D1Database;
+  ANTHROPIC_API_KEY?: string;
 }
 
 export type Channel = "whatsapp" | "instagram" | "webchat";
@@ -397,7 +398,9 @@ async function getMessages(request: Request, env: ConversationsEnv): Promise<Res
   await env.DB.prepare(`UPDATE crm_conversations SET unread = 0 WHERE workspace_id = ? AND channel = ? AND thread_key = ?`)
     .bind(session.workspaceId, channel, threadKey).run();
   await recordEvent(env.DB, session.workspaceId, "conversation", `${channel}:${threadKey}`);
-  return json(request, { messages });
+  const stateRow = await env.DB.prepare(`SELECT handoff_summary FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`)
+    .bind(session.workspaceId, threadKey).first<{ handoff_summary: string }>().catch(() => null);
+  return json(request, { messages, handoffSummary: parseHandoff(stateRow?.handoff_summary) });
 }
 
 /* ------------------------------------------------------------------ leads */
@@ -544,6 +547,50 @@ async function sync(request: Request, env: ConversationsEnv): Promise<Response> 
 // Whether a human has taken this thread over. widget_conversation_state was built for web chat but
 // its (workspace, thread) shape is channel-agnostic, so WhatsApp reuses it rather than growing a
 // second table that would have to be kept in step.
+
+interface HandoffSummary { summary: string; focusOn: string; customerNotes: string }
+
+function parseHandoff(raw: string | null | undefined): HandoffSummary | null {
+  if (!raw) return null;
+  try { return JSON.parse(raw) as HandoffSummary; } catch { return null; }
+}
+
+async function readThreadHistory(db: D1Database, workspaceId: string, channel: Channel, threadKey: string): Promise<ChatMessage[]> {
+  if (channel === "whatsapp") {
+    const rows = await db.prepare(`SELECT direction, message_text FROM whatsapp_messages
+      WHERE workspace_id = ? AND wa_id = ? AND message_text IS NOT NULL ORDER BY created_at ASC LIMIT 50`)
+      .bind(workspaceId, threadKey).all<{ direction: string; message_text: string }>();
+    return (rows.results || []).map((r) => ({ role: r.direction === "inbound" ? "user" as const : "assistant" as const, content: r.message_text }));
+  }
+  const rows = await db.prepare(`SELECT role, content FROM widget_messages
+    WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC LIMIT 50`)
+    .bind(workspaceId, threadKey).all<{ role: string; content: string }>();
+  return (rows.results || [])
+    .filter((r) => r.role === "user" || r.role === "assistant" || r.role === "agent")
+    .map((r) => ({ role: r.role === "user" ? "user" as const : "assistant" as const, content: r.content }));
+}
+
+// The note an agent reads the instant they take a conversation over — what it's about, what to do
+// next, and anything worth knowing about this customer. web chat has generated this for a while;
+// this is the same behaviour made to work for every channel rather than just one.
+async function generateHandoffSummary(env: ConversationsEnv, workspaceId: string, channel: Channel, threadKey: string): Promise<void> {
+  if (!threadKey || !env.ANTHROPIC_API_KEY) return;
+  try {
+    const history = await readThreadHistory(env.DB, workspaceId, channel, threadKey);
+    if (!history.length) return;
+    const transcript = history.map((m) => `${m.role === "user" ? "Customer" : "Assistant"}: ${m.content}`).join("\n");
+    const prompt = `Here is a customer support conversation so far:\n\n${transcript}\n\nA human agent is now taking over this conversation. Write a brief handoff note for them. Respond with ONLY a JSON object, no markdown fences, in exactly this shape:\n{"summary": "1-2 sentences on what this conversation is about and where it left off", "focusOn": "1-2 sentences on what the agent should do or resolve next", "customerNotes": "1-2 sentences on anything worth knowing about this customer — tone, patience level, prior requests, anything already established (name, order, etc.) — or empty string if nothing notable"}`;
+    const result = await callClaude(env.ANTHROPIC_API_KEY, "You write extremely concise, practical handoff notes for customer support agents. Respond with strict JSON only.", [{ role: "user", content: prompt }]);
+    if (result.error || !result.reply) return;
+    const cleaned = result.reply.trim().replace(/^```(json)?/i, "").replace(/```$/, "").trim();
+    const parsed = JSON.parse(cleaned) as { summary?: string; focusOn?: string; customerNotes?: string };
+    const summary: HandoffSummary = { summary: (parsed.summary || "").slice(0, 400), focusOn: (parsed.focusOn || "").slice(0, 400), customerNotes: (parsed.customerNotes || "").slice(0, 400) };
+    await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, handoff_summary) VALUES (?, ?, ?)
+      ON CONFLICT(workspace_id, session_id) DO UPDATE SET handoff_summary = excluded.handoff_summary`)
+      .bind(workspaceId, threadKey, JSON.stringify(summary)).run();
+  } catch { /* a missing summary just means the agent reads the transcript themselves */ }
+}
+
 export async function isAiPaused(db: D1Database, workspaceId: string, threadKey: string): Promise<boolean> {
   const row = await db.prepare(`SELECT ai_active FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`)
     .bind(workspaceId, threadKey).first<{ ai_active: number }>().catch(() => null);
@@ -567,6 +614,11 @@ async function setTakeover(request: Request, env: ConversationsEnv): Promise<Res
     updated_at = CURRENT_TIMESTAMP WHERE workspace_id = ? AND thread_key = ?`)
     .bind(body.active ? 1 : 0, body.active ? 1 : 0, session.workspaceId, threadKey).run();
   await recordEvent(env.DB, session.workspaceId, "conversation", threadKey);
+  if (!body.active) {
+    const row = await env.DB.prepare(`SELECT channel FROM crm_conversations WHERE workspace_id = ? AND thread_key = ?`)
+      .bind(session.workspaceId, threadKey).first<{ channel: Channel }>();
+    if (row) await generateHandoffSummary(env, session.workspaceId, row.channel, threadKey);
+  }
   return json(request, { ok: true, aiActive: Boolean(body.active) });
 }
 

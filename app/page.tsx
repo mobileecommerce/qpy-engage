@@ -3453,11 +3453,12 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
   const threadRef=useRef<HTMLDivElement|null>(null);
   const key=p.selected?`${p.selected.channel}:${p.selected.threadKey}`:"";
 
+  const [handoffSummary,setHandoffSummary]=useState<{summary:string;focusOn:string;customerNotes:string}|null>(null);
   useEffect(()=>{
-    if(!p.selected||!token){setMessages([]);return}
+    if(!p.selected||!token){setMessages([]);setHandoffSummary(null);return}
     setLoadingThread(true);
     fetch(metaApi(`/api/cx/messages?channel=${p.selected.channel}&threadKey=${encodeURIComponent(p.selected.threadKey)}`),{headers:authHeaders(token)})
-      .then(r=>r.json()).then((d:{messages?:CxMessage[]})=>setMessages(d.messages||[]))
+      .then(r=>r.json()).then((d:{messages?:CxMessage[];handoffSummary?:{summary:string;focusOn:string;customerNotes:string}|null})=>{setMessages(d.messages||[]);setHandoffSummary(d.handoffSummary||null)})
       .catch(()=>{}).finally(()=>setLoadingThread(false));
   },[key,token]);
   useEffect(()=>{ if(threadRef.current)threadRef.current.scrollTop=threadRef.current.scrollHeight },[messages]);
@@ -3497,11 +3498,10 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
       if(!response.ok)throw new Error();
       p.notify(next?"Handed back to the AI":"You're handling this conversation — the AI is paused");
       p.onReload();
-      if(webchat){
-        const refreshed=await fetch(metaApi(`/api/cx/messages?channel=webchat&threadKey=${encodeURIComponent(p.selected.threadKey)}`),{headers:authHeaders(token)});
-        const data=await refreshed.json() as {messages?:CxMessage[]};
-        setMessages(data.messages||[]);
-      }
+      const refreshed=await fetch(metaApi(`/api/cx/messages?channel=${p.selected.channel}&threadKey=${encodeURIComponent(p.selected.threadKey)}`),{headers:authHeaders(token)});
+      const data=await refreshed.json() as {messages?:CxMessage[];handoffSummary?:{summary:string;focusOn:string;customerNotes:string}|null};
+      setHandoffSummary(data.handoffSummary||null);
+      if(webchat)setMessages(data.messages||[]);
     }catch{ p.notify("Could not change who is handling this conversation") }
     finally{ setTogglingAi(false) }
   };
@@ -3605,7 +3605,7 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
     </section>
 
     {/* Column 3 — lead details */}
-    {p.panelOpen&&p.selected&&<CxLeadPanel conversation={p.selected} saveLead={p.saveLead} notify={p.notify} onFullLead={p.onFullLead}/>}
+    {p.panelOpen&&p.selected&&<CxLeadPanel conversation={p.selected} saveLead={p.saveLead} notify={p.notify} onFullLead={p.onFullLead} handoffSummary={handoffSummary}/>}
     {editingCanned&&<CxCannedEditor canned={canned} setCanned={setCanned} onClose={()=>setEditingCanned(false)}/>}
   </div>;
 }
@@ -3644,9 +3644,9 @@ function CxAccordion({title,count,children,defaultOpen}:{title:string;count?:num
   </div>;
 }
 
-function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer,onFullLead}:{conversation:CxConversation|null;lead?:CxLead|null;
+function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer,onFullLead,handoffSummary}:{conversation:CxConversation|null;lead?:CxLead|null;
   saveLead:(id:string,patch:Record<string,unknown>)=>void;notify:(s:string)=>void;inDrawer?:boolean;
-  onFullLead?:(name:string)=>void}){
+  onFullLead?:(name:string)=>void;handoffSummary?:{summary:string;focusOn:string;customerNotes:string}|null}){
   const token=useAuthToken();
   const person=lead?.person||conversation?.person||null;
   const summary=lead||conversation?.lead||null;
@@ -3729,6 +3729,13 @@ function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer,onFullLead}:{co
         {summary?.source&&<div><i>⌖</i>{summary.source}</div>}
       </div>
     </div>
+
+    {!conversation?.aiActive&&handoffSummary&&<div className="handoff-summary">
+      <h3>Handoff summary</h3>
+      <p><strong>What&rsquo;s happened:</strong> {handoffSummary.summary||"—"}</p>
+      <p><strong>Focus on:</strong> {handoffSummary.focusOn||"—"}</p>
+      {handoffSummary.customerNotes&&<p><strong>Keep in mind:</strong> {handoffSummary.customerNotes}</p>}
+    </div>}
 
     {/* The score is about what THIS conversation shows, independent of whether contact details
         have been captured yet — an anonymous visitor with strong buying intent is exactly who this
