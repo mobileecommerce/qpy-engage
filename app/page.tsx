@@ -3,7 +3,7 @@
 import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState } from "react";
 import "./live-inbox.css";
 
-type Section = "Overview" | "Assistants" | "Channels" | "Inbox" | "Campaigns" | "Audiences" | "Automations" | "Flows" | "Knowledge" | "Leads" | "Analytics" | "Team" | "Settings";
+type Section = "Overview" | "Assistants" | "Channels" | "Conversations" | "Campaigns" | "Audiences" | "Automations" | "Flows" | "Knowledge" | "Analytics" | "Team" | "Settings";
 type Message = { from: "customer" | "ai" | "agent"; text: string; time: string };
 type Conversation = { id: string; initials: string; name: string; preview: string; time: string; unread: number; tone: string; status: "open" | "resolved"; email: string; phone: string; tags: string[]; notes?: string[] };
 type Automation = { id: number; title: string; trigger: string; action: string; runs: number; rate: string; active: boolean };
@@ -79,7 +79,7 @@ const initialCampaigns: Campaign[] = [
   {id:3,name:"Win-back offer",channel:"WhatsApp",audience:"Inactive 90 days",audienceId:"",recipients:436,status:"Draft",schedule:"Not scheduled",delivered:"—",clicks:"—",objective:"Recover customers",message:"We miss you, {{first_name}}! Here’s 15% off your next order to welcome you back.",mediaUrl:"",mediaName:"",cta:"Shop now",url:"https://atelierhome.com",templateName:"",templateLanguage:"en_US",scheduleType:"Now",date:"2026-07-19",time:"10:00",recurrence:"One-time",excludeRecent:false,messageCategory:"Marketing",estimatedCost:21.8},
 ];
 
-const nav: [string, Section][] = [["⌂","Overview"],["✦","Assistants"],["◫","Channels"],["◉","Inbox"],["◈","Campaigns"],["♟","Audiences"],["⌁","Automations"],["⑃","Flows"],["◇","Knowledge"],["⚑","Leads"],["▥","Analytics"]];
+const nav: [string, Section][] = [["⌂","Overview"],["✦","Assistants"],["◫","Channels"],["◉","Conversations"],["◈","Campaigns"],["♟","Audiences"],["⌁","Automations"],["⑃","Flows"],["◇","Knowledge"],["▥","Analytics"]];
 
 const AUTH_TOKEN_KEY = "qpy-engage-auth-token";
 const AuthTokenContext = createContext<string | null>(null);
@@ -265,7 +265,7 @@ function AuthGate({onAuthed}:{onAuthed:(session:AuthSession)=>void}){
   </div></main>;
 }
 
-const SECTIONS: Section[] = ["Overview","Assistants","Channels","Inbox","Campaigns","Audiences","Automations","Flows","Knowledge","Leads","Analytics","Team","Settings"];
+const SECTIONS: Section[] = ["Overview","Assistants","Channels","Conversations","Campaigns","Audiences","Automations","Flows","Knowledge","Analytics","Team","Settings"];
 
 function Workspace({session,onLogout,isSuperadmin,isImpersonating,onExitImpersonation}:{session:AuthSession;onLogout:()=>void;isSuperadmin:boolean;isImpersonating:boolean;onExitImpersonation:()=>void}) {
   const sectionStorageKey = `qpy-engage-last-section::ws:${session.workspace.id}`;
@@ -320,13 +320,12 @@ function Workspace({session,onLogout,isSuperadmin,isImpersonating,onExitImperson
   const body = section === "Overview" ? <Overview onNavigate={go} onCreate={openAutomation} connected={connected} conversations={conversations} automations={automations} sources={sources} userName={session.user.name||session.user.email.split("@")[0]} workspaceName={session.workspace.name}/> :
     section === "Assistants" ? <Assistants sources={sources} workspaceName={session.workspace.name} onKnowledge={()=>go("Knowledge")} onChannels={()=>go("Channels")} onAnalytics={()=>go("Analytics")} notify={notify}/> :
     section === "Channels" ? <Channels step={channelStep} setStep={setChannelStep} connected={connected} setConnected={setConnected} workspaceId={session.workspace.id} workspaceName={session.workspace.name} notify={notify}/> :
-    section === "Inbox" ? <InboxHub connected={connected} conversations={conversations} setConversations={setConversations} selected={selected} setSelectedId={setSelectedId} messages={messages[selected.id]??[]} draft={draft} setDraft={setDraft} sendMessage={sendMessage} aiActive={aiActive} setAiActive={setAiActive} onConnect={()=>go("Channels")} notify={notify}/> :
+    section === "Conversations" ? <ConversationsModule notify={notify}/> :
     section === "Campaigns" ? <Campaigns notify={notify} onManageAudiences={()=>go("Audiences")}/> :
     section === "Audiences" ? <Audiences notify={notify}/> :
     section === "Automations" ? <AutomationBuilder notify={notify}/> :
     section === "Flows" ? <Flows notify={notify}/> :
     section === "Knowledge" ? <Knowledge sources={sources} setSources={setSources} onAdd={()=>setModal("source")} notify={notify}/> :
-    section === "Leads" ? <Leads notify={notify}/> :
     section === "Analytics" ? <Analytics automations={automations} conversationCount={conversations.length} notify={notify}/> :
     section === "Team" ? <Team members={members} role={session.role} onInvite={()=>setModal("invite")} onUpdateRole={updateRole} onRemove={removeMember} notify={notify}/> :
     <Settings activeTab={settingsTab} setActiveTab={setSettingsTab} connected={connected} onChannels={()=>go("Channels")} workspaceName={session.workspace.name} notify={notify}/>;
@@ -336,7 +335,7 @@ function Workspace({session,onLogout,isSuperadmin,isImpersonating,onExitImperson
     <aside className="sidebar">
       <button className="brand" onClick={()=>go("Overview")}><span className="brand-mark">Q</span><span>Qpy Engage</span></button>
       <div className="workspace"><span className="shop-avatar">{session.workspace.name.slice(0,1).toUpperCase()}</span><div><strong>{session.workspace.name}</strong><small>Business workspace</small></div><span className="chev">⌄</span></div>
-      <nav className="side-nav" aria-label="Main navigation">{nav.map(([icon,label])=>{const count=label==="Inbox"?unreadInboxCount:0;return <button key={label} onClick={()=>go(label)} className={section===label?"active":""}><span>{icon}</span>{label}{count>0&&<b>{count}</b>}</button>})}</nav>
+      <nav className="side-nav" aria-label="Main navigation">{nav.map(([icon,label])=>{const count=label==="Conversations"?unreadInboxCount:0;return <button key={label} onClick={()=>go(label)} className={section===label?"active":""}><span>{icon}</span>{label}{count>0&&<b>{count}</b>}</button>})}</nav>
       <div className="nav-divider"/>
       <nav className="side-nav secondary"><button className={section==="Team"?"active":""} onClick={()=>go("Team")}><span>♙</span>Team</button><button className={section==="Settings"?"active":""} onClick={()=>go("Settings")}><span>⚙</span>Settings</button>{isSuperadmin&&!isImpersonating&&<a href="admin/" className="side-nav-link"><span>🛡</span>Superadmin</a>}</nav>
       <div className="sidebar-card"><span className="spark">✦</span><strong>Grow with Qpy Engage</strong><p>Unlock more conversations and advanced AI.</p><button onClick={()=>{go("Settings");setSettingsTab("Billing")}}>Explore plans</button></div>
@@ -382,7 +381,7 @@ function Workspace({session,onLogout,isSuperadmin,isImpersonating,onExitImperson
     }}/>}
     {modal==="invite"&&<InviteModal onClose={()=>setModal(null)} onSave={async(email,role)=>{const error=await invite(email,role);if(error){notify(error)}else{setModal(null);notify("Invitation sent")}}}/>}
     {modal==="search"&&<SearchModal onClose={()=>setModal(null)} onNavigate={(s)=>{go(s);setModal(null)}}/>}
-    {modal==="notifications"&&<SimpleModal title="Notifications" onClose={()=>setModal(null)}><div className="notification-center">{[["AI requested human help","Aisha’s order question needs review","Inbox"],["Campaign scheduled","Weekend showroom event • Jul 19 at 09:30","Campaigns"],["Knowledge synchronized","4 sources are ready","Knowledge"]].map(([title,copy,target])=><button key={title} onClick={()=>{setModal(null);go(target as Section)}}><span>✓</span><div><strong>{title}</strong><small>{copy}</small></div><b>Open →</b></button>)}</div><div className="modal-actions"><button className="secondary-btn" onClick={()=>setModal(null)}>Mark all read</button></div></SimpleModal>}
+    {modal==="notifications"&&<SimpleModal title="Notifications" onClose={()=>setModal(null)}><div className="notification-center">{[["AI requested human help","Aisha’s order question needs review","Conversations"],["Campaign scheduled","Weekend showroom event • Jul 19 at 09:30","Campaigns"],["Knowledge synchronized","4 sources are ready","Knowledge"]].map(([title,copy,target])=><button key={title} onClick={()=>{setModal(null);go(target as Section)}}><span>✓</span><div><strong>{title}</strong><small>{copy}</small></div><b>Open →</b></button>)}</div><div className="modal-actions"><button className="secondary-btn" onClick={()=>setModal(null)}>Mark all read</button></div></SimpleModal>}
     {modal==="profile"&&<SimpleModal title="Workspace tools" onClose={()=>setModal(null)}><div className="workspace-tools"><div className="workspace-owner"><span className="profile-avatar">{initials}</span><div><strong>{displayName}</strong><small>{session.role} • {session.workspace.name}</small></div></div><button onClick={exportWorkspace}><span>↓</span><div><strong>Download workspace backup</strong><small>Export all assistants, campaigns, conversations, settings, and connections.</small></div></button><label><span>↑</span><div><strong>Restore workspace backup</strong><small>Import a previously downloaded Qpy Engage JSON backup.</small></div><input type="file" accept="application/json,.json" onChange={e=>importWorkspace(e.target.files?.[0])}/></label><button onClick={resetWorkspace}><span>↻</span><div><strong>Restore demo data</strong><small>Reset this browser workspace to the original sample content.</small></div></button><button onClick={onLogout}><span>⏻</span><div><strong>Log out</strong><small>Sign out of {session.workspace.name} on this device.</small></div></button></div><div className="browser-storage-note">Signed in as {session.user.email}. Your data is synced to your Qpy Engage account.</div></SimpleModal>}
     {modal==="help"&&<SimpleModal title="Qpy Engage help" onClose={()=>setModal(null)}><p>Search the knowledge base, learn how WhatsApp onboarding works, or contact support.</p><div className="modal-actions"><button className="secondary-btn" onClick={()=>setModal(null)}>Close</button><button className="primary" onClick={()=>{setModal(null);go("Channels")}}>Open setup guide</button></div></SimpleModal>}
     {toast&&<div className="toast">✓ {toast}</div>}
@@ -407,7 +406,7 @@ function Overview({onNavigate,onCreate,connected,conversations,automations,sourc
     <button className={`step ${launched?"complete":"current"}`} onClick={()=>onNavigate("Assistants")}><span>{launched?"✓":"3"}</span><div><strong>Personalize your assistant</strong><small>{launched?"Published and live":"Configure and publish your assistant"}</small></div><b>{launched?"Live":"Start →"}</b></button>
   </div></section>
   <MetricCards conversationCount={conversations.length}/>
-  <section className="overview-panels"><div className="card"><div className="card-head"><div><h2>Live conversations</h2><p>{open.length} customers waiting now</p></div><button onClick={()=>onNavigate("Inbox")}>Open inbox →</button></div>{open.length?open.slice(0,4).map(c=><div className="mini-row" key={c.id}><span className={`contact-avatar ${c.tone}`}>{c.initials}<i/></span><div><strong>{c.name}</strong><small>{c.preview}</small></div><time>{c.time}</time></div>):<p className="empty-hint">No open conversations yet.</p>}</div><div className="card"><div className="card-head"><div><h2>Automation health</h2><p>All active workflows</p></div><button onClick={()=>onNavigate("Automations")}>Manage →</button></div>{automations.length?automations.map(a=><div className="health-row" key={a.id}><span>✦</span><div><strong>{a.title}</strong><small>{a.runs} runs this month</small></div><b>{a.rate}</b></div>):<p className="empty-hint">No automations yet — create one to get started.</p>}</div></section>
+  <section className="overview-panels"><div className="card"><div className="card-head"><div><h2>Live conversations</h2><p>{open.length} customers waiting now</p></div><button onClick={()=>onNavigate("Conversations")}>Open inbox →</button></div>{open.length?open.slice(0,4).map(c=><div className="mini-row" key={c.id}><span className={`contact-avatar ${c.tone}`}>{c.initials}<i/></span><div><strong>{c.name}</strong><small>{c.preview}</small></div><time>{c.time}</time></div>):<p className="empty-hint">No open conversations yet.</p>}</div><div className="card"><div className="card-head"><div><h2>Automation health</h2><p>All active workflows</p></div><button onClick={()=>onNavigate("Automations")}>Manage →</button></div>{automations.length?automations.map(a=><div className="health-row" key={a.id}><span>✦</span><div><strong>{a.title}</strong><small>{a.runs} runs this month</small></div><b>{a.rate}</b></div>):<p className="empty-hint">No automations yet — create one to get started.</p>}</div></section>
 </>}
 
 function MetricCards({conversationCount}:{conversationCount:number}){
@@ -3218,4 +3217,603 @@ function SourceModal({onClose,onSave}:{onClose:()=>void;onSave:(s:Source,content
   </SimpleModal>;
 }
 function InviteModal({onClose,onSave}:{onClose:()=>void;onSave:(email:string,role:Member["role"])=>void}){const [email,setEmail]=useState("");const [role,setRole]=useState<Member["role"]>("Agent");return <SimpleModal title="Invite teammate" onClose={onClose}><div className="modal-form"><label>Email address<input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="teammate@company.com"/></label><label>Role<select value={role} onChange={e=>setRole(e.target.value as Member["role"])}><option>Admin</option><option>Agent</option><option>Analyst</option></select></label></div><div className="role-note">Agents can manage conversations. Analysts can view reports. Admins can manage the workspace.</div><div className="modal-actions"><button className="secondary-btn" onClick={onClose}>Cancel</button><button className="primary" disabled={!email.includes("@")} onClick={()=>onSave(email.trim().toLowerCase(),role)}>Send invitation</button></div></SimpleModal>}
-function SearchModal({onClose,onNavigate}:{onClose:()=>void;onNavigate:(s:Section)=>void}){const [q,setQ]=useState("");const pages:Section[]=["Overview","Assistants","Channels","Inbox","Campaigns","Automations","Knowledge","Analytics","Team","Settings"];return <SimpleModal title="Search Qpy Engage" onClose={onClose}><input autoFocus className="global-search" placeholder="Search pages and features…" value={q} onChange={e=>setQ(e.target.value)}/><div className="search-results">{pages.filter(p=>p.toLowerCase().includes(q.toLowerCase())).map(p=><button key={p} onClick={()=>onNavigate(p)}><span>⌕</span><div><strong>{p}</strong><small>Open {p.toLowerCase()}</small></div><b>→</b></button>)}</div></SimpleModal>}
+function SearchModal({onClose,onNavigate}:{onClose:()=>void;onNavigate:(s:Section)=>void}){const [q,setQ]=useState("");const pages:Section[]=["Overview","Assistants","Channels","Conversations","Campaigns","Automations","Knowledge","Analytics","Team","Settings"];return <SimpleModal title="Search Qpy Engage" onClose={onClose}><input autoFocus className="global-search" placeholder="Search pages and features…" value={q} onChange={e=>setQ(e.target.value)}/><div className="search-results">{pages.filter(p=>p.toLowerCase().includes(q.toLowerCase())).map(p=><button key={p} onClick={()=>onNavigate(p)}><span>⌕</span><div><strong>{p}</strong><small>Open {p.toLowerCase()}</small></div><b>→</b></button>)}</div></SimpleModal>}
+
+/* ================================================================================================
+   Conversations — the unified messaging + CRM workspace.
+
+   One module, two tabs, one state object. Every filter, selection and page index lives in
+   ConversationsModule so switching tabs is a render, not a reload: the spec's state-persistence
+   requirement falls out of where the state is held rather than needing anything to restore it.
+   ============================================================================================== */
+
+type CxChannel="whatsapp"|"instagram"|"webchat";
+type CxPerson={id:string;name:string;phone:string;email:string;instagramHandle:string;company:string;avatarTone:number};
+type CxLeadSummary={id:string;stage:string;priority:string;segment:string;source:string;owner:string;nextFollowup:string;score:number|null;scoreReasons:string[]};
+type CxConversation={id:string;channel:CxChannel;threadKey:string;name:string;lastMessage:string;lastAt:string;lastRole:string;messageCount:number;unread:boolean;aiActive:boolean;needsAttention:boolean;attentionReason:string;state:string;person:CxPerson|null;lead:CxLeadSummary|null};
+type CxLead={id:string;stage:string;priority:string;segment:string;source:string;owner:string;nextFollowup:string;boardOrder:number;createdAt:string;updatedAt:string;person:CxPerson;conversation:{id:string;channel:CxChannel;threadKey:string;lastMessage:string;lastAt:string;unread:boolean;messageCount:number;aiActive:boolean;needsAttention:boolean}|null;score:number|null;scoreReasons:string[]};
+type CxCounts={all:number;unread:number;needsYou:number;newLeads:number;followUp:number;closed:number};
+type CxMessage={role:string;content:string;createdAt:string};
+
+const CX_STAGES=["New","Contacted","Qualified","Proposal","Closed Won","Closed Lost"];
+const CX_PRIORITIES=["Hot","Warm","Cold"];
+const CX_SEGMENTS=["Enterprise","SMB","Consumer"];
+const CX_SOURCES=["Website","WhatsApp","Instagram","Referral","Event","Campaign"];
+const CX_PILLS=["All","Unread","Needs You","New Leads","Follow-up","Closed"] as const;
+const CX_CHANNEL_META:Record<CxChannel,{glyph:string;label:string}>={
+  whatsapp:{glyph:"◉",label:"WhatsApp"},instagram:{glyph:"◎",label:"Instagram"},webchat:{glyph:"◌",label:"Web chat"},
+};
+const CX_PAGE_SIZE=12;
+
+function cxInitials(name:string):string{
+  const parts=(name||"").trim().split(/\s+/).filter(Boolean);
+  if(!parts.length)return "◌";
+  return (parts[0][0]+(parts.length>1?parts[parts.length-1][0]:"")).toUpperCase();
+}
+function cxScoreBand(score:number){return score>=70?{label:"HOT LEAD",cls:"hot"}:score>=40?{label:"WARM",cls:"warm"}:{label:"COLD",cls:"cold"}}
+
+function ConversationsModule({notify}:{notify:(s:string)=>void}){
+  const token=useAuthToken();
+  const [tab,setTab]=useState<"conversations"|"leads">("conversations");
+  const [conversations,setConversations]=useState<CxConversation[]>([]);
+  const [leads,setLeads]=useState<CxLead[]>([]);
+  const [counts,setCounts]=useState<CxCounts>({all:0,unread:0,needsYou:0,newLeads:0,followUp:0,closed:0});
+  const [loading,setLoading]=useState(true);
+  // Conversations-tab state
+  const [search,setSearch]=useState("");
+  const [channelFilter,setChannelFilter]=useState<"all"|CxChannel>("all");
+  const [pill,setPill]=useState<typeof CX_PILLS[number]>("All");
+  const [selectedId,setSelectedId]=useState("");
+  const [panelOpen,setPanelOpen]=useState(true);
+  // Leads-tab state
+  const [leadView,setLeadView]=useState<"table"|"board">("table");
+  const [leadSearch,setLeadSearch]=useState("");
+  const [leadFilters,setLeadFilters]=useState({source:"All",stage:"All",priority:"All",segment:"All"});
+  const [page,setPage]=useState(0);
+  const [drawerLeadId,setDrawerLeadId]=useState("");
+  const [refreshing,setRefreshing]=useState(false);
+
+  const load=async(silent?:boolean)=>{
+    if(!token){setLoading(false);return}
+    if(!silent)setLoading(true);
+    try{
+      const [convRes,leadRes]=await Promise.all([
+        fetch(metaApi("/api/cx/conversations"),{headers:authHeaders(token)}),
+        fetch(metaApi("/api/cx/leads"),{headers:authHeaders(token)}),
+      ]);
+      const convData=await convRes.json() as {conversations?:CxConversation[];counts?:CxCounts};
+      const leadData=await leadRes.json() as {leads?:CxLead[]};
+      setConversations(convData.conversations||[]);
+      if(convData.counts)setCounts(convData.counts);
+      setLeads(leadData.leads||[]);
+    }catch{ if(!silent)notify("Could not load conversations") }
+    finally{ setLoading(false) }
+  };
+  useEffect(()=>{load()},[token]);
+
+  // Bi-directional sync, the local half: one lead lives in two places on screen, so a single
+  // writer updates both projections at once. No refetch, no flicker, and the Leads table and the
+  // open chat header can never disagree about a stage.
+  const applyLead=(leadId:string,patch:Partial<CxLead>)=>{
+    setLeads(prev=>prev.map(l=>l.id===leadId?{...l,...patch}:l));
+    setConversations(prev=>prev.map(c=>c.lead&&c.lead.id===leadId?{...c,lead:{...c.lead,...patch as Partial<CxLeadSummary>}}:c));
+  };
+  const saveLead=async(leadId:string,patch:Record<string,unknown>)=>{
+    if(!token)return;
+    const before=leads.find(l=>l.id===leadId);
+    applyLead(leadId,patch as Partial<CxLead>);
+    try{
+      const response=await fetch(metaApi(`/api/cx/leads/${leadId}`),{method:"PATCH",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify(patch)});
+      const data=await response.json() as {lead?:CxLead;error?:string};
+      if(!response.ok||!data.lead)throw new Error(data.error||"save failed");
+      applyLead(leadId,data.lead);
+    }catch{ if(before)applyLead(leadId,before); notify("Could not save that change") }
+  };
+  const removeLead=async(lead:CxLead)=>{
+    if(!token)return;
+    setLeads(prev=>prev.filter(l=>l.id!==lead.id));
+    if(drawerLeadId===lead.id)setDrawerLeadId("");
+    try{
+      const response=await fetch(metaApi(`/api/cx/leads/${lead.id}`),{method:"DELETE",headers:authHeaders(token)});
+      if(!response.ok)throw new Error();
+      notify("Lead deleted — the conversation is kept");
+    }catch{ setLeads(prev=>[...prev,lead]); notify("Could not delete that lead") }
+  };
+  const refresh=async()=>{ setRefreshing(true); await load(true); setRefreshing(false) };
+
+  const selected=conversations.find(c=>c.id===selectedId)||null;
+  const drawerLead=leads.find(l=>l.id===drawerLeadId)||null;
+
+  const visibleConversations=conversations.filter(c=>{
+    if(channelFilter!=="all"&&c.channel!==channelFilter)return false;
+    if(pill==="Unread"&&!c.unread)return false;
+    if(pill==="Needs You"&&!(c.needsAttention||!c.aiActive))return false;
+    if(pill==="New Leads"&&c.lead?.stage!=="New")return false;
+    if(pill==="Follow-up"&&!c.lead?.nextFollowup)return false;
+    if(pill==="Closed"&&c.state!=="closed")return false;
+    const q=search.trim().toLowerCase();
+    return !q||`${c.name} ${c.lastMessage} ${c.person?.phone||""} ${c.person?.email||""}`.toLowerCase().includes(q);
+  });
+
+  const visibleLeads=leads.filter(l=>{
+    if(leadFilters.source!=="All"&&l.source!==leadFilters.source)return false;
+    if(leadFilters.stage!=="All"&&l.stage!==leadFilters.stage)return false;
+    if(leadFilters.priority!=="All"&&l.priority!==leadFilters.priority)return false;
+    if(leadFilters.segment!=="All"&&l.segment!==leadFilters.segment)return false;
+    const q=leadSearch.trim().toLowerCase();
+    return !q||`${l.person.name} ${l.person.phone} ${l.person.email} ${l.person.company}`.toLowerCase().includes(q);
+  });
+  const pageCount=Math.max(1,Math.ceil(visibleLeads.length/CX_PAGE_SIZE));
+  const safePage=Math.min(page,pageCount-1);
+  const pageLeads=visibleLeads.slice(safePage*CX_PAGE_SIZE,(safePage+1)*CX_PAGE_SIZE);
+
+  const exportCsv=()=>{
+    const header=["Name","Phone","Email","Company","Stage","Priority","Segment","Source","Owner","Next follow-up","Channel","Last interaction"];
+    const rows=visibleLeads.map(l=>[l.person.name,l.person.phone,l.person.email,l.person.company,l.stage,l.priority,l.segment,l.source,l.owner,l.nextFollowup,l.conversation?CX_CHANNEL_META[l.conversation.channel].label:"",l.conversation?.lastAt||""]);
+    const csv=[header,...rows].map(r=>r.map(cell=>{
+      const value=String(cell??"");
+      return /[",\n]/.test(value)?`"${value.replace(/"/g,'""')}"`:value;
+    }).join(",")).join("\n");
+    const url=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8"}));
+    const a=document.createElement("a");
+    a.href=url; a.download=`qpy-leads-${new Date().toISOString().slice(0,10)}.csv`; a.click();
+    URL.revokeObjectURL(url);
+    notify(`Exported ${visibleLeads.length} lead${visibleLeads.length===1?"":"s"}`);
+  };
+
+  const openFullWorkspace=(lead:CxLead)=>{
+    if(!lead.conversation)return;
+    const match=conversations.find(c=>c.threadKey===lead.conversation!.threadKey&&c.channel===lead.conversation!.channel);
+    if(match)setSelectedId(match.id);
+    setDrawerLeadId("");
+    setTab("conversations");
+  };
+
+  return <>
+    <div className="cx-tabs">
+      <button className={tab==="conversations"?"active":""} onClick={()=>setTab("conversations")}>Conversations{counts.unread>0&&<b>{counts.unread}</b>}</button>
+      <button className={tab==="leads"?"active":""} onClick={()=>setTab("leads")}>Leads{leads.length>0&&<b>{leads.length}</b>}</button>
+    </div>
+
+    {tab==="conversations"
+      ? <CxConversationsTab loading={loading} conversations={visibleConversations} total={conversations.length}
+          counts={counts} search={search} setSearch={setSearch} channelFilter={channelFilter} setChannelFilter={setChannelFilter}
+          pill={pill} setPill={setPill} selected={selected} setSelectedId={setSelectedId}
+          panelOpen={panelOpen} setPanelOpen={setPanelOpen} saveLead={saveLead} onRefresh={refresh} notify={notify}/>
+      : <CxLeadsTab loading={loading} leads={pageLeads} filtered={visibleLeads.length} total={leads.length}
+          view={leadView} setView={setLeadView} search={leadSearch} setSearch={setLeadSearch}
+          filters={leadFilters} setFilters={setLeadFilters} page={safePage} setPage={setPage} pageCount={pageCount}
+          allFiltered={visibleLeads} refreshing={refreshing} onRefresh={refresh} onExport={exportCsv}
+          onQuickChat={setDrawerLeadId} onDelete={removeLead} saveLead={saveLead}/>}
+
+    {drawerLead&&<CxQuickChatDrawer lead={drawerLead} onClose={()=>setDrawerLeadId("")}
+      onExpand={()=>openFullWorkspace(drawerLead)} saveLead={saveLead} notify={notify}/>}
+  </>;
+}
+
+/* ---- Tab 1: unified inbox -------------------------------------------------------------------- */
+
+function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];total:number;counts:CxCounts;
+  search:string;setSearch:(s:string)=>void;channelFilter:"all"|CxChannel;setChannelFilter:(c:"all"|CxChannel)=>void;
+  pill:typeof CX_PILLS[number];setPill:(v:typeof CX_PILLS[number])=>void;selected:CxConversation|null;
+  setSelectedId:(s:string)=>void;panelOpen:boolean;setPanelOpen:(v:boolean)=>void;
+  saveLead:(id:string,patch:Record<string,unknown>)=>void;onRefresh:()=>void;notify:(s:string)=>void}){
+  const token=useAuthToken();
+  const [messages,setMessages]=useState<CxMessage[]>([]);
+  const [loadingThread,setLoadingThread]=useState(false);
+  const [reply,setReply]=useState("");
+  const [asNote,setAsNote]=useState(false);
+  const [sending,setSending]=useState(false);
+  const threadRef=useRef<HTMLDivElement|null>(null);
+  const key=p.selected?`${p.selected.channel}:${p.selected.threadKey}`:"";
+
+  useEffect(()=>{
+    if(!p.selected||!token){setMessages([]);return}
+    setLoadingThread(true);
+    fetch(metaApi(`/api/cx/messages?channel=${p.selected.channel}&threadKey=${encodeURIComponent(p.selected.threadKey)}`),{headers:authHeaders(token)})
+      .then(r=>r.json()).then((d:{messages?:CxMessage[]})=>setMessages(d.messages||[]))
+      .catch(()=>{}).finally(()=>setLoadingThread(false));
+  },[key,token]);
+  useEffect(()=>{ if(threadRef.current)threadRef.current.scrollTop=threadRef.current.scrollHeight },[messages]);
+
+  const send=async()=>{
+    if(!p.selected||!token||!reply.trim())return;
+    setSending(true);
+    const text=reply.trim();
+    try{
+      if(asNote){
+        const response=await fetch(metaApi("/api/widget/notes"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({sessionId:p.selected.threadKey,note:text})});
+        if(!response.ok)throw new Error();
+        p.notify("Internal note saved");
+      }else{
+        const response=await fetch(metaApi("/api/widget/reply"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({sessionId:p.selected.threadKey,message:text})});
+        if(!response.ok)throw new Error();
+        setMessages(prev=>[...prev,{role:"agent",content:text,createdAt:new Date().toISOString()}]);
+      }
+      setReply("");
+    }catch{ p.notify(asNote?"Could not save that note":"Could not send that reply") }
+    finally{ setSending(false) }
+  };
+
+  const pillCount=(name:typeof CX_PILLS[number])=>
+    name==="All"?p.counts.all:name==="Unread"?p.counts.unread:name==="Needs You"?p.counts.needsYou
+    :name==="New Leads"?p.counts.newLeads:name==="Follow-up"?p.counts.followUp:p.counts.closed;
+
+  return <div className={`cx-workspace${p.panelOpen?"":" panel-collapsed"}`}>
+    {/* Column 1 — feed */}
+    <aside className="cx-feed">
+      <div className="cx-feed-top">
+        <input className="cx-search" value={p.search} onChange={e=>p.setSearch(e.target.value)} placeholder="Search conversations…"/>
+        <select value={p.channelFilter} onChange={e=>p.setChannelFilter(e.target.value as "all"|CxChannel)}>
+          <option value="all">All channels</option>
+          <option value="whatsapp">WhatsApp</option>
+          <option value="instagram">Instagram</option>
+          <option value="webchat">Web chat</option>
+        </select>
+      </div>
+      <div className="cx-pills">{CX_PILLS.map(name=>
+        <button key={name} className={p.pill===name?"active":""} onClick={()=>p.setPill(name)}>
+          {name}{pillCount(name)>0&&<i>{pillCount(name)}</i>}</button>)}
+      </div>
+      <div className="cx-feed-list">
+        {p.loading?<p className="empty-hint">Loading…</p>
+        :!p.conversations.length?<div className="cx-feed-empty">
+            <span>◌</span>
+            <strong>{p.total?"No conversations match":"No conversations yet"}</strong>
+            <small>{p.total?"Try a different filter or clear the search.":"Messages from WhatsApp, Instagram and your website widget land here."}</small>
+            {p.total>0&&<button className="text-action" onClick={()=>{p.setSearch("");p.setPill("All");p.setChannelFilter("all")}}>Clear filters</button>}
+          </div>
+        :p.conversations.map(c=>
+          <button key={c.id} className={`cx-feed-row${p.selected?.id===c.id?" selected":""}${c.unread?" unread":""}`} onClick={()=>p.setSelectedId(c.id)}>
+            <span className={`cx-avatar tone-${c.person?.avatarTone??0}`}>{cxInitials(c.name)}</span>
+            <div className="cx-feed-body">
+              <div className="cx-feed-line">
+                <strong>{c.name}</strong>
+                <time>{conversationTime(c.lastAt)}</time>
+              </div>
+              <div className="cx-feed-line">
+                <small>{c.lastMessage.slice(0,52)}</small>
+                {c.unread&&<i className="cx-dot" aria-label="Unread"/>}
+              </div>
+              <div className="cx-feed-tags">
+                <span className={`cx-chan ${c.channel}`}>{CX_CHANNEL_META[c.channel].glyph} {CX_CHANNEL_META[c.channel].label}</span>
+                {c.needsAttention&&<span className="cx-badge red">Needs you</span>}
+                {c.lead&&<span className={`cx-badge stage-${c.lead.stage.toLowerCase().replace(/\W+/g,"-")}`}>{c.lead.stage}</span>}
+                {c.lead?.priority&&<span className={`cx-badge prio-${c.lead.priority.toLowerCase()}`}>{c.lead.priority}</span>}
+              </div>
+            </div>
+          </button>)}
+      </div>
+    </aside>
+
+    {/* Column 2 — thread */}
+    <section className="cx-thread">
+      {!p.selected?<div className="cx-thread-empty"><span>◌</span><h3>Select a conversation</h3><p>Pick anyone on the left to read the thread and work their lead without leaving this screen.</p></div>
+      :<>
+        <header className="cx-thread-head">
+          <span className={`cx-avatar tone-${p.selected.person?.avatarTone??0}`}>{cxInitials(p.selected.name)}</span>
+          <div>
+            <strong>{p.selected.name}</strong>
+            <div className="cx-thread-sub">
+              <span className={`cx-chan ${p.selected.channel}`}>{CX_CHANNEL_META[p.selected.channel].glyph} {CX_CHANNEL_META[p.selected.channel].label}</span>
+              <span className={`cx-live${p.selected.aiActive?"":" paused"}`}>{p.selected.aiActive?"AI handling":"You're handling"}</span>
+              <span>{p.selected.messageCount} messages</span>
+            </div>
+          </div>
+          <button className="secondary-btn" onClick={()=>p.notify(p.selected!.aiActive?"Pause AI is wired to the web chat takeover endpoint":"Hand to AI")}>{p.selected.aiActive?"Pause AI":"Hand to AI"}</button>
+          <button className="cx-panel-toggle" onClick={()=>p.setPanelOpen(!p.panelOpen)} title={p.panelOpen?"Collapse lead panel":"Expand lead panel"}>{p.panelOpen?"⟩":"⟨"}</button>
+        </header>
+        <div className="cx-messages" ref={threadRef}>
+          {loadingThread?<p className="empty-hint">Loading…</p>
+          :messages.map((m,i)=>m.role==="system"
+            ? <div key={i} className="cx-system">{m.content}</div>
+            : <div key={i} className={`cx-bubble ${m.role==="user"?"visitor":m.role==="agent"?"agent":"ai"}`}>
+                <p>{m.content}</p>
+                <small>{m.role==="user"?"Visitor":m.role==="agent"?"You":"✦ Assistant"} · {conversationTime(m.createdAt)}</small>
+              </div>)}
+        </div>
+        <div className={`cx-composer${asNote?" note-mode":""}`}>
+          <textarea value={reply} onChange={e=>setReply(e.target.value)} rows={2}
+            onKeyDown={e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey))send()}}
+            placeholder={asNote?"Write an internal note — the customer never sees this…":"Write a reply…  (⌘↵ to send)"}/>
+          <div className="cx-composer-bar">
+            <label className="cx-note-toggle"><input type="checkbox" checked={asNote} onChange={e=>setAsNote(e.target.checked)}/>Internal note</label>
+            <button className="cx-icon-btn" title="Attach a file (coming with the shared-documents work)" disabled>⎘</button>
+            <button className="cx-icon-btn" title="Canned responses" disabled>⌸</button>
+            <button className="primary" disabled={sending||!reply.trim()} onClick={send}>{sending?"Sending…":asNote?"Save note":"Send"}</button>
+          </div>
+        </div>
+      </>}
+    </section>
+
+    {/* Column 3 — lead details */}
+    {p.panelOpen&&p.selected&&<CxLeadPanel conversation={p.selected} saveLead={p.saveLead} notify={p.notify}/>}
+  </div>;
+}
+
+/* ---- Shared lead panel (column 3 and the drawer render the same component) --------------------- */
+
+function CxAccordion({title,count,children,defaultOpen}:{title:string;count?:number;children:React.ReactNode;defaultOpen?:boolean}){
+  const [open,setOpen]=useState(Boolean(defaultOpen));
+  return <div className={`cx-acc${open?" open":""}`}>
+    <button onClick={()=>setOpen(!open)}><span>{title}</span>{count!==undefined&&count>0&&<i>{count}</i>}<b>{open?"−":"+"}</b></button>
+    {open&&<div className="cx-acc-body">{children}</div>}
+  </div>;
+}
+
+function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer}:{conversation:CxConversation|null;lead?:CxLead|null;
+  saveLead:(id:string,patch:Record<string,unknown>)=>void;notify:(s:string)=>void;inDrawer?:boolean}){
+  const token=useAuthToken();
+  const person=lead?.person||conversation?.person||null;
+  const summary=lead||conversation?.lead||null;
+  const threadKey=lead?.conversation?.threadKey||conversation?.threadKey||"";
+  const score=lead?.score??conversation?.lead?.score??null;
+  const reasons=lead?.scoreReasons||conversation?.lead?.scoreReasons||[];
+  const [reasonsOpen,setReasonsOpen]=useState(true);
+  const [notes,setNotes]=useState<WidgetNote[]>([]);
+  const [noteDraft,setNoteDraft]=useState("");
+  const [labels,setLabels]=useState<string[]>([]);
+  const [labelDraft,setLabelDraft]=useState("");
+  const [documents,setDocuments]=useState<UploadedDocument[]>([]);
+
+  useEffect(()=>{
+    if(!threadKey||!token){setNotes([]);setLabels([]);setDocuments([]);return}
+    fetch(metaApi(`/api/widget/notes?sessionId=${encodeURIComponent(threadKey)}`),{headers:authHeaders(token)})
+      .then(r=>r.json()).then((d:{notes?:WidgetNote[]})=>setNotes(d.notes||[])).catch(()=>{});
+    fetch(metaApi(`/api/crm/contact?sessionId=${encodeURIComponent(threadKey)}`),{headers:authHeaders(token)})
+      .then(r=>r.json()).then((d:{contact?:CrmContact})=>setLabels(d.contact?.labels||[])).catch(()=>{});
+    fetch(metaApi(`/api/widget/documents?contactKey=${encodeURIComponent(threadKey)}`),{headers:authHeaders(token)})
+      .then(r=>r.json()).then((d:{documents?:UploadedDocument[]})=>setDocuments(d.documents||[])).catch(()=>{});
+  },[threadKey,token]);
+
+  const addNote=async()=>{
+    if(!noteDraft.trim()||!token||!threadKey)return;
+    const text=noteDraft.trim();
+    setNoteDraft("");
+    try{
+      const response=await fetch(metaApi("/api/widget/notes"),{method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({sessionId:threadKey,note:text})});
+      const data=await response.json() as {authorName?:string};
+      if(!response.ok)throw new Error();
+      setNotes(prev=>[...prev,{authorName:data.authorName||"You",note:text,createdAt:new Date().toISOString()}]);
+    }catch{ notify("Could not save that note") }
+  };
+  const saveLabels=async(next:string[])=>{
+    setLabels(next);
+    if(!token||!threadKey)return;
+    fetch(metaApi("/api/crm/contact"),{method:"PATCH",headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify({sessionId:threadKey,labels:next})}).catch(()=>{});
+  };
+
+  const field=(label:string,value:string,options:string[],key:string)=>
+    <label className="cx-field"><small>{label}</small>
+      <select value={value} disabled={!summary} onChange={e=>summary&&saveLead(summary.id,{[key]:e.target.value})}>
+        <option value="">—</option>{options.map(o=><option key={o}>{o}</option>)}
+      </select></label>;
+
+  return <aside className={`cx-panel${inDrawer?" in-drawer":""}`}>
+    <div className="cx-panel-head">
+      <h3>Lead Details</h3>
+      {summary&&<button className="text-action" onClick={()=>notify("Opens the full lead record")}>View Full Lead →</button>}
+    </div>
+
+    <div className="cx-profile">
+      <span className={`cx-avatar large tone-${person?.avatarTone??0}`}>{cxInitials(person?.name||conversation?.name||"")}</span>
+      <strong>{person?.name||conversation?.name||"Website visitor"}</strong>
+      {person?.company&&<small>{person.company}</small>}
+      <div className="cx-profile-fields">
+        {person?.phone&&<div><i>✆</i>{person.phone}</div>}
+        {person?.email&&<div><i>✉</i>{person.email}</div>}
+        {person?.instagramHandle&&<div><i>◎</i>@{person.instagramHandle}</div>}
+        {summary?.source&&<div><i>⌖</i>{summary.source}</div>}
+      </div>
+    </div>
+
+    {!summary
+      ? <div className="cx-unqualified">
+          <strong>Not a lead yet</strong>
+          <p>This is still an anonymous conversation. Once a phone number, email or Instagram handle is captured, a lead is created automatically and appears in the Leads tab.</p>
+        </div>
+      : <>
+        {score!==null&&<div className="cx-score">
+          <div className="cx-score-head">
+            <b>{score}</b><span className={`cx-score-pill ${cxScoreBand(score).cls}`}>{cxScoreBand(score).label}</span>
+            {reasons.length>0&&<button className="cx-score-toggle" onClick={()=>setReasonsOpen(!reasonsOpen)}>{reasonsOpen?"Hide reasoning":"Why?"}</button>}
+          </div>
+          {reasonsOpen&&reasons.length>0&&<ul className="cx-reasons">{reasons.map((r,i)=><li key={i}>{r}</li>)}</ul>}
+        </div>}
+
+        <div className="cx-fields">
+          <label className="cx-field"><small>Status</small>
+            <select value={summary.stage} onChange={e=>saveLead(summary.id,{stage:e.target.value})}>{CX_STAGES.map(o=><option key={o}>{o}</option>)}</select></label>
+          {field("Priority",summary.priority,CX_PRIORITIES,"priority")}
+          {field("Segment",summary.segment,CX_SEGMENTS,"segment")}
+          {field("Source",summary.source,CX_SOURCES,"source")}
+        </div>
+      </>}
+
+    <CxAccordion title="Labels" count={labels.length} defaultOpen>
+      <div className="cx-labels">{labels.map(l=><span key={l} className={`crm-chip tone-${labelTone(l)}`}>{l}
+        <button onClick={()=>saveLabels(labels.filter(x=>x!==l))} aria-label={`Remove ${l}`}>×</button></span>)}
+        {!labels.length&&<p className="empty-hint">No labels yet</p>}</div>
+      <div className="crm-label-add">
+        <input value={labelDraft} onChange={e=>setLabelDraft(e.target.value)} placeholder="Add a label…" maxLength={28}
+          onKeyDown={e=>{if(e.key==="Enter"&&labelDraft.trim()){saveLabels([...labels,labelDraft.trim()]);setLabelDraft("")}}}/>
+        <button className="secondary-btn" disabled={!labelDraft.trim()} onClick={()=>{saveLabels([...labels,labelDraft.trim()]);setLabelDraft("")}}>Add</button>
+      </div>
+    </CxAccordion>
+
+    <CxAccordion title="Internal Notes" count={notes.length}>
+      <div className="cx-notes">{notes.map((n,i)=><div key={i} className="note"><p>{n.note}</p><small>{n.authorName} · {conversationTime(n.createdAt)}</small></div>)}
+        {!notes.length&&<p className="empty-hint">No notes yet</p>}</div>
+      <div className="crm-label-add">
+        <input value={noteDraft} onChange={e=>setNoteDraft(e.target.value)} placeholder="Add a note…"
+          onKeyDown={e=>e.key==="Enter"&&addNote()}/>
+        <button className="secondary-btn" disabled={!noteDraft.trim()} onClick={addNote}>Add</button>
+      </div>
+    </CxAccordion>
+
+    <CxAccordion title="Shared Documents" count={documents.length}>
+      {!documents.length?<p className="empty-hint">Nothing shared in this conversation.</p>
+      :<div className="doc-list">{documents.map(d=><div key={d.id} className="doc-item">
+        <div><strong>{d.docLabel||d.fileName}</strong><small>{(d.sizeBytes/1024).toFixed(0)} KB</small></div></div>)}</div>}
+    </CxAccordion>
+
+    <CxAccordion title="Connected Integrations">
+      <p className="empty-hint">Push this contact to HubSpot or Salesforce from Settings → Integrations.</p>
+    </CxAccordion>
+  </aside>;
+}
+
+/* ---- Tab 2: leads (table + board) ------------------------------------------------------------- */
+
+function CxLeadsTab(p:{loading:boolean;leads:CxLead[];filtered:number;total:number;view:"table"|"board";
+  setView:(v:"table"|"board")=>void;search:string;setSearch:(s:string)=>void;
+  filters:{source:string;stage:string;priority:string;segment:string};setFilters:(f:{source:string;stage:string;priority:string;segment:string})=>void;
+  page:number;setPage:(n:number)=>void;pageCount:number;allFiltered:CxLead[];refreshing:boolean;
+  onRefresh:()=>void;onExport:()=>void;onQuickChat:(id:string)=>void;onDelete:(l:CxLead)=>void;
+  saveLead:(id:string,patch:Record<string,unknown>)=>void}){
+  const [dragId,setDragId]=useState("");
+  const set=(key:keyof typeof p.filters,value:string)=>{p.setFilters({...p.filters,[key]:value});p.setPage(0)};
+  const clearAll=()=>{p.setSearch("");p.setFilters({source:"All",stage:"All",priority:"All",segment:"All"});p.setPage(0)};
+  const filtersActive=p.search.trim()!==""||Object.values(p.filters).some(v=>v!=="All");
+
+  const select=(label:string,key:keyof typeof p.filters,options:string[])=>
+    <select key={key} value={p.filters[key]} onChange={e=>set(key,e.target.value)} aria-label={label}>
+      <option value="All">{label}: All</option>{options.map(o=><option key={o}>{o}</option>)}
+    </select>;
+
+  return <>
+    <div className="cx-control-bar">
+      <input className="cx-search" value={p.search} onChange={e=>{p.setSearch(e.target.value);p.setPage(0)}} placeholder="Search leads by name, phone, email…"/>
+      {select("Source","source",CX_SOURCES)}
+      {select("Status","stage",CX_STAGES)}
+      {select("Priority","priority",CX_PRIORITIES)}
+      {select("Segment","segment",CX_SEGMENTS)}
+      <div className="cx-view-switch">
+        <button className={p.view==="table"?"active":""} onClick={()=>p.setView("table")}>Table</button>
+        <button className={p.view==="board"?"active":""} onClick={()=>p.setView("board")}>Board</button>
+      </div>
+      <button className="secondary-btn" disabled={p.refreshing} onClick={p.onRefresh}>{p.refreshing?"…":"↻ Refresh"}</button>
+      <button className="secondary-btn" onClick={p.onExport}>Export CSV</button>
+    </div>
+
+    {p.loading?<p className="empty-hint">Loading…</p>
+    :!p.filtered?<div className="empty-state">
+        <span>⚑</span>
+        <h3>{p.total?"No leads match these filters":"No leads captured yet"}</h3>
+        <p>{p.total
+          ? `You have ${p.total} lead${p.total===1?"":"s"} in total — none of them match what you've selected.`
+          : "A lead is created automatically the moment a conversation captures a phone number, email or Instagram handle."}</p>
+        {filtersActive&&<button className="primary" onClick={clearAll}>Clear filters</button>}
+      </div>
+    :p.view==="table"
+      ? <>
+        <div className="data-card table-scroll">
+          <table className="cx-table">
+            <thead><tr>
+              <th>Lead</th><th>Last interaction</th><th>Status</th><th>Priority</th><th>Segment</th>
+              <th>Source</th><th>Channel</th><th>Owner</th><th>Next follow-up</th><th/>
+            </tr></thead>
+            <tbody>{p.leads.map(l=>
+              <tr key={l.id} className={l.conversation?"clickable":""} onClick={()=>l.conversation&&p.onQuickChat(l.id)}>
+                <td><div className="cx-cell-lead">
+                  <span className={`cx-avatar tone-${l.person.avatarTone}`}>{cxInitials(l.person.name)}</span>
+                  <div><strong>{l.person.name}</strong><small>{l.person.phone||l.person.email||l.person.company||"—"}</small></div>
+                  {l.conversation?.unread&&<i className="cx-dot"/>}
+                </div></td>
+                <td>{l.conversation?<span title={l.conversation.lastMessage}>{conversationTime(l.conversation.lastAt)}</span>:<span className="cx-none-pill">No Conversation</span>}</td>
+                <td onClick={e=>e.stopPropagation()}><select className={`cx-inline stage-${l.stage.toLowerCase().replace(/\W+/g,"-")}`} value={l.stage} onChange={e=>p.saveLead(l.id,{stage:e.target.value})}>{CX_STAGES.map(o=><option key={o}>{o}</option>)}</select></td>
+                <td onClick={e=>e.stopPropagation()}><select className={`cx-inline prio-${l.priority.toLowerCase()}`} value={l.priority} onChange={e=>p.saveLead(l.id,{priority:e.target.value})}><option value="">—</option>{CX_PRIORITIES.map(o=><option key={o}>{o}</option>)}</select></td>
+                <td>{l.segment||"—"}</td>
+                <td>{l.source||"—"}</td>
+                <td>{l.conversation?<span className={`cx-chan ${l.conversation.channel}`}>{CX_CHANNEL_META[l.conversation.channel].glyph}</span>:"—"}</td>
+                <td>{l.owner||"—"}</td>
+                <td>{l.nextFollowup||"—"}</td>
+                <td onClick={e=>e.stopPropagation()}><div className="row-actions">
+                  {l.conversation
+                    ? <button title="Quick chat" onClick={()=>p.onQuickChat(l.id)}>⌸</button>
+                    : <button title="No conversation to open" disabled>⌸</button>}
+                  <button title="Delete lead" onClick={()=>p.onDelete(l)}>×</button>
+                </div></td>
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
+        {p.pageCount>1&&<div className="cx-pager">
+          <button className="secondary-btn" disabled={p.page===0} onClick={()=>p.setPage(p.page-1)}>Previous</button>
+          <span>Page {p.page+1} of {p.pageCount} · {p.filtered} lead{p.filtered===1?"":"s"}</span>
+          <button className="secondary-btn" disabled={p.page>=p.pageCount-1} onClick={()=>p.setPage(p.page+1)}>Next</button>
+        </div>}
+      </>
+      : <div className="cx-board">{CX_STAGES.map(stage=>{
+          const column=p.allFiltered.filter(l=>l.stage===stage);
+          return <div key={stage} className="cx-column"
+            onDragOver={e=>e.preventDefault()}
+            onDrop={e=>{e.preventDefault(); if(dragId)p.saveLead(dragId,{stage}); setDragId("")}}>
+            <div className="cx-column-head"><strong>{stage}</strong><i>{column.length}</i></div>
+            <div className="cx-column-body">
+              {!column.length&&<p className="cx-column-empty">Nothing here</p>}
+              {column.map(l=><div key={l.id} className="cx-card" draggable
+                onDragStart={()=>setDragId(l.id)} onDragEnd={()=>setDragId("")}
+                onClick={()=>l.conversation&&p.onQuickChat(l.id)}>
+                <div className="cx-card-top">
+                  <span className={`cx-avatar tone-${l.person.avatarTone}`}>{cxInitials(l.person.name)}</span>
+                  <strong>{l.person.name}</strong>
+                  {l.conversation?.unread&&<i className="cx-dot"/>}
+                </div>
+                <div className="cx-card-meta">
+                  {l.conversation
+                    ? <span className={`cx-chan ${l.conversation.channel}`}>{CX_CHANNEL_META[l.conversation.channel].glyph}</span>
+                    : <span className="cx-none-pill small">No Conversation</span>}
+                  {l.priority&&<span className={`cx-badge prio-${l.priority.toLowerCase()}`}>{l.priority}</span>}
+                  {l.owner&&<span className="cx-owner">{cxInitials(l.owner)}</span>}
+                </div>
+              </div>)}
+            </div>
+          </div>;
+        })}</div>}
+  </>;
+}
+
+/* ---- Quick-chat drawer ------------------------------------------------------------------------ */
+
+function CxQuickChatDrawer({lead,onClose,onExpand,saveLead,notify}:{lead:CxLead;onClose:()=>void;onExpand:()=>void;
+  saveLead:(id:string,patch:Record<string,unknown>)=>void;notify:(s:string)=>void}){
+  const token=useAuthToken();
+  const [messages,setMessages]=useState<CxMessage[]>([]);
+  const [loading,setLoading]=useState(true);
+  useEffect(()=>{
+    if(!lead.conversation||!token){setLoading(false);return}
+    fetch(metaApi(`/api/cx/messages?channel=${lead.conversation.channel}&threadKey=${encodeURIComponent(lead.conversation.threadKey)}`),{headers:authHeaders(token)})
+      .then(r=>r.json()).then((d:{messages?:CxMessage[]})=>setMessages(d.messages||[]))
+      .catch(()=>{}).finally(()=>setLoading(false));
+  },[lead.id,token]);
+  useEffect(()=>{
+    const onKey=(e:KeyboardEvent)=>{ if(e.key==="Escape")onClose() };
+    window.addEventListener("keydown",onKey);
+    return()=>window.removeEventListener("keydown",onKey);
+  },[onClose]);
+
+  return <div className="cx-drawer-scrim" onClick={onClose}>
+    <aside className="cx-drawer" onClick={e=>e.stopPropagation()} role="dialog" aria-label={`Conversation with ${lead.person.name}`}>
+      <header className="cx-drawer-head">
+        <span className={`cx-avatar tone-${lead.person.avatarTone}`}>{cxInitials(lead.person.name)}</span>
+        <div><strong>{lead.person.name}</strong>
+          <small>{lead.conversation?CX_CHANNEL_META[lead.conversation.channel].label:"No conversation"} · {lead.stage}</small></div>
+        <button className="secondary-btn" onClick={onExpand}>Expand to Full Workspace ↗</button>
+        <button className="cx-icon-btn" onClick={onClose} aria-label="Close">×</button>
+      </header>
+      <div className="cx-drawer-body">
+        <div className="cx-drawer-thread">
+          {loading?<p className="empty-hint">Loading…</p>
+          :!messages.length?<p className="empty-hint">No messages in this conversation.</p>
+          :messages.map((m,i)=>m.role==="system"
+            ? <div key={i} className="cx-system">{m.content}</div>
+            : <div key={i} className={`cx-bubble ${m.role==="user"?"visitor":m.role==="agent"?"agent":"ai"}`}>
+                <p>{m.content}</p><small>{m.role==="user"?"Visitor":m.role==="agent"?"You":"✦ Assistant"} · {conversationTime(m.createdAt)}</small>
+              </div>)}
+        </div>
+        <CxLeadPanel conversation={null} lead={lead} saveLead={saveLead} notify={notify} inDrawer/>
+      </div>
+    </aside>
+  </div>;
+}

@@ -1,4 +1,5 @@
 import { requireSession, type AuthEnv } from "./auth";
+import { qualifyConversation, type Channel } from "./conversations";
 import { json, corsPreflight, allowedOrigin } from "./shared";
 
 export interface LeadsEnv extends AuthEnv {
@@ -41,6 +42,39 @@ async function ensureLeadsSchema(db: D1Database): Promise<void> {
   try { await db.prepare(`ALTER TABLE action_submissions ADD COLUMN segment TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
 }
 
+
+// Field names vary by whatever the business named its AI Action ("Customer Email", "mobile_no",
+// "workEmail"), so identity is recognised by what the key means rather than an exact match.
+function identityFrom(data: Record<string, unknown>): { name?: string; phone?: string; email?: string; instagramHandle?: string; company?: string } {
+  const found: { name?: string; phone?: string; email?: string; instagramHandle?: string; company?: string } = {};
+  for (const [rawKey, rawValue] of Object.entries(data)) {
+    const value = String(rawValue ?? "").trim();
+    if (!value) continue;
+    const key = rawKey.toLowerCase().replace(/[^a-z]/g, "");
+    if (!found.email && (key.includes("email") || /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value))) found.email = value;
+    else if (!found.phone && (key.includes("phone") || key.includes("mobile") || key.includes("whatsapp") || key.includes("contactnumber"))) found.phone = value;
+    else if (!found.instagramHandle && key.includes("instagram")) found.instagramHandle = value;
+    else if (!found.company && (key.includes("company") || key.includes("organisation") || key.includes("organization") || key.includes("business"))) found.company = value;
+    else if (!found.name && (key === "name" || key.includes("fullname") || key.includes("customername") || key.includes("firstname"))) found.name = value;
+  }
+  return found;
+}
+
+// saveSubmission is the one place both channels land when the assistant captures business fields,
+// which makes it the natural trigger for the visitor-to-lead lifecycle. It is deliberately
+// best-effort: a dedup failure must never lose the submission that was just captured.
+async function linkToLead(db: D1Database, workspaceId: string, sessionId: string, channel: string, data: Record<string, unknown>): Promise<void> {
+  if (!sessionId) return;
+  const normalised: Channel | null = channel === "whatsapp" ? "whatsapp"
+    : channel === "instagram" ? "instagram"
+    : channel === "widget" || channel === "webchat" ? "webchat" : null;
+  if (!normalised) return;
+  const hints = identityFrom(data);
+  // A WhatsApp thread already carries a reachable number even when the captured fields do not.
+  if (normalised === "whatsapp" && !hints.phone) hints.phone = sessionId;
+  await qualifyConversation(db, workspaceId, normalised, sessionId, hints).catch(() => null);
+}
+
 export async function saveSubmission(db: D1Database, workspaceId: string, sessionId: string, actionName: string, channel: string, data: Record<string, unknown>): Promise<void> {
   await ensureLeadsSchema(db);
   const trimmedSession = (sessionId || "").slice(0, 80);
@@ -57,12 +91,14 @@ export async function saveSubmission(db: D1Database, workspaceId: string, sessio
       try { merged = { ...JSON.parse(existing.data), ...data }; } catch { /* keep just the new data */ }
       await db.prepare(`UPDATE action_submissions SET data = ?, channel = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
         .bind(JSON.stringify(merged).slice(0, MAX_DATA_LENGTH), channel.slice(0, 40), existing.id).run();
+      await linkToLead(db, workspaceId, trimmedSession, channel, merged as Record<string, unknown>);
       return;
     }
   }
 
   await db.prepare(`INSERT INTO action_submissions (workspace_id, session_id, action_name, channel, data) VALUES (?, ?, ?, ?, ?)`)
     .bind(workspaceId, trimmedSession, trimmedAction, channel.slice(0, 40), JSON.stringify(data).slice(0, MAX_DATA_LENGTH)).run();
+  await linkToLead(db, workspaceId, trimmedSession, channel, data);
 }
 
 async function listSubmissions(request: Request, env: LeadsEnv): Promise<Response> {
