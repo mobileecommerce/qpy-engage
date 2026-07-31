@@ -540,6 +540,36 @@ async function sync(request: Request, env: ConversationsEnv): Promise<Response> 
   });
 }
 
+
+// Whether a human has taken this thread over. widget_conversation_state was built for web chat but
+// its (workspace, thread) shape is channel-agnostic, so WhatsApp reuses it rather than growing a
+// second table that would have to be kept in step.
+export async function isAiPaused(db: D1Database, workspaceId: string, threadKey: string): Promise<boolean> {
+  const row = await db.prepare(`SELECT ai_active FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`)
+    .bind(workspaceId, threadKey).first<{ ai_active: number }>().catch(() => null);
+  return row?.ai_active === 0;
+}
+
+// Takeover for channels other than web chat. Web chat keeps using /api/widget/takeover, which also
+// writes a visible system line into the thread and generates a handoff brief — behaviour worth
+// leaving exactly where it already works rather than reimplementing here.
+async function setTakeover(request: Request, env: ConversationsEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const body = await request.json() as { threadKey?: string; active?: boolean };
+  const threadKey = (body.threadKey || "").trim();
+  if (!threadKey) return json(request, { error: "Missing threadKey." }, 400);
+  await ensureSchema(env.DB);
+  await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, ai_active) VALUES (?, ?, ?)
+    ON CONFLICT(workspace_id, session_id) DO UPDATE SET ai_active = excluded.ai_active`)
+    .bind(session.workspaceId, threadKey, body.active ? 1 : 0).run();
+  await env.DB.prepare(`UPDATE crm_conversations SET ai_active = ?, needs_attention = CASE WHEN ? = 0 THEN 0 ELSE needs_attention END,
+    updated_at = CURRENT_TIMESTAMP WHERE workspace_id = ? AND thread_key = ?`)
+    .bind(body.active ? 1 : 0, body.active ? 1 : 0, session.workspaceId, threadKey).run();
+  await recordEvent(env.DB, session.workspaceId, "conversation", threadKey);
+  return json(request, { ok: true, aiActive: Boolean(body.active) });
+}
+
 export async function handleConversationsRequest(request: Request, env: ConversationsEnv): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/cx/")) return null;
@@ -552,6 +582,7 @@ export async function handleConversationsRequest(request: Request, env: Conversa
   if (url.pathname === "/api/cx/leads" && request.method === "GET") return listLeads(request, env);
   if (url.pathname === "/api/cx/qualify" && request.method === "POST") return qualify(request, env);
   if (url.pathname === "/api/cx/sync" && request.method === "GET") return sync(request, env);
+  if (url.pathname === "/api/cx/takeover" && request.method === "POST") return setTakeover(request, env);
   const leadMatch = url.pathname.match(/^\/api\/cx\/leads\/([\w-]+)$/);
   if (leadMatch && request.method === "PATCH") return updateLead(request, env, leadMatch[1]);
   if (leadMatch && request.method === "DELETE") return deleteLead(request, env, leadMatch[1]);

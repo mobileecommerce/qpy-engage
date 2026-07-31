@@ -3291,6 +3291,32 @@ function ConversationsModule({notify}:{notify:(s:string)=>void}){
   };
   useEffect(()=>{load()},[token]);
 
+  // Bi-directional sync, the shared half: tail the append-only event log so a second agent's
+  // changes land here too. The endpoint returns a cursor and only what happened after it, so a
+  // quiet workspace costs one tiny request every few seconds and a busy one never re-fetches twice
+  // for the same change. This is the polling half of the transport described in
+  // docs/conversations-architecture.md — a websocket would push the identical payload.
+  const cursorRef=useRef(0);
+  useEffect(()=>{
+    if(!token)return;
+    let stopped=false;
+    const tick=async()=>{
+      try{
+        const response=await fetch(metaApi(`/api/cx/sync?since=${cursorRef.current}`),{headers:authHeaders(token)});
+        if(!response.ok)return;
+        const data=await response.json() as {cursor?:number;events?:{seq:number;kind:string;entityId:string}[]};
+        const first=cursorRef.current===0;
+        cursorRef.current=data.cursor||cursorRef.current;
+        // The first poll only establishes where we are; it must not trigger a redundant reload of
+        // data we just fetched.
+        if(!first&&data.events&&data.events.length&&!stopped)await load(true);
+      }catch{ /* offline or mid-deploy — the next tick retries */ }
+    };
+    tick();
+    const timer=setInterval(tick,6000);
+    return()=>{stopped=true;clearInterval(timer)};
+  },[token]);
+
   // Bi-directional sync, the local half: one lead lives in two places on screen, so a single
   // writer updates both projections at once. No refetch, no flicker, and the Leads table and the
   // open chat header can never disagree about a stage.
@@ -3361,6 +3387,15 @@ function ConversationsModule({notify}:{notify:(s:string)=>void}){
     notify(`Exported ${visibleLeads.length} lead${visibleLeads.length===1?"":"s"}`);
   };
 
+  // Opens the lead's own record: the Leads tab, filtered to just them, so the row or card is the
+  // only thing on screen rather than something to hunt for.
+  const openFullLead=(personName:string)=>{
+    setLeadSearch(personName);
+    setLeadFilters({source:"All",stage:"All",priority:"All",segment:"All"});
+    setPage(0);
+    setDrawerLeadId("");
+    setTab("leads");
+  };
   const openFullWorkspace=(lead:CxLead)=>{
     if(!lead.conversation)return;
     const match=conversations.find(c=>c.threadKey===lead.conversation!.threadKey&&c.channel===lead.conversation!.channel);
@@ -3379,7 +3414,8 @@ function ConversationsModule({notify}:{notify:(s:string)=>void}){
       ? <CxConversationsTab loading={loading} conversations={visibleConversations} total={conversations.length}
           counts={counts} search={search} setSearch={setSearch} channelFilter={channelFilter} setChannelFilter={setChannelFilter}
           pill={pill} setPill={setPill} selected={selected} setSelectedId={setSelectedId}
-          panelOpen={panelOpen} setPanelOpen={setPanelOpen} saveLead={saveLead} onRefresh={refresh} notify={notify}/>
+          panelOpen={panelOpen} setPanelOpen={setPanelOpen} saveLead={saveLead} onRefresh={refresh} notify={notify}
+          onFullLead={openFullLead} onReload={()=>load(true)}/>
       : <CxLeadsTab loading={loading} leads={pageLeads} filtered={visibleLeads.length} total={leads.length}
           view={leadView} setView={setLeadView} search={leadSearch} setSearch={setLeadSearch}
           filters={leadFilters} setFilters={setLeadFilters} page={safePage} setPage={setPage} pageCount={pageCount}
@@ -3387,7 +3423,7 @@ function ConversationsModule({notify}:{notify:(s:string)=>void}){
           onQuickChat={setDrawerLeadId} onDelete={removeLead} saveLead={saveLead}/>}
 
     {drawerLead&&<CxQuickChatDrawer lead={drawerLead} onClose={()=>setDrawerLeadId("")}
-      onExpand={()=>openFullWorkspace(drawerLead)} saveLead={saveLead} notify={notify}/>}
+      onExpand={()=>openFullWorkspace(drawerLead)} saveLead={saveLead} notify={notify} onFullLead={openFullLead}/>}
   </>;
 }
 
@@ -3397,12 +3433,22 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
   search:string;setSearch:(s:string)=>void;channelFilter:"all"|CxChannel;setChannelFilter:(c:"all"|CxChannel)=>void;
   pill:typeof CX_PILLS[number];setPill:(v:typeof CX_PILLS[number])=>void;selected:CxConversation|null;
   setSelectedId:(s:string)=>void;panelOpen:boolean;setPanelOpen:(v:boolean)=>void;
-  saveLead:(id:string,patch:Record<string,unknown>)=>void;onRefresh:()=>void;notify:(s:string)=>void}){
+  saveLead:(id:string,patch:Record<string,unknown>)=>void;onRefresh:()=>void;notify:(s:string)=>void;
+  onFullLead:(name:string)=>void;onReload:()=>void}){
   const token=useAuthToken();
   const [messages,setMessages]=useState<CxMessage[]>([]);
+  const [togglingAi,setTogglingAi]=useState(false);
   const [loadingThread,setLoadingThread]=useState(false);
   const [reply,setReply]=useState("");
   const [asNote,setAsNote]=useState(false);
+  const [cannedOpen,setCannedOpen]=useState(false);
+  const [editingCanned,setEditingCanned]=useState(false);
+  const [canned,setCanned]=useStoredState<{title:string;body:string}[]>("qpy-engage-canned-responses",[
+    {title:"Thanks — checking now",body:"Thanks for waiting — let me check that for you and come straight back."},
+    {title:"Ask for contact details",body:"Could you share the best number or email to reach you on, so we can follow up properly?"},
+    {title:"Outside business hours",body:"We're closed right now, but your message is with the team and someone will reply first thing."},
+    {title:"Handing to a colleague",body:"I'm passing this to a colleague who can help properly — they'll be with you shortly."},
+  ]);
   const [sending,setSending]=useState(false);
   const threadRef=useRef<HTMLDivElement|null>(null);
   const key=p.selected?`${p.selected.channel}:${p.selected.threadKey}`:"";
@@ -3433,6 +3479,31 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
       setReply("");
     }catch{ p.notify(asNote?"Could not save that note":"Could not send that reply") }
     finally{ setSending(false) }
+  };
+
+  // Web chat keeps its own endpoint, which also writes a visible system line into the thread and
+  // generates the agent's handoff brief. Other channels use the channel-agnostic one, which gates
+  // the assistant without pretending to post into a table that is not theirs.
+  const toggleAi=async()=>{
+    if(!p.selected||!token||togglingAi)return;
+    const next=!p.selected.aiActive;
+    setTogglingAi(true);
+    try{
+      const webchat=p.selected.channel==="webchat";
+      const response=await fetch(metaApi(webchat?"/api/widget/takeover":"/api/cx/takeover"),{
+        method:"POST",headers:{"content-type":"application/json",...authHeaders(token)},
+        body:JSON.stringify(webchat?{sessionId:p.selected.threadKey,active:next}:{threadKey:p.selected.threadKey,active:next}),
+      });
+      if(!response.ok)throw new Error();
+      p.notify(next?"Handed back to the AI":"You're handling this conversation — the AI is paused");
+      p.onReload();
+      if(webchat){
+        const refreshed=await fetch(metaApi(`/api/cx/messages?channel=webchat&threadKey=${encodeURIComponent(p.selected.threadKey)}`),{headers:authHeaders(token)});
+        const data=await refreshed.json() as {messages?:CxMessage[]};
+        setMessages(data.messages||[]);
+      }
+    }catch{ p.notify("Could not change who is handling this conversation") }
+    finally{ setTogglingAi(false) }
   };
 
   const pillCount=(name:typeof CX_PILLS[number])=>
@@ -3500,7 +3571,7 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
               <span>{p.selected.messageCount} messages</span>
             </div>
           </div>
-          <button className="secondary-btn" onClick={()=>p.notify(p.selected!.aiActive?"Pause AI is wired to the web chat takeover endpoint":"Hand to AI")}>{p.selected.aiActive?"Pause AI":"Hand to AI"}</button>
+          <button className="secondary-btn" disabled={togglingAi} onClick={toggleAi}>{togglingAi?"…":p.selected.aiActive?"Pause AI":"Hand to AI"}</button>
           <button className="cx-panel-toggle" onClick={()=>p.setPanelOpen(!p.panelOpen)} title={p.panelOpen?"Collapse lead panel":"Expand lead panel"}>{p.panelOpen?"⟩":"⟨"}</button>
         </header>
         <div className="cx-messages" ref={threadRef}>
@@ -3518,8 +3589,15 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
             placeholder={asNote?"Write an internal note — the customer never sees this…":"Write a reply…  (⌘↵ to send)"}/>
           <div className="cx-composer-bar">
             <label className="cx-note-toggle"><input type="checkbox" checked={asNote} onChange={e=>setAsNote(e.target.checked)}/>Internal note</label>
-            <button className="cx-icon-btn" title="Attach a file (coming with the shared-documents work)" disabled>⎘</button>
-            <button className="cx-icon-btn" title="Canned responses" disabled>⌸</button>
+            <div className="cx-canned">
+              <button className="cx-icon-btn" title="Canned responses" onClick={()=>setCannedOpen(!cannedOpen)}>⌸</button>
+              {cannedOpen&&<div className="cx-canned-menu">
+                <strong>Canned responses</strong>
+                {canned.map((c,i)=><button key={i} onClick={()=>{setReply(reply?`${reply.trimEnd()} ${c.body}`:c.body);setCannedOpen(false)}}>
+                  <b>{c.title}</b><small>{c.body}</small></button>)}
+                <button className="cx-canned-edit" onClick={()=>{setCannedOpen(false);setEditingCanned(true)}}>Edit responses…</button>
+              </div>}
+            </div>
             <button className="primary" disabled={sending||!reply.trim()} onClick={send}>{sending?"Sending…":asNote?"Save note":"Send"}</button>
           </div>
         </div>
@@ -3527,7 +3605,32 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
     </section>
 
     {/* Column 3 — lead details */}
-    {p.panelOpen&&p.selected&&<CxLeadPanel conversation={p.selected} saveLead={p.saveLead} notify={p.notify}/>}
+    {p.panelOpen&&p.selected&&<CxLeadPanel conversation={p.selected} saveLead={p.saveLead} notify={p.notify} onFullLead={p.onFullLead}/>}
+    {editingCanned&&<CxCannedEditor canned={canned} setCanned={setCanned} onClose={()=>setEditingCanned(false)}/>}
+  </div>;
+}
+
+function CxCannedEditor({canned,setCanned,onClose}:{canned:{title:string;body:string}[];
+  setCanned:(v:{title:string;body:string}[])=>void;onClose:()=>void}){
+  const [draft,setDraft]=useState(canned);
+  const update=(i:number,key:"title"|"body",value:string)=>setDraft(draft.map((c,n)=>n===i?{...c,[key]:value}:c));
+  return <div className="cx-drawer-scrim" onClick={onClose}>
+    <div className="cx-canned-editor" onClick={e=>e.stopPropagation()} role="dialog" aria-label="Edit canned responses">
+      <header><strong>Canned responses</strong><button className="cx-icon-btn" onClick={onClose} aria-label="Close">×</button></header>
+      <p>Shared with everyone on your team. Pick one from the composer to drop it into a reply — you can still edit the text before sending.</p>
+      <div className="cx-canned-rows">{draft.map((c,i)=>
+        <div key={i} className="cx-canned-row">
+          <input value={c.title} onChange={e=>update(i,"title","" + e.target.value)} placeholder="Short name"/>
+          <textarea value={c.body} rows={2} onChange={e=>update(i,"body",e.target.value)} placeholder="What gets inserted…"/>
+          <button className="cx-icon-btn" onClick={()=>setDraft(draft.filter((_,n)=>n!==i))} aria-label="Remove">×</button>
+        </div>)}
+        {!draft.length&&<p className="empty-hint">No canned responses yet — add your first below.</p>}
+      </div>
+      <div className="modal-actions">
+        <button className="secondary-btn" onClick={()=>setDraft([...draft,{title:"",body:""}])}>Add response</button>
+        <button className="primary" onClick={()=>{setCanned(draft.filter(c=>c.title.trim()&&c.body.trim()));onClose()}}>Save</button>
+      </div>
+    </div>
   </div>;
 }
 
@@ -3541,8 +3644,9 @@ function CxAccordion({title,count,children,defaultOpen}:{title:string;count?:num
   </div>;
 }
 
-function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer}:{conversation:CxConversation|null;lead?:CxLead|null;
-  saveLead:(id:string,patch:Record<string,unknown>)=>void;notify:(s:string)=>void;inDrawer?:boolean}){
+function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer,onFullLead}:{conversation:CxConversation|null;lead?:CxLead|null;
+  saveLead:(id:string,patch:Record<string,unknown>)=>void;notify:(s:string)=>void;inDrawer?:boolean;
+  onFullLead?:(name:string)=>void}){
   const token=useAuthToken();
   const person=lead?.person||conversation?.person||null;
   const summary=lead||conversation?.lead||null;
@@ -3592,7 +3696,7 @@ function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer}:{conversation:
   return <aside className={`cx-panel${inDrawer?" in-drawer":""}`}>
     <div className="cx-panel-head">
       <h3>Lead Details</h3>
-      {summary&&<button className="text-action" onClick={()=>notify("Opens the full lead record")}>View Full Lead →</button>}
+      {summary&&onFullLead&&<button className="text-action" onClick={()=>onFullLead(person?.name||conversation?.name||"")}>View Full Lead →</button>}
     </div>
 
     <div className="cx-profile">
@@ -3776,8 +3880,8 @@ function CxLeadsTab(p:{loading:boolean;leads:CxLead[];filtered:number;total:numb
 
 /* ---- Quick-chat drawer ------------------------------------------------------------------------ */
 
-function CxQuickChatDrawer({lead,onClose,onExpand,saveLead,notify}:{lead:CxLead;onClose:()=>void;onExpand:()=>void;
-  saveLead:(id:string,patch:Record<string,unknown>)=>void;notify:(s:string)=>void}){
+function CxQuickChatDrawer({lead,onClose,onExpand,saveLead,notify,onFullLead}:{lead:CxLead;onClose:()=>void;onExpand:()=>void;
+  saveLead:(id:string,patch:Record<string,unknown>)=>void;notify:(s:string)=>void;onFullLead:(name:string)=>void}){
   const token=useAuthToken();
   const [messages,setMessages]=useState<CxMessage[]>([]);
   const [loading,setLoading]=useState(true);
@@ -3812,7 +3916,7 @@ function CxQuickChatDrawer({lead,onClose,onExpand,saveLead,notify}:{lead:CxLead;
                 <p>{m.content}</p><small>{m.role==="user"?"Visitor":m.role==="agent"?"You":"✦ Assistant"} · {conversationTime(m.createdAt)}</small>
               </div>)}
         </div>
-        <CxLeadPanel conversation={null} lead={lead} saveLead={saveLead} notify={notify} inDrawer/>
+        <CxLeadPanel conversation={null} lead={lead} saveLead={saveLead} notify={notify} inDrawer onFullLead={onFullLead}/>
       </div>
     </aside>
   </div>;

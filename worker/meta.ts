@@ -5,6 +5,7 @@ import { runAutomations, continueAfterUpload, type RunCtx } from "./automations"
 import { loadSession } from "./automation-session";
 import { toGraph } from "./automation-graph";
 import { saveDocument, validateAgainstSpec, receivedKeysAtNode, MAX_UPLOAD_BYTES } from "./documents";
+import { isAiPaused } from "./conversations";
 
 const DEFAULT_GRAPH_VERSION = "v25.0";
 
@@ -464,6 +465,8 @@ async function receiveWebhook(request: Request, env: MetaEnv): Promise<Response>
   // webhook handler has no ExecutionContext to waitUntil on) but only for messages that actually
   // matched a new insert, so a slow run + Meta retry never produces a duplicate reply.
   for (const item of toAutomate) {
+    // An agent who has taken this conversation over must not be talked over by the assistant.
+    if (await isAiPaused(env.DB, item.connection.workspace_id, item.from).catch(() => false)) continue;
     await runWhatsAppAutomations(env, item.connection.workspace_id, item.connection, item.from, item.text).catch(() => {});
   }
   for (const item of toStore) {
