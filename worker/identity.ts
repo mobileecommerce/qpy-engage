@@ -1,5 +1,7 @@
 import { json, corsPreflight, allowedOrigin } from "./shared";
 import { requireSession, type AuthEnv } from "./auth";
+import { identityFrom } from "./leads";
+import { qualifyConversation, type Channel } from "./conversations";
 
 export interface IdentityEnv extends AuthEnv {
   DB: D1Database;
@@ -50,6 +52,9 @@ export async function ensureIdentitySchema(db: D1Database): Promise<void> {
   for (const statement of [
     `ALTER TABLE crm_people ADD COLUMN merged_into_id TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE crm_people ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE crm_backfill_state ADD COLUMN last_submission_id INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE crm_backfill_state ADD COLUMN legacy_done INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE crm_backfill_state ADD COLUMN profiles_created INTEGER NOT NULL DEFAULT 0`,
   ]) {
     try { await db.prepare(statement).run(); } catch { /* column already present */ }
   }
@@ -97,8 +102,11 @@ export async function ensureIdentitySchema(db: D1Database): Promise<void> {
     db.prepare(`CREATE TABLE IF NOT EXISTS crm_backfill_state (
       workspace_id TEXT PRIMARY KEY NOT NULL,
       last_person_id TEXT NOT NULL DEFAULT '',
+      last_submission_id INTEGER NOT NULL DEFAULT 0,
       people_done INTEGER NOT NULL DEFAULT 0,
       identities_created INTEGER NOT NULL DEFAULT 0,
+      legacy_done INTEGER NOT NULL DEFAULT 0,
+      profiles_created INTEGER NOT NULL DEFAULT 0,
       completed_at TEXT
     )`),
   ]);
@@ -487,6 +495,52 @@ export async function absorbProfile(
 
 export interface BackfillProgress {
   peopleProcessed: number; identitiesCreated: number; done: boolean; cursor: string;
+  /** Phase A: historical captures converted into profiles. */
+  legacyProcessed: number; profilesCreated: number; phase: "legacy" | "identities" | "done";
+}
+
+// Channels the legacy capture store used, mapped onto the conversation channels that exist now.
+// 'test_studio_chat' is deliberately absent: those rows are the assistant test harness, not real
+// customers, and importing them would put fake people in the pipeline.
+const LEGACY_CHANNEL: Record<string, Channel> = {
+  widget: "webchat", webchat: "webchat", whatsapp: "whatsapp", instagram: "instagram",
+};
+
+/**
+ * Phase A — the actual legacy data.
+ *
+ * The flat lead history lives in `action_submissions`, not in `crm_people`: that table only ever
+ * held profiles created after the Conversations module shipped, so a backfill that iterates it
+ * finds nothing and reports success. This walks the real capture store instead.
+ *
+ * Each row is replayed through `qualifyConversation`, the same path a live capture takes. That
+ * means the historical import inherits the waterfall, the dedup guarantee and lead creation rather
+ * than growing a second implementation that could disagree with the first.
+ */
+async function backfillLegacyCaptures(
+  db: D1Database, workspaceId: string, afterId: number, batchSize: number,
+): Promise<{ processed: number; profiles: number; lastId: number; done: boolean }> {
+  const rows = await db.prepare(`SELECT id, session_id, channel, data FROM action_submissions
+    WHERE workspace_id = ? AND id > ? ORDER BY id ASC LIMIT ?`)
+    .bind(workspaceId, afterId, batchSize)
+    .all<{ id: number; session_id: string; channel: string; data: string }>();
+  const results = rows.results || [];
+
+  let profiles = 0;
+  let lastId = afterId;
+  for (const row of results) {
+    lastId = row.id;
+    const channel = LEGACY_CHANNEL[(row.channel || "").trim()];
+    if (!channel || !row.session_id) continue;
+    let data: Record<string, unknown>;
+    try { data = JSON.parse(row.data) as Record<string, unknown>; } catch { continue; }
+    const hints = identityFrom(data);
+    // A WhatsApp thread key is itself a reachable number even when the captured fields are thin.
+    if (channel === "whatsapp" && !hints.phone) hints.phone = row.session_id;
+    const outcome = await qualifyConversation(db, workspaceId, channel, row.session_id, hints).catch(() => null);
+    if (outcome) profiles++;
+  }
+  return { processed: results.length, profiles, lastId, done: results.length < batchSize };
 }
 
 /**
@@ -496,9 +550,31 @@ export interface BackfillProgress {
  */
 export async function runBackfill(db: D1Database, workspaceId: string, batchSize = BACKFILL_BATCH): Promise<BackfillProgress> {
   await ensureIdentitySchema(db);
-  const state = await db.prepare(`SELECT last_person_id, people_done, identities_created FROM crm_backfill_state WHERE workspace_id = ?`)
-    .bind(workspaceId).first<{ last_person_id: string; people_done: number; identities_created: number }>();
+  const state = await db.prepare(`SELECT last_person_id, last_submission_id, people_done, identities_created, legacy_done, profiles_created
+    FROM crm_backfill_state WHERE workspace_id = ?`)
+    .bind(workspaceId).first<{ last_person_id: string; last_submission_id: number; people_done: number; identities_created: number; legacy_done: number; profiles_created: number }>();
   const cursor = state?.last_person_id || "";
+  const legacyDone = state?.legacy_done === 1;
+  const priorProfiles = state?.profiles_created || 0;
+
+  // Phase A must finish before phase B: it is what creates the profiles phase B then walks.
+  if (!legacyDone) {
+    const legacy = await backfillLegacyCaptures(db, workspaceId, state?.last_submission_id || 0, batchSize);
+    await db.prepare(`INSERT INTO crm_backfill_state (workspace_id, last_submission_id, profiles_created, legacy_done)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(workspace_id) DO UPDATE SET last_submission_id = excluded.last_submission_id,
+        profiles_created = excluded.profiles_created, legacy_done = excluded.legacy_done`)
+      .bind(workspaceId, legacy.lastId, priorProfiles + legacy.profiles, legacy.done ? 1 : 0).run();
+    return {
+      peopleProcessed: state?.people_done || 0,
+      identitiesCreated: state?.identities_created || 0,
+      legacyProcessed: legacy.lastId,
+      profilesCreated: priorProfiles + legacy.profiles,
+      done: false,
+      cursor,
+      phase: "legacy",
+    };
+  }
 
   const people = await db.prepare(`SELECT id, full_name, phone, email, instagram_handle, company
     FROM crm_people WHERE workspace_id = ? AND id > ? ORDER BY id ASC LIMIT ?`)
@@ -550,7 +626,11 @@ export async function runBackfill(db: D1Database, workspaceId: string, batchSize
       completed_at = excluded.completed_at`)
     .bind(workspaceId, nextCursor, peopleDone, identitiesCreated, done ? new Date().toISOString() : null).run();
 
-  return { peopleProcessed: peopleDone, identitiesCreated, done, cursor: nextCursor };
+  return {
+    peopleProcessed: peopleDone, identitiesCreated, done, cursor: nextCursor,
+    legacyProcessed: state?.last_submission_id || 0, profilesCreated: priorProfiles,
+    phase: done ? "done" : "identities",
+  };
 }
 
 /* ------------------------------------------------------------------ HTTP surface */

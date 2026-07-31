@@ -3272,6 +3272,7 @@ function ConversationsModule({notify}:{notify:(s:string)=>void}){
   const [page,setPage]=useState(0);
   const [drawerLeadId,setDrawerLeadId]=useState("");
   const [refreshing,setRefreshing]=useState(false);
+  const [importing,setImporting]=useState("");
 
   const load=async(silent?:boolean)=>{
     if(!token){setLoading(false);return}
@@ -3347,6 +3348,27 @@ function ConversationsModule({notify}:{notify:(s:string)=>void}){
   };
   const refresh=async()=>{ setRefreshing(true); await load(true); setRefreshing(false) };
 
+  // One click, however many batches it takes. The endpoint is idempotent and cursor-resumable, so
+  // looping here is safe and saves the operator from running it by hand until it reports done.
+  const importHistory=async()=>{
+    if(!token||importing)return;
+    setImporting("Reading your capture history…");
+    let profiles=0;
+    try{
+      for(let pass=0;pass<200;pass++){
+        const response=await fetch(metaApi("/api/profiles/backfill"),{method:"POST",headers:authHeaders(token)});
+        const data=await response.json() as {done?:boolean;phase?:string;profilesCreated?:number;identitiesCreated?:number;error?:string};
+        if(!response.ok)throw new Error(data.error||"Import failed");
+        profiles=data.profilesCreated??profiles;
+        setImporting(data.phase==="legacy"?`Importing past leads — ${profiles} so far…`:`Linking identities — ${profiles} leads…`);
+        if(data.done)break;
+      }
+      notify(profiles?`Imported ${profiles} lead${profiles===1?"":"s"} from your history`:"Nothing left to import");
+      await load(true);
+    }catch(error){ notify(error instanceof Error?error.message:"Could not import history") }
+    finally{ setImporting("") }
+  };
+
   const selected=conversations.find(c=>c.id===selectedId)||null;
   const drawerLead=leads.find(l=>l.id===drawerLeadId)||null;
 
@@ -3420,6 +3442,7 @@ function ConversationsModule({notify}:{notify:(s:string)=>void}){
           view={leadView} setView={setLeadView} search={leadSearch} setSearch={setLeadSearch}
           filters={leadFilters} setFilters={setLeadFilters} page={safePage} setPage={setPage} pageCount={pageCount}
           allFiltered={visibleLeads} refreshing={refreshing} onRefresh={refresh} onExport={exportCsv}
+          importing={importing} onImport={importHistory}
           onQuickChat={setDrawerLeadId} onDelete={removeLead} saveLead={saveLead}/>}
 
     {drawerLead&&<CxQuickChatDrawer lead={drawerLead} onClose={()=>setDrawerLeadId("")}
@@ -3807,7 +3830,7 @@ function CxLeadsTab(p:{loading:boolean;leads:CxLead[];filtered:number;total:numb
   filters:{source:string;stage:string;priority:string;segment:string};setFilters:(f:{source:string;stage:string;priority:string;segment:string})=>void;
   page:number;setPage:(n:number)=>void;pageCount:number;allFiltered:CxLead[];refreshing:boolean;
   onRefresh:()=>void;onExport:()=>void;onQuickChat:(id:string)=>void;onDelete:(l:CxLead)=>void;
-  saveLead:(id:string,patch:Record<string,unknown>)=>void}){
+  saveLead:(id:string,patch:Record<string,unknown>)=>void;importing:string;onImport:()=>void}){
   const [dragId,setDragId]=useState("");
   const set=(key:keyof typeof p.filters,value:string)=>{p.setFilters({...p.filters,[key]:value});p.setPage(0)};
   const clearAll=()=>{p.setSearch("");p.setFilters({source:"All",stage:"All",priority:"All",segment:"All"});p.setPage(0)};
@@ -3839,8 +3862,11 @@ function CxLeadsTab(p:{loading:boolean;leads:CxLead[];filtered:number;total:numb
         <h3>{p.total?"No leads match these filters":"No leads captured yet"}</h3>
         <p>{p.total
           ? `You have ${p.total} lead${p.total===1?"":"s"} in total — none of them match what you've selected.`
-          : "A lead is created automatically the moment a conversation captures a phone number, email or Instagram handle."}</p>
-        {filtersActive&&<button className="primary" onClick={clearAll}>Clear filters</button>}
+          : "A lead is created automatically the moment a conversation captures a phone number, email or Instagram handle. Conversations from before that was switched on need importing once."}</p>
+        {filtersActive
+          ? <button className="primary" onClick={clearAll}>Clear filters</button>
+          : !p.total&&<button className="primary" disabled={Boolean(p.importing)} onClick={p.onImport}>
+              {p.importing||"Import leads from past conversations"}</button>}
       </div>
     :p.view==="table"
       ? <>

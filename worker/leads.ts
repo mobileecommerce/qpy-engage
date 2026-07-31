@@ -45,7 +45,7 @@ async function ensureLeadsSchema(db: D1Database): Promise<void> {
 
 // Field names vary by whatever the business named its AI Action ("Customer Email", "mobile_no",
 // "workEmail"), so identity is recognised by what the key means rather than an exact match.
-function identityFrom(data: Record<string, unknown>): { name?: string; phone?: string; email?: string; instagramHandle?: string; company?: string } {
+export function identityFrom(data: Record<string, unknown>): { name?: string; phone?: string; email?: string; instagramHandle?: string; company?: string } {
   const found: { name?: string; phone?: string; email?: string; instagramHandle?: string; company?: string } = {};
   for (const [rawKey, rawValue] of Object.entries(data)) {
     const value = String(rawValue ?? "").trim();
