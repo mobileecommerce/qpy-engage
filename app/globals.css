@@ -1286,3 +1286,39 @@ small{font-size:11.5px;line-height:1.45}
 .cx-ended-note{flex:none;border-top:1px solid var(--line);padding:16px;text-align:center;background:#fcfcfd}
 .cx-ended-note strong{display:block;font-size:13px;color:#4a5160}
 .cx-ended-note small{display:block;font-size:11.5px;color:#8b93a1;line-height:1.5;margin-top:4px;max-width:420px;margin-left:auto;margin-right:auto}
+
+/* ---- Assistants list ------------------------------------------------------------------------- */
+.asst-list{display:flex;flex-direction:column;gap:9px}
+.asst-item{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--line);
+  border-radius:10px;padding:14px 16px;flex-wrap:wrap}
+.asst-main{flex:1;min-width:200px}
+.asst-item strong{display:flex;align-items:center;gap:8px;font-size:14px;color:#20232b}
+.asst-default{font-size:9.5px;font-weight:800;letter-spacing:.05em;background:#e2f6ea;color:#2f7d54;
+  border-radius:20px;padding:3px 8px}
+/* Routing is the thing an operator most needs to read at a glance, so it sits directly under the
+   name rather than behind the Routing button. */
+.asst-item small{display:block;font-size:11.5px;color:#4a5160;margin-top:3px}
+.asst-item small.asst-unrouted{color:#c0503f}
+.asst-item em{display:block;font-style:normal;font-size:11px;color:#9aa1af;margin-top:2px}
+
+.asst-routing{width:min(560px,calc(100vw - 40px));max-height:86vh;overflow-y:auto;margin:auto;align-self:center;
+  background:#fff;border-radius:12px;box-shadow:0 24px 70px #00000038;padding:20px}
+.cx-drawer-scrim:has(.asst-routing){align-items:center;justify-content:center}
+.asst-routing>header{display:flex;align-items:flex-start;gap:10px;margin-bottom:16px}
+.asst-routing>header>div{flex:1;min-width:0}
+.asst-routing>header strong{display:block;font-size:15px;color:#20232b}
+.asst-routing>header small{display:block;font-size:11.5px;color:#8b93a1;margin-top:2px;line-height:1.5}
+.asst-channels{display:flex;flex-direction:column;gap:7px;margin-bottom:18px}
+.asst-channel{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:9px;
+  padding:11px 12px;cursor:pointer}
+.asst-channel.on{background:#eef0fb;border-color:#c3c7f5}
+.asst-channel input{accent-color:#4c50ee}
+.asst-channel>span{font-size:14px;color:#7d8493}
+.asst-channel>div{flex:1;min-width:0}
+.asst-channel strong{display:block;font-size:12.5px;color:#20232b}
+.asst-channel small{display:block;font-size:11px;color:#98651c;margin-top:2px;line-height:1.45}
+.asst-specific>strong{display:block;font-size:12.5px;color:#20232b}
+.asst-specific>small{display:block;font-size:11.5px;color:#8b93a1;margin:2px 0 10px;line-height:1.5}
+.asst-specific-row{display:flex;align-items:center;gap:7px;margin-bottom:7px}
+.asst-specific-row select{flex:0 0 128px;border:1px solid #dfe2e8;border-radius:7px;padding:7px 8px;font-size:12px;background:#fff}
+.asst-specific-row input{flex:1;border:1px solid #dfe2e8;border-radius:7px;padding:7px 9px;font:inherit;font-size:12.5px;min-width:0}

@@ -318,7 +318,7 @@ function Workspace({session,onLogout,isSuperadmin,isImpersonating,onExitImperson
   const resetWorkspace=()=>{if(!window.confirm("Restore all Qpy Engage demo data? Your browser changes will be removed."))return;Object.keys(localStorage).filter(key=>key.startsWith("qpy-engage-")).forEach(key=>localStorage.removeItem(key));location.reload()};
 
   const body = section === "Overview" ? <Overview onNavigate={go} onCreate={openAutomation} connected={connected} conversations={conversations} automations={automations} sources={sources} userName={session.user.name||session.user.email.split("@")[0]} workspaceName={session.workspace.name}/> :
-    section === "Assistants" ? <Assistants sources={sources} workspaceName={session.workspace.name} onKnowledge={()=>go("Knowledge")} onChannels={()=>go("Channels")} onAnalytics={()=>go("Analytics")} notify={notify}/> :
+    section === "Assistants" ? <AssistantsScreen sources={sources} workspaceName={session.workspace.name} onKnowledge={()=>go("Knowledge")} onChannels={()=>go("Channels")} onAnalytics={()=>go("Analytics")} notify={notify}/> :
     section === "Channels" ? <Channels step={channelStep} setStep={setChannelStep} connected={connected} setConnected={setConnected} workspaceId={session.workspace.id} workspaceName={session.workspace.name} notify={notify}/> :
     section === "Conversations" ? <ConversationsModule notify={notify}/> :
     section === "Campaigns" ? <Campaigns notify={notify} onManageAudiences={()=>go("Audiences")}/> :
@@ -388,7 +388,7 @@ function Workspace({session,onLogout,isSuperadmin,isImpersonating,onExitImperson
   </main>;
 }
 
-function PageHeader({eyebrow,title,description,action}:{eyebrow?:string;title:string;description:string;action?:React.ReactNode}){return <div className="page-header"><div>{eyebrow&&<p className="eyebrow">{eyebrow}</p>}<h1>{title}</h1><p>{description}</p></div>{action}</div>}
+function PageHeader({eyebrow,title,description,action}:{eyebrow?:React.ReactNode;title:string;description:string;action?:React.ReactNode}){return <div className="page-header"><div>{eyebrow&&<p className="eyebrow">{eyebrow}</p>}<h1>{title}</h1><p>{description}</p></div>{action}</div>}
 
 function Overview({onNavigate,onCreate,connected,conversations,automations,sources,userName,workspaceName}:{onNavigate:(s:Section)=>void;onCreate:()=>void;connected:boolean;conversations:Conversation[];automations:Automation[];sources:Source[];userName:string;workspaceName:string}){
   const open=conversations.filter(c=>c.status==="open");
@@ -419,17 +419,225 @@ function MetricCards({conversationCount}:{conversationCount:number}){
   return <section className="metrics-grid">{metrics.map(m=><article key={m.label}><div className="metric-label"><span className={`metric-icon ${m.tone}`}>{m.icon}</span><p>{m.label}</p><span className="metric-live">{m.change?"LIVE":"—"}</span></div><div className="metric-value"><strong>{m.value}</strong>{m.change&&<span className="up">↗ {m.change}</span>}</div><small>{m.change?"vs. last 30 days":"Analytics coming soon"}</small><div className="mini-chart">▂▃▂▅▄▇▆</div></article>)}</section>;
 }
 
-function Assistants({sources,workspaceName,onKnowledge,onChannels,onAnalytics,notify}:{sources:Source[];workspaceName:string;onKnowledge:()=>void;onChannels:()=>void;onAnalytics:()=>void;notify:(s:string)=>void}){
+
+/* ---- Assistants: list, routing, and the builder behind it ------------------------------------- */
+
+type AsstBinding={channel:"whatsapp"|"instagram"|"webchat";key:string};
+type AsstRecord={id:string;name:string;isDefault:boolean;config:{name?:string;purpose?:string;tone?:string};
+  bindings:AsstBinding[];updatedAt:string};
+
+const ASST_CHANNELS:{id:AsstBinding["channel"];label:string;glyph:string}[]=[
+  {id:"whatsapp",label:"WhatsApp",glyph:"◉"},{id:"instagram",label:"Instagram",glyph:"◎"},{id:"webchat",label:"Web chat",glyph:"◌"},
+];
+
+function AssistantsScreen(props:{sources:Source[];workspaceName:string;onKnowledge:()=>void;onChannels:()=>void;
+  onAnalytics:()=>void;notify:(s:string)=>void}){
+  const token=useAuthToken();
+  const [list,setList]=useState<AsstRecord[]>([]);
+  const [loading,setLoading]=useState(true);
+  const [editingId,setEditingId]=useState("");
+  const [busy,setBusy]=useState("");
+  const [routingFor,setRoutingFor]=useState<AsstRecord|null>(null);
+
+  const load=async()=>{
+    if(!token){setLoading(false);return}
+    try{
+      const response=await fetch(metaApi("/api/assistants"),{headers:authHeaders(token)});
+      const data=await response.json() as {assistants?:AsstRecord[]};
+      setList(data.assistants||[]);
+    }catch{ props.notify("Could not load assistants") }
+    finally{ setLoading(false) }
+  };
+  useEffect(()=>{load()},[token]);
+
+  const create=async()=>{
+    if(!token||busy)return;
+    setBusy("create");
+    try{
+      // No config sent, so the server seeds this one from the default — a new assistant is almost
+      // always "the same thing in a different voice", not a blank page.
+      const response=await fetch(metaApi("/api/assistants"),{method:"POST",
+        headers:{"content-type":"application/json",...authHeaders(token)},
+        body:JSON.stringify({name:`Assistant ${list.length+1}`})});
+      const data=await response.json() as {ok?:boolean;id?:string;error?:string};
+      if(!response.ok||!data.ok)throw new Error(data.error||"Could not create");
+      props.notify("Created from a copy of your default assistant");
+      await load();
+      if(data.id)setEditingId(data.id);
+    }catch(error){ props.notify(error instanceof Error?error.message:"Could not create") }
+    finally{ setBusy("") }
+  };
+
+  const duplicate=async(from:AsstRecord)=>{
+    if(!token||busy)return;
+    setBusy(from.id);
+    try{
+      const response=await fetch(metaApi("/api/assistants"),{method:"POST",
+        headers:{"content-type":"application/json",...authHeaders(token)},
+        body:JSON.stringify({name:`${from.name} copy`,copyFrom:from.id})});
+      const data=await response.json() as {ok?:boolean;error?:string};
+      if(!response.ok||!data.ok)throw new Error(data.error||"Could not duplicate");
+      await load();
+    }catch(error){ props.notify(error instanceof Error?error.message:"Could not duplicate") }
+    finally{ setBusy("") }
+  };
+
+  const act=async(path:string,body:Record<string,unknown>,success:string)=>{
+    if(!token)return;
+    setBusy(String(body.id||"x"));
+    try{
+      const response=await fetch(metaApi(path),{method:"POST",
+        headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify(body)});
+      const data=await response.json() as {ok?:boolean;error?:string};
+      if(!response.ok||!data.ok)throw new Error(data.error||"That didn't work");
+      props.notify(success);
+      await load();
+    }catch(error){ props.notify(error instanceof Error?error.message:"That didn't work") }
+    finally{ setBusy("") }
+  };
+
+  const editing=list.find(a=>a.id===editingId);
+  if(editing)return <Assistants {...props} assistantId={editing.id} assistantName={editing.name}
+    onBack={()=>{setEditingId("");load()}}/>;
+
+  const describe=(a:AsstRecord)=>{
+    if(a.bindings.length===0)return a.isDefault?"Answers everything not routed elsewhere":"Not routed — never answers";
+    return a.bindings.map(b=>{
+      const meta=ASST_CHANNELS.find(c=>c.id===b.channel);
+      return b.key?`${meta?.label} · ${b.key}`:`All ${meta?.label}`;
+    }).join(" · ");
+  };
+
+  return <>
+    <PageHeader title="Assistants" description="Each assistant has its own instructions, voice and knowledge. Route them to the channels they should answer."
+      action={<button className="primary" disabled={busy==="create"} onClick={create}>{busy==="create"?"Creating…":"+ New assistant"}</button>}/>
+
+    {loading?<p className="empty-hint">Loading…</p>
+    :<div className="asst-list">{list.map(a=>
+      <div key={a.id} className="asst-item">
+        <div className="asst-main">
+          <strong>{a.name}{a.isDefault&&<span className="asst-default">Default</span>}</strong>
+          <small className={a.bindings.length===0&&!a.isDefault?"asst-unrouted":""}>{describe(a)}</small>
+          {a.config?.purpose&&<em>{a.config.purpose}{a.config.tone?` · ${a.config.tone}`:""}</em>}
+        </div>
+        <button className="secondary-btn" onClick={()=>setRoutingFor(a)}>Routing</button>
+        <button className="secondary-btn" disabled={busy===a.id} onClick={()=>duplicate(a)}>Duplicate</button>
+        <button className="secondary-btn" onClick={()=>setEditingId(a.id)}>Edit</button>
+        {!a.isDefault&&<button className="secondary-btn" disabled={busy===a.id}
+          onClick={()=>act("/api/assistants/default",{id:a.id},`${a.name} is now the default`)}>Make default</button>}
+        {!a.isDefault&&<button className="cx-icon-btn" disabled={busy===a.id}
+          onClick={()=>act("/api/assistants/delete",{id:a.id},"Assistant deleted")} aria-label="Delete">×</button>}
+      </div>)}
+    </div>}
+
+    {routingFor&&<AssistantRouting assistant={routingFor} others={list.filter(a=>a.id!==routingFor.id)}
+      notify={props.notify} onClose={()=>setRoutingFor(null)} onSaved={()=>{setRoutingFor(null);load()}}/>}
+  </>;
+}
+
+function AssistantRouting({assistant,others,notify,onClose,onSaved}:{assistant:AsstRecord;others:AsstRecord[];
+  notify:(s:string)=>void;onClose:()=>void;onSaved:()=>void}){
+  const token=useAuthToken();
+  const [bindings,setBindings]=useState<AsstBinding[]>(assistant.bindings);
+  const [saving,setSaving]=useState(false);
+
+  const owner=(channel:AsstBinding["channel"],key:string)=>
+    others.find(o=>o.bindings.some(b=>b.channel===channel&&b.key===key));
+
+  const toggleChannel=(channel:AsstBinding["channel"])=>{
+    const has=bindings.some(b=>b.channel===channel&&b.key==="");
+    setBindings(has?bindings.filter(b=>!(b.channel===channel&&b.key===""))
+      :[...bindings,{channel,key:""}]);
+  };
+
+  const save=async()=>{
+    if(!token)return;
+    setSaving(true);
+    try{
+      const response=await fetch(metaApi("/api/assistants/bindings"),{method:"POST",
+        headers:{"content-type":"application/json",...authHeaders(token)},
+        body:JSON.stringify({id:assistant.id,bindings})});
+      const data=await response.json() as {ok?:boolean;error?:string};
+      if(!response.ok||!data.ok)throw new Error(data.error||"Could not save routing");
+      notify("Routing updated");
+      onSaved();
+    }catch(error){ notify(error instanceof Error?error.message:"Could not save routing") }
+    finally{ setSaving(false) }
+  };
+
+  return <div className="cx-drawer-scrim" onClick={onClose}>
+    <div className="asst-routing" onClick={e=>e.stopPropagation()} role="dialog" aria-label={`Routing for ${assistant.name}`}>
+      <header><div><strong>Where does {assistant.name} answer?</strong>
+        <small>Anything not routed here falls to the default assistant.</small></div>
+        <button className="cx-icon-btn" onClick={onClose} aria-label="Close">×</button></header>
+
+      <div className="asst-channels">
+        {ASST_CHANNELS.map(channel=>{
+          const on=bindings.some(b=>b.channel===channel.id&&b.key==="");
+          const taken=owner(channel.id,"");
+          return <label key={channel.id} className={`asst-channel${on?" on":""}`}>
+            <input type="checkbox" checked={on} onChange={()=>toggleChannel(channel.id)}/>
+            <span>{channel.glyph}</span>
+            <div><strong>All {channel.label}</strong>
+              {/* Naming who currently owns it is the difference between an informed change and an
+                  accidental one — a binding moves rather than duplicates. */}
+              {taken&&!on&&<small>Currently answered by {taken.name} — turning this on takes it over.</small>}
+            </div>
+          </label>;
+        })}
+      </div>
+
+      <div className="asst-specific">
+        <strong>Specific numbers or sites</strong>
+        <small>More specific than a whole channel. Use a WhatsApp number, or a web chat key you pass in the embed.</small>
+        {bindings.filter(b=>b.key).map((b,i)=>
+          <div key={i} className="asst-specific-row">
+            <select value={b.channel} onChange={e=>setBindings(bindings.map(x=>x===b?{...x,channel:e.target.value as AsstBinding["channel"]}:x))}>
+              {ASST_CHANNELS.map(c=><option key={c.id} value={c.id}>{c.label}</option>)}
+            </select>
+            <input value={b.key} placeholder="971500001111"
+              onChange={e=>setBindings(bindings.map(x=>x===b?{...x,key:e.target.value}:x))}/>
+            <button className="seg-remove" onClick={()=>setBindings(bindings.filter(x=>x!==b))}>×</button>
+          </div>)}
+        <button className="text-action" onClick={()=>setBindings([...bindings,{channel:"whatsapp",key:""}])}>+ Add a specific route</button>
+      </div>
+
+      <div className="modal-actions">
+        <button className="secondary-btn" onClick={onClose}>Cancel</button>
+        <button className="primary" disabled={saving} onClick={save}>{saving?"Saving…":"Save routing"}</button>
+      </div>
+    </div>
+  </div>;
+}
+
+function Assistants({sources,workspaceName,onKnowledge,onChannels,onAnalytics,notify,assistantId,assistantName,onBack}:{sources:Source[];workspaceName:string;onKnowledge:()=>void;onChannels:()=>void;onAnalytics:()=>void;notify:(s:string)=>void;assistantId:string;assistantName:string;onBack:()=>void}){
   const steps=["Profile","Instructions","Knowledge","AI actions","Channels","Voice","Test","Launch"];
   const [step,setStep]=useStoredState("qpy-engage-assistant-step-v2",0);
   const [launched,setLaunched]=useStoredState("qpy-engage-assistant-live",false);
   const [version,setVersion]=useStoredState("qpy-engage-assistant-version",3);
-  const [config,setConfig]=useStoredState("qpy-engage-assistant-config-v2",{name:`${workspaceName} Assistant`,purpose:"Sales & customer support",language:"English",tone:"Warm & helpful",role:`You are ${workspaceName}'s digital assistant. Answer clearly and concisely using only approved business knowledge. Help customers discover products, check order progress, explain delivery and returns, and collect qualified leads. Never invent prices, availability, policies, or order details.`,fallback:"When information is missing, confidence is low, the customer is upset, or the request involves payments, disputes, legal issues, or exceptions, explain that a specialist will help and transfer the conversation.",welcome:"Hi! How can I help today?",signoff:"Is there anything else I can help with?"});
-  const [policies,setPolicies]=useStoredState("qpy-engage-assistant-policies",{concise:true,citations:true,imageProcessing:true,equations:false,memory:true,transfer:true,collectConsent:true,confidence:72,maxReplies:4,restricted:"Legal advice, payment disputes, refunds outside policy, medical advice, passwords, card details",handoffTeam:"Customer Support",businessHours:"24/7 AI coverage"});
-  const [selectedSources,setSelectedSources]=useStoredState<number[]>("qpy-engage-assistant-sources",sources.map(s=>s.id));
+  const [config,setConfig]=useStoredState(`qpy-engage-assistant-config-v2::${assistantId}`,{name:`${workspaceName} Assistant`,purpose:"Sales & customer support",language:"English",tone:"Warm & helpful",role:`You are ${workspaceName}'s digital assistant. Answer clearly and concisely using only approved business knowledge. Help customers discover products, check order progress, explain delivery and returns, and collect qualified leads. Never invent prices, availability, policies, or order details.`,fallback:"When information is missing, confidence is low, the customer is upset, or the request involves payments, disputes, legal issues, or exceptions, explain that a specialist will help and transfer the conversation.",welcome:"Hi! How can I help today?",signoff:"Is there anything else I can help with?"});
+  const [policies,setPolicies]=useStoredState(`qpy-engage-assistant-policies::${assistantId}`,{concise:true,citations:true,imageProcessing:true,equations:false,memory:true,transfer:true,collectConsent:true,confidence:72,maxReplies:4,restricted:"Legal advice, payment disputes, refunds outside policy, medical advice, passwords, card details",handoffTeam:"Customer Support",businessHours:"24/7 AI coverage"});
+  const [selectedSources,setSelectedSources]=useStoredState<number[]>(`qpy-engage-assistant-sources::${assistantId}`,sources.map(s=>s.id));
   const [selectedChannels,setSelectedChannels]=useStoredState<string[]>("qpy-engage-assistant-channels",["WhatsApp"]);
-  const [actions,setActions]=useStoredState<AssistantAction[]>("qpy-engage-assistant-actions",[]);
+  const [actions,setActions]=useStoredState<AssistantAction[]>(`qpy-engage-assistant-actions::${assistantId}`,[]);
   const [voice,setVoice]=useStoredState("qpy-engage-assistant-voice",{enabled:false,channel:"Inbound phone",voiceName:"Default browser voice",language:"Auto-detect English / Arabic",speed:"1.0",greeting:`Hello, you've reached ${workspaceName}. I'm the AI assistant. How may I help you today?`,consent:"This call may be recorded and processed by AI to assist you.",interruptions:true,noiseSuppression:true,recording:true,transcripts:true,summary:true,dtmf:true,silence:"8 seconds",maxDuration:"15 minutes",transferNumber:"",voicemail:true,businessHours:"Always available"});
+  const assistantToken=useAuthToken();
+  // The builder's local draft is convenience; the assistants table is what answers customers. Push
+  // on a debounce so every keystroke does not become a request, and never on first render — that
+  // would write the defaults straight over a freshly loaded assistant.
+  const hydrated=useRef(false);
+  useEffect(()=>{
+    if(!assistantToken||!assistantId)return;
+    if(!hydrated.current){hydrated.current=true;return}
+    const timer=setTimeout(()=>{
+      fetch(metaApi("/api/assistants"),{method:"POST",
+        headers:{"content-type":"application/json",...authHeaders(assistantToken)},
+        body:JSON.stringify({id:assistantId,name:config.name||assistantName,config,policies,sources:selectedSources,actions})})
+        .catch(()=>{ /* the local draft survives; the next edit retries */ });
+    },700);
+    return()=>clearTimeout(timer);
+  },[assistantId,assistantToken,config,policies,selectedSources,actions,assistantName]);
+
   const emptyAction=():AssistantAction=>({id:0,name:"",description:"",type:"submit",parameters:[],endpoint:"",method:"POST",defaultResponse:"Thank you — your details have been received.",confirmation:true,continueConversation:true,enabled:false,runs:0,success:"—",lastTest:"Not tested"});
   const [actionDraft,setActionDraft]=useState<AssistantAction>(emptyAction());
   const [editingAction,setEditingAction]=useState(false);
@@ -616,7 +824,7 @@ function Assistants({sources,workspaceName,onKnowledge,onChannels,onAnalytics,no
     setCallState("ended");
   };
   const launch=()=>{setLaunched(true);setVersion(version+1);notify(`${config.name} version ${version+1} is live`)};
-  return <><PageHeader title="AI Assistants" description="Design, train, equip, test, and govern customer-facing AI across chat and voice." action={<div className="header-buttons"><span className={`status-pill ${launched?"ready":"syncing"}`}>{launched?`● Live • v${version}`:"Draft"}</span><button className="primary" onClick={()=>{setStep(0);setLaunched(false);notify("New draft version created")}}>＋ New version</button></div>}/><div className="assistant-layout advanced"><aside className="assistant-list"><h3>Your assistants</h3><button className="selected" onClick={()=>setStep(0)}><span className="assistant-avatar">✦</span><div><strong>{config.name}</strong><small>{launched?`Live on ${selectedChannels.length} channels`:`Draft • ${steps[step]}`}</small></div><i className={launched?"live":""}/></button><div className="assistant-health"><strong>{selectedSources.length}</strong><span>sources</span><strong>{actions.filter(a=>a.enabled).length}</strong><span>active actions</span><strong>{voice.enabled?"On":"Off"}</strong><span>voice assistant</span></div><div className="assistant-side-summary"><span>Safety score</span><strong>92%</strong><div><i style={{width:"92%"}}/></div><small>Guardrails and handoff are configured.</small></div></aside><section className="assistant-builder"><div className="assistant-progress wide">{steps.map((label,i)=><button key={label} className={i<step?"done":i===step?"active":""} onClick={()=>setStep(i)}><span>{i<step?"✓":i+1}</span><small>{label}</small></button>)}</div><div className="assistant-stage advanced-stage">
+  return <><PageHeader eyebrow={<button className="text-action" onClick={onBack}>← All assistants</button>} title={assistantName||"AI Assistant"} description="Design, train, equip, test, and govern customer-facing AI across chat and voice." action={<div className="header-buttons"><span className={`status-pill ${launched?"ready":"syncing"}`}>{launched?`● Live • v${version}`:"Draft"}</span><button className="primary" onClick={()=>{setStep(0);setLaunched(false);notify("New draft version created")}}>＋ New version</button></div>}/><div className="assistant-layout advanced"><aside className="assistant-list"><h3>Your assistants</h3><button className="selected" onClick={()=>setStep(0)}><span className="assistant-avatar">✦</span><div><strong>{config.name}</strong><small>{launched?`Live on ${selectedChannels.length} channels`:`Draft • ${steps[step]}`}</small></div><i className={launched?"live":""}/></button><div className="assistant-health"><strong>{selectedSources.length}</strong><span>sources</span><strong>{actions.filter(a=>a.enabled).length}</strong><span>active actions</span><strong>{voice.enabled?"On":"Off"}</strong><span>voice assistant</span></div><div className="assistant-side-summary"><span>Safety score</span><strong>92%</strong><div><i style={{width:"92%"}}/></div><small>Guardrails and handoff are configured.</small></div></aside><section className="assistant-builder"><div className="assistant-progress wide">{steps.map((label,i)=><button key={label} className={i<step?"done":i===step?"active":""} onClick={()=>setStep(i)}><span>{i<step?"✓":i+1}</span><small>{label}</small></button>)}</div><div className="assistant-stage advanced-stage">
     {step===0&&<><WizardTitle n="01" title="Assistant profile" text="Define the assistant’s role, identity, languages, and customer-facing introduction."/><div className="assistant-identity"><span className="assistant-avatar large">✦</span><div className="form-grid"><label>Assistant name<input value={config.name} onChange={e=>setConfig({...config,name:e.target.value})}/></label><label>Primary use case<select value={config.purpose} onChange={e=>setConfig({...config,purpose:e.target.value})}><option>Sales & customer support</option><option>Lead qualification</option><option>Order support</option><option>Product recommendations</option><option>Appointment booking</option></select></label><label>Languages<select value={config.language} onChange={e=>setConfig({...config,language:e.target.value})}><option>English</option><option>Arabic</option><option>English & Arabic</option><option>Auto-detect 25+ languages</option></select></label><label>Personality<select value={config.tone} onChange={e=>setConfig({...config,tone:e.target.value})}><option>Warm & helpful</option><option>Professional & concise</option><option>Friendly & energetic</option><option>Luxury concierge</option></select></label></div></div><div className="assistant-copy-grid"><label>Welcome message<textarea value={config.welcome} onChange={e=>setConfig({...config,welcome:e.target.value})}/></label><label>Conversation sign-off<textarea value={config.signoff} onChange={e=>setConfig({...config,signoff:e.target.value})}/></label></div><div className="wizard-actions"><span>Customers are told when they are interacting with AI.</span><button className="primary" disabled={!config.name.trim()} onClick={next}>Configure instructions →</button></div></>}
     {step===1&&<><WizardTitle n="02" title="Instructions and guardrails" text="Control how the assistant answers, what it must never do, and when a human takes over."/><div className="instruction-layout"><div><label className="full-label">System instructions<textarea className="large-prompt" value={config.role} onChange={e=>setConfig({...config,role:e.target.value})}/><small>{config.role.length}/4000 characters</small></label><div className="prompt-presets"><span>Use a preset:</span>{[["Concierge","You are Atelier Home’s premium digital concierge. Give warm, accurate, concise help using only approved knowledge and actions."],["Support","You are a precise customer support specialist. Diagnose the request, confirm important details, and resolve it or hand off safely."],["Lead agent","You are a consultative sales assistant. Understand needs, recommend relevant options, and collect consented lead details without pressure."]].map(([name,prompt])=><button key={name} onClick={()=>setConfig({...config,role:prompt})}>{name}</button>)}</div><label className="full-label">Fallback and human handoff instructions<textarea value={config.fallback} onChange={e=>setConfig({...config,fallback:e.target.value})}/></label><label className="full-label">Restricted topics<input value={policies.restricted} onChange={e=>setPolicies({...policies,restricted:e.target.value})}/></label></div><aside className="extension-card"><h3>Response extensions</h3>{[["concise","Concise responses","Keep routine answers short and scannable"],["citations","Knowledge citations","Show the source used for factual answers"],["imageProcessing","Image understanding","Analyze customer product images"],["equations","Equation rendering","Format mathematics and technical notation"],["memory","Conversation memory","Remember context within the conversation"],["transfer","Transfer to human","Hand off when requested or confidence is low"],["collectConsent","Consent before data collection","Ask before collecting or submitting personal data"]].map(([key,title,copy])=><label key={key}><div><strong>{title}</strong><small>{copy}</small></div><input type="checkbox" checked={Boolean(policies[key as keyof typeof policies])} onChange={e=>setPolicies({...policies,[key]:e.target.checked})}/><span className="toggle-ui"/></label>)}</aside></div><div className="guardrail-grid"><label>Handoff confidence<input type="range" min="40" max="95" value={policies.confidence} onChange={e=>setPolicies({...policies,confidence:Number(e.target.value)})}/><b>{policies.confidence}%</b></label><label>Max AI replies before review<input type="number" min="1" max="20" value={policies.maxReplies} onChange={e=>setPolicies({...policies,maxReplies:Number(e.target.value)})}/></label><label>Handoff team<select value={policies.handoffTeam} onChange={e=>setPolicies({...policies,handoffTeam:e.target.value})}><option>Customer Support</option><option>Sales</option><option>Orders & Delivery</option><option>Managers</option></select></label><label>AI coverage<select value={policies.businessHours} onChange={e=>setPolicies({...policies,businessHours:e.target.value})}><option>24/7 AI coverage</option><option>Outside team hours only</option><option>Business hours only</option></select></label></div><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(0)}>Back</button><button className="primary" onClick={next}>Save instructions →</button></div></>}
     {step===2&&<><WizardTitle n="03" title="Knowledge and retrieval" text="Choose approved sources, retrieval behavior, and freshness expectations."/><div className="training-summary"><div><span>◇</span><strong>{selectedSources.length}</strong><small>sources selected</small></div><div><span>▤</span><strong>{sources.filter(s=>selectedSources.includes(s.id)).reduce((n,s)=>n+s.pages,0).toLocaleString()}</strong><small>pages indexed</small></div><div><span>✓</span><strong>98.7%</strong><small>answer coverage</small></div></div><div className="training-source-list">{sources.map(source=><label key={source.id} className={selectedSources.includes(source.id)?"selected":""}><input type="checkbox" checked={selectedSources.includes(source.id)} onChange={()=>toggleSource(source.id)}/><span>{source.type==="Website"?"⌁":source.type==="Document"?"▤":"?"}</span><div><strong>{source.name}</strong><small>{source.type} • {source.pages.toLocaleString()} pages • synced today</small></div><b>{source.status}</b></label>)}</div><div className="knowledge-options"><label><input type="checkbox" defaultChecked/> Prefer the newest source when content conflicts</label><label><input type="checkbox" defaultChecked/> Refuse answers not supported by selected knowledge</label><label><input type="checkbox" defaultChecked/> Automatically re-train after source updates</label></div><button className="text-action" onClick={onKnowledge}>＋ Add or manage training sources</button><div className="wizard-actions"><button className="secondary-btn" onClick={()=>setStep(1)}>Back</button><button className="primary" disabled={!selectedSources.length} onClick={()=>{notify("Knowledge index refreshed");next()}}>Train and continue →</button></div></>}

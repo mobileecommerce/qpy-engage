@@ -235,7 +235,7 @@ async function listAssistants(request: Request, env: AssistantsEnv): Promise<Res
 async function saveAssistant(request: Request, env: AssistantsEnv): Promise<Response> {
   const session = await requireSession(request, env);
   if (session instanceof Response) return session;
-  const body = await request.json() as Partial<AssistantRecord> & { id?: string };
+  const body = await request.json() as Partial<AssistantRecord> & { id?: string; copyFrom?: string };
   await ensureDefaultAssistant(env.DB, session.workspaceId);
 
   const name = (body.name || "").trim().slice(0, 60) || "Assistant";
@@ -256,9 +256,28 @@ async function saveAssistant(request: Request, env: AssistantsEnv): Promise<Resp
   }
 
   const created = newId();
+  // A new assistant starts as a copy of the one already tuned, unless the caller supplied its own
+  // settings. Nobody creating a second assistant wants to rewrite the instructions, knowledge
+  // selection and actions from nothing — they want the same thing with a different voice.
+  const seedFrom = (body.copyFrom || "").trim();
+  const wantsCopy = body.config === undefined;
+  let seeded = payload;
+  if (wantsCopy) {
+    const sourceId = seedFrom || await ensureDefaultAssistant(env.DB, session.workspaceId);
+    const source = await env.DB.prepare(`SELECT config, policies, sources, actions FROM assistants
+      WHERE id = ? AND workspace_id = ?`).bind(sourceId, session.workspaceId)
+      .first<{ config: string; policies: string; sources: string; actions: string }>();
+    if (source) {
+      // The name is the one thing never copied — two assistants sharing a name is unusable in a
+      // routing list, which is the whole point of having more than one.
+      const copiedConfig = parseJson<AssistantConfig>(source.config, {});
+      copiedConfig.name = name;
+      seeded = [JSON.stringify(copiedConfig), source.policies, source.sources, source.actions];
+    }
+  }
   await env.DB.prepare(`INSERT INTO assistants (id, workspace_id, name, is_default, config, policies, sources, actions)
-    VALUES (?, ?, ?, 0, ?, ?, ?, ?)`).bind(created, session.workspaceId, name, ...payload).run();
-  return json(request, { ok: true, id: created });
+    VALUES (?, ?, ?, 0, ?, ?, ?, ?)`).bind(created, session.workspaceId, name, ...seeded).run();
+  return json(request, { ok: true, id: created, copiedFrom: wantsCopy ? (seedFrom || "default") : "" });
 }
 
 async function setDefault(request: Request, env: AssistantsEnv): Promise<Response> {
