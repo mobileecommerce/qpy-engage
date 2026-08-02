@@ -2243,7 +2243,7 @@ type AutoGraph = { version:2; entryId:string; nodes:Record<string,AutoNode>; lan
 // exactly what stops a business serving a language nobody here thought of.
 const COMMON_LANGS:[string,string][]=[["ar","Arabic"],["hi","Hindi"],["ur","Urdu"],["ru","Russian"],["zh","Chinese"],["fr","French"],["de","German"],["es","Spanish"],["fa","Persian"],["tl","Tagalog"],["ml","Malayalam"],["ta","Tamil"]];
 const langName=(code:string)=>COMMON_LANGS.find(([c])=>c===code)?.[1]||code.toUpperCase();
-type AutomationDef = { id:string; name:string; sectorKey:string; status:"active"|"draft"|"inactive"; priority:number; needsConfig:boolean; flow:AutoGraph; createdAt?:string; updatedAt?:string };
+type AutomationDef = { id:string; name:string; sectorKey:string; assistantId?:string; status:"active"|"draft"|"inactive"; priority:number; needsConfig:boolean; flow:AutoGraph; createdAt?:string; updatedAt?:string };
 type SectorInfo = { key:string; name:string; icon:string; desc:string };
 type ActivityRow = { id:number; automationId:string; automationName:string; contact:string; channel:string; branch:string; outcome:string; outcomeType:string; createdAt:string };
 
@@ -2466,6 +2466,30 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
   const [testMessage,setTestMessage]=useState("");
   const [testResult,setTestResult]=useState<{path:{label:string;note?:string;steps:string[]}[]}|null>(null);
   const [testing,setTesting]=useState(false);
+
+  const [assistantOptions,setAssistantOptions]=useState<{id:string;name:string;isDefault:boolean}[]>([]);
+  useEffect(()=>{
+    if(!token)return;
+    fetch(metaApi("/api/assistants"),{headers:authHeaders(token)})
+      .then(r=>r.json()).then((d:{assistants?:{id:string;name:string;isDefault:boolean}[]})=>setAssistantOptions(d.assistants||[]))
+      .catch(()=>{ /* the column falls back to "All assistants" */ });
+  },[token]);
+
+  const assignAssistant=async(automation:AutomationDef,assistantId:string)=>{
+    if(!token)return;
+    // Optimistic: the row is a dropdown the operator just changed, so it should not snap back
+    // while the request is in flight.
+    setList(list.map(a=>a.id===automation.id?{...a,assistantId}:a));
+    try{
+      const response=await fetch(metaApi("/api/automations/assistant"),{method:"POST",
+        headers:{"content-type":"application/json",...authHeaders(token)},
+        body:JSON.stringify({id:automation.id,assistantId})});
+      if(!response.ok)throw new Error();
+    }catch{
+      setList(list.map(a=>a.id===automation.id?{...a,assistantId:automation.assistantId||""}:a));
+      notify("Could not change which assistant runs this automation");
+    }
+  };
 
   const load=async()=>{
     if(!token){setLoading(false);return}
@@ -2799,12 +2823,19 @@ function AutomationBuilder({notify}:{notify:(s:string)=>void}){
     </div>
     {loading?<p className="empty-hint">Loading…</p>:!list.length?
       <div className="empty-state"><span>⌁</span><h3>No automations yet</h3><p>Start from one of 8 ready-made industry flows — reservation booking, order tracking, emergency escalation, and more.</p><button className="primary" onClick={openTemplates}>＋ New automation</button></div>:
-      <div className="data-card">
-        <table><thead><tr><th/><th>Automation</th><th>Trigger</th><th>Status</th><th>Runs</th><th/></tr></thead>
+      <div className="data-card table-scroll">
+        <table><thead><tr><th/><th>Automation</th><th>Trigger</th><th>Assistant</th><th>Status</th><th>Runs</th><th/></tr></thead>
         <tbody>{[...list].sort((a,b)=>a.priority-b.priority).map((automation,idx)=><tr key={automation.id}>
           <td><div className="row-actions"><button title="Move up" disabled={idx===0} onClick={()=>reorder(automation,"up")}>▲</button><button title="Move down" disabled={idx===list.length-1} onClick={()=>reorder(automation,"down")}>▼</button></div></td>
           <td><div className="table-title"><span>⌁</span><div><strong>{automation.name}</strong>{automation.needsConfig&&<small style={{color:"#b66b26",display:"block"}}>⚠ Needs configuration</small>}</div></div></td>
           <td>{(automation.flow.nodes[automation.flow.entryId]?.config?.channels||[]).join(" + ")||"—"} · {Object.keys(automation.flow.nodes).length} blocks</td>
+          <td onClick={e=>e.stopPropagation()}>
+            <select className="cx-inline" value={automation.assistantId||""} onChange={e=>assignAssistant(automation,e.target.value)}
+              title="Only this assistant will run this automation">
+              <option value="">All assistants</option>
+              {assistantOptions.map(o=><option key={o.id} value={o.id}>{o.name}{o.isDefault?" (default)":""}</option>)}
+            </select>
+          </td>
           <td><span className={`flow-status-pill ${automation.status==="active"?"is-active":"is-draft"}`}>{automation.status==="active"?"Active":automation.status==="draft"?"Draft":"Inactive"}</span></td>
           <td>{runCounts[automation.id]||0}</td>
           <td><div className="row-actions" style={{justifyContent:"flex-end"}}>
