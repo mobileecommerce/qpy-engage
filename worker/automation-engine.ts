@@ -1,4 +1,5 @@
 import { callClaude, callClaudeWithActions, sanitizeActions, type ChatMessage, type AssistantActionDef, type CatalogItemRef } from "./shared";
+import { resolveAssistantId } from "./assistants";
 import { readWorkspaceState, buildSystemPrompt } from "./widget";
 import { listItemsForWorkspace, getItemsByIds } from "./items";
 import { toGraph, interpolate, buildUrlFromTemplate, detectLanguage, systemString, DEFAULT_LANG, type NodeOption, localizedText, localizedOptionLabel, localizedOptionDescription, localizedDocumentLabel, allLabelsForOption, type AutomationGraph, type AutomationNode, type NodeConfig } from "./automation-graph";
@@ -453,7 +454,14 @@ async function walkFrom(x: ExecCtx, graph: AutomationGraph, startId: string | nu
 // ── Entry point, shared by web chat and WhatsApp ──
 
 export async function runAutomations(env: EngineEnv, workspaceId: string, channel: RunChannel, ctx: RunCtx, message: string, history: ChatMessage[]): Promise<AutomationRunResult> {
-  const result = await env.DB.prepare(`SELECT * FROM automations2 WHERE workspace_id = ? AND status = 'active' ORDER BY priority ASC`).bind(workspaceId).all<AutomationRow>();
+  // Which assistant is answering decides which automations are even candidates. An automation left
+  // unassigned stays available to all of them, so nothing that worked before quietly stops.
+  const assistantId = await resolveAssistantId(env.DB, workspaceId,
+    channel === "whatsapp" ? "whatsapp" : "webchat",
+    channel === "whatsapp" ? (ctx.phoneNumberId || "") : (ctx.siteKey || "")).catch(() => "");
+  const result = await env.DB.prepare(`SELECT * FROM automations2
+    WHERE workspace_id = ? AND status = 'active' AND (assistant_id = '' OR assistant_id = ?)
+    ORDER BY priority ASC`).bind(workspaceId, assistantId).all<AutomationRow>();
   const rows = result.results || [];
   if (!rows.length) return { handled: false, messages: [] };
 

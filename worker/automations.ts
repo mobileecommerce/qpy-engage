@@ -22,7 +22,7 @@ function uid(): string { return crypto.randomUUID(); }
 // through the same migrateV1ToV2 path as legacy stored automations.
 
 export type { AutomationGraph, AutomationNode, NodeConfig, NodeKind } from "./automation-graph";
-export type Automation = { id: string; name: string; sectorKey: string; status: "active" | "draft" | "inactive"; priority: number; needsConfig: boolean; flow: AutomationGraph; createdAt?: string; updatedAt?: string };
+export type Automation = { id: string; name: string; sectorKey: string; assistantId?: string; status: "active" | "draft" | "inactive"; priority: number; needsConfig: boolean; flow: AutomationGraph; createdAt?: string; updatedAt?: string };
 
 type StepKind = "trigger" | "split" | "aiReply" | "message" | "wait" | "tag" | "notify" | "aiAction" | "escalate" | "generic";
 type TemplateStep = { id: string; icon: string; title: string; subtitle: string; chip: string; kind: StepKind; config?: Record<string, unknown> };
@@ -87,6 +87,10 @@ async function ensureAutomationsSchema(db: D1Database): Promise<void> {
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_automation_waits_due ON automation_waits (due_at)`),
   ]);
+  // Empty means "every assistant", which is exactly how every automation behaved before assistants
+  // became plural — so this migration changes no existing behaviour.
+  try { await db.prepare(`ALTER TABLE automations2 ADD COLUMN assistant_id TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already applied */ }
+
   // phone_number_id lets a resumed WhatsApp wait step still reach the right Cloud API number.
   try { await db.prepare(`ALTER TABLE automation_waits ADD COLUMN phone_number_id TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
   await ensureSessionSchema(db);
@@ -418,11 +422,11 @@ async function nextPriority(db: D1Database, workspaceId: string): Promise<number
 // names too, since the dashboard's mirror imports them.
 export { nodeIsIncomplete, graphNeedsConfig } from "./automation-graph";
 
-type AutomationRow = { id: string; name: string; sector_key: string; status: string; priority: number; needs_config: number; flow_json: string; created_at: string; updated_at: string };
+type AutomationRow = { assistant_id?: string; id: string; name: string; sector_key: string; status: string; priority: number; needs_config: number; flow_json: string; created_at: string; updated_at: string };
 
 function rowToAutomation(row: AutomationRow): Automation {
   return {
-    id: row.id, name: row.name, sectorKey: row.sector_key,
+    id: row.id, name: row.name, sectorKey: row.sector_key, assistantId: row.assistant_id || "",
     status: row.status === "active" ? "active" : row.status === "inactive" ? "inactive" : "draft",
     priority: row.priority, needsConfig: Boolean(row.needs_config),
     flow: toGraph(JSON.parse(row.flow_json)),
@@ -881,6 +885,24 @@ export {
   type AutomationRunResult,
 } from "./automation-engine";
 
+
+/** Assigns an automation to one assistant, or to all of them when the id is empty. */
+async function setAutomationAssistant(request: Request, env: AutomationsEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const body = await request.json() as { id?: string; assistantId?: string };
+  const id = (body.id || "").trim();
+  if (!id) return json(request, { error: "Missing id." }, 400);
+  const assistantId = (body.assistantId || "").trim();
+  await ensureAutomationsSchema(env.DB);
+  const owned = await env.DB.prepare(`SELECT id FROM automations2 WHERE id = ? AND workspace_id = ?`)
+    .bind(id, session.workspaceId).first<{ id: string }>();
+  if (!owned) return json(request, { error: "Automation not found." }, 404);
+  await env.DB.prepare(`UPDATE automations2 SET assistant_id = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND workspace_id = ?`).bind(assistantId, id, session.workspaceId).run();
+  return json(request, { ok: true, assistantId });
+}
+
 export async function handleAutomationsRequest(request: Request, env: AutomationsEnv): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/automations")) return null;
@@ -893,6 +915,7 @@ export async function handleAutomationsRequest(request: Request, env: Automation
   if (url.pathname === "/api/automations/sectors" && request.method === "GET") return listSectors(request, env);
   if (url.pathname === "/api/automations/from-template" && request.method === "POST") return createFromTemplate(request, env);
   if (url.pathname === "/api/automations/activity" && request.method === "GET") return listActivity(request, env);
+  if (url.pathname === "/api/automations/assistant" && request.method === "POST") return setAutomationAssistant(request, env);
   if (url.pathname === "/api/automations/ai-actions" && request.method === "GET") return listAiActions(request, env);
   if (url.pathname === "/api/automations/translate-block" && request.method === "POST") return translateBlock(request, env);
   if (url.pathname === "/api/automations/generate" && request.method === "POST") return generateAutomation(request, env);
