@@ -257,7 +257,7 @@ async function executeNode(x: ExecCtx, node: AutomationNode): Promise<NodeOutcom
       // Search the crawled site against what the customer just asked, so an AI reply node inside an
       // automation grounds on the right page rather than the start of the site.
       const askedNow = [...x.history].reverse().find((m) => m.role === "user")?.content || "";
-      const systemPrompt = (await buildSystemPrompt(x.env.DB, x.workspaceId, askedNow)) + actionHint + buildCollectLinkInstructions(cfg);
+      const systemPrompt = (await buildSystemPrompt(x.env.DB, x.workspaceId, askedNow, { channel: x.ctx.channel === "whatsapp" ? "whatsapp" : "webchat", bindKey: x.ctx.contactKey || "" })) + actionHint + buildCollectLinkInstructions(cfg);
       const storedActions = node.kind === "aiAction"
         ? (await readWorkspaceState<unknown[]>(x.env.DB, x.workspaceId, "qpy-engage-assistant-actions")) || []
         : [];

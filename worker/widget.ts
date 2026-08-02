@@ -1,6 +1,7 @@
 import { callClaude, callClaudeWithActions, sanitizeChatMessages, sanitizeActions, json, corsPreflight, allowedOrigin, type ChatMessage } from "./shared";
 import { recordVisitorContext, readVisitorContext, touchPresence } from "./visitor";
 import { readEndedState, readAutoEndSettings, endChat } from "./chatlifecycle";
+import { loadAssistant, type BindChannel } from "./assistants";
 import { getStoredKnowledgeContent, getRelevantKnowledgePages } from "./knowledge";
 import { saveSubmission } from "./leads";
 import { requireSession, type AuthEnv } from "./auth";
@@ -253,10 +254,17 @@ function voiceInstruction(tone: string): string {
     : VOICE_PRESETS["Warm & helpful"];
 }
 
-export async function buildSystemPrompt(db: D1Database, workspaceId: string, question?: string): Promise<string> {
-  const config = await readWorkspaceState<{ name?: string; purpose?: string; role?: string; tone?: string; language?: string; fallback?: string; signoff?: string }>(db, workspaceId, "qpy-engage-assistant-config-v2");
-  const policies = await readWorkspaceState<{ restricted?: string }>(db, workspaceId, "qpy-engage-assistant-policies");
-  const selectedSources = (await readWorkspaceState<number[]>(db, workspaceId, "qpy-engage-assistant-sources")) || [];
+export interface PromptRoute { channel: BindChannel; bindKey?: string }
+
+export async function buildSystemPrompt(
+  db: D1Database, workspaceId: string, question?: string, route?: PromptRoute,
+): Promise<string> {
+  // Routed callers get the assistant bound to their channel; unrouted ones get the workspace
+  // default, which is what every caller had before assistants became plural.
+  const resolved = await loadAssistant(db, workspaceId, route?.channel || "webchat", route?.bindKey || "");
+  const config = resolved.config as { name?: string; purpose?: string; role?: string; tone?: string; language?: string; fallback?: string; signoff?: string };
+  const policies = resolved.policies as { restricted?: string };
+  const selectedSources = (resolved.sources as number[]) || [];
   const sources = (await readWorkspaceState<Array<{ id: number; name: string }>>(db, workspaceId, "qpy-engage-sources")) || [];
   const sourceNames = sources.filter((s) => selectedSources.includes(s.id)).map((s) => s.name).join(", ") || "no connected sources yet";
   // Prefer per-page selection from a crawled site; fall back to the single stored blob for sources
@@ -444,7 +452,7 @@ async function answerIfUnanswered(env: WidgetEnv, workspaceId: string, sessionId
   // This path answers a message the customer left unanswered during human takeover, so the question
   // to search the site for is that last customer message, not a live one.
   const unanswered = [...history].reverse().find((m) => m.role === "user")?.content || "";
-  const systemPrompt = await buildSystemPrompt(env.DB, workspaceId, unanswered);
+  const systemPrompt = await buildSystemPrompt(env.DB, workspaceId, unanswered, { channel: "webchat", bindKey: sessionId });
   const storedActions = await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions");
   const actions = sanitizeActions(storedActions || []);
   const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
@@ -472,7 +480,7 @@ async function maybeSendHoldingMessage(env: WidgetEnv, workspaceId: string, sess
 
   const history = await getConversationHistory(env.DB, workspaceId, sessionId);
   if (!history.length) return;
-  const systemPrompt = (await buildSystemPrompt(env.DB, workspaceId))
+  const systemPrompt = (await buildSystemPrompt(env.DB, workspaceId, undefined, { channel: "webchat", bindKey: sessionId }))
     + "\n\nThe human teammate handling this conversation hasn't replied in a few minutes. Send ONE brief, warm holding message acknowledging the wait and reassuring the customer someone will be with them shortly — reference what they asked about if relevant. Do not attempt to answer their question yourself.";
   const result = await callClaude(env.ANTHROPIC_API_KEY, systemPrompt, history);
   if (result.reply) {
@@ -570,7 +578,7 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
     }
   }
 
-  const systemPrompt = await buildSystemPrompt(env.DB, workspaceId, message);
+  const systemPrompt = await buildSystemPrompt(env.DB, workspaceId, message, { channel: "webchat", bindKey: sessionId });
   const storedActions = await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions");
   const actions = sanitizeActions(storedActions || []);
   const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
