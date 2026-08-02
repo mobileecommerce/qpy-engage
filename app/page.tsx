@@ -3976,11 +3976,46 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
   useEffect(()=>{
     if(!p.selected||!token){setMessages([]);setHandoffSummary(null);setVisitor(null);return}
     setLoadingThread(true);
+    atBottomRef.current=true;
     fetch(metaApi(`/api/cx/messages?channel=${p.selected.channel}&threadKey=${encodeURIComponent(p.selected.threadKey)}`),{headers:authHeaders(token)})
       .then(r=>r.json()).then((d:{messages?:CxMessage[];handoffSummary?:{summary:string;focusOn:string;customerNotes:string}|null;visitor?:CxVisitor|null})=>{setMessages(d.messages||[]);setHandoffSummary(d.handoffSummary||null);setVisitor(d.visitor||null)})
       .catch(()=>{}).finally(()=>setLoadingThread(false));
   },[key,token]);
-  useEffect(()=>{ if(threadRef.current)threadRef.current.scrollTop=threadRef.current.scrollHeight },[messages]);
+  // Follow the conversation only when the agent is already at the bottom. Yanking them back down
+  // while they are scrolled up reading earlier context is worse than missing the auto-scroll.
+  const atBottomRef=useRef(true);
+  useEffect(()=>{
+    const el=threadRef.current;
+    if(el&&atBottomRef.current)el.scrollTop=el.scrollHeight;
+  },[messages]);
+
+  // The 6s event poll refreshes the conversation list; the thread that is actually open needs its
+  // own fetch, or a customer's reply sits invisible until the agent switches away and back.
+  useEffect(()=>{
+    if(!p.selected||!token)return;
+    const channel=p.selected.channel;
+    const threadKey=p.selected.threadKey;
+    let stopped=false;
+    const tick=async()=>{
+      try{
+        const response=await fetch(metaApi(`/api/cx/messages?channel=${channel}&threadKey=${encodeURIComponent(threadKey)}`),{headers:authHeaders(token)});
+        if(!response.ok||stopped)return;
+        const data=await response.json() as {messages?:CxMessage[];handoffSummary?:{summary:string;focusOn:string;customerNotes:string}|null;visitor?:CxVisitor|null};
+        if(stopped)return;
+        // Replace only on a real change: an unconditional setState every few seconds would re-render
+        // the thread constantly and fight the agent's scroll position for no reason.
+        setMessages(prev=>{
+          const next=data.messages||[];
+          if(next.length===prev.length&&next[next.length-1]?.createdAt===prev[prev.length-1]?.createdAt)return prev;
+          return next;
+        });
+        setVisitor(data.visitor||null);
+        if(data.handoffSummary)setHandoffSummary(data.handoffSummary);
+      }catch{ /* a dropped poll is retried on the next tick */ }
+    };
+    const timer=setInterval(tick,5000);
+    return()=>{stopped=true;clearInterval(timer)};
+  },[p.selected?.channel,p.selected?.threadKey,token]);
 
   const send=async()=>{
     if(!p.selected||!token||!reply.trim())return;
@@ -4095,9 +4130,13 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
           <button className="secondary-btn" disabled={togglingAi} onClick={toggleAi}>{togglingAi?"…":p.selected.aiActive?"Pause AI":"Hand to AI"}</button>
           <button className="cx-panel-toggle" onClick={()=>p.setPanelOpen(!p.panelOpen)} title={p.panelOpen?"Collapse lead panel":"Expand lead panel"}>{p.panelOpen?"⟩":"⟨"}</button>
         </header>
-        <div className="cx-messages" ref={threadRef}>
+        <div className="cx-messages" ref={threadRef}
+          onScroll={e=>{const el=e.currentTarget; atBottomRef.current=el.scrollHeight-el.scrollTop-el.clientHeight<60}}>
           {loadingThread?<p className="empty-hint">Loading…</p>
-          :messages.map((m,i)=>m.role==="system"
+          :messages.map((m,i)=>m.role==="error"
+            // Visible to the team only — the customer is never sent these.
+            ? <div key={i} className="cx-system error" title="Only your team can see this">{m.content}</div>
+            : m.role==="system"
             ? <div key={i} className="cx-system">{m.content}</div>
             : <div key={i} className={`cx-bubble ${m.role==="user"?"visitor":m.role==="agent"?"agent":"ai"}`}>
                 <p>{m.content}</p>

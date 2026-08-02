@@ -553,7 +553,13 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   const onCustomerName = (name: string) => saveLearnedCustomerName(env.DB, workspaceId, sessionId, name);
   const onNeedsHuman = (reason: string) => flagConversationForHuman(env, workspaceId, sessionId, reason);
   const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, messages, actions, recordSubmission, onCustomerName, onNeedsHuman);
-  if (result.error) return widgetJson({ error: result.error }, result.status || 502);
+  if (result.error) {
+    // Without this the conversation is indistinguishable from one the business simply ignored:
+    // the visitor's message is already stored, no reply follows, and nothing anywhere says why.
+    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content) VALUES (?, ?, 'error', ?)`)
+      .bind(workspaceId, sessionId, `Assistant could not reply: ${result.error}`.slice(0, 400)).run().catch(() => null);
+    return widgetJson({ error: result.error }, result.status || 502);
+  }
 
   const reply = result.reply ? sanitizeWidgetReply(result.reply) : result.reply;
   const repliedAt = sqliteNow();
@@ -577,9 +583,9 @@ async function pollMessages(request: Request, env: WidgetEnv): Promise<Response>
   await touchPresence(env.DB, workspaceId, sessionId);
   await maybeSendHoldingMessage(env, workspaceId, sessionId);
   const result = after
-    ? await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role != 'user' AND created_at > ? ORDER BY created_at ASC LIMIT 50`)
+    ? await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role NOT IN ('user','error') AND created_at > ? ORDER BY created_at ASC LIMIT 50`)
       .bind(workspaceId, sessionId, after).all<{ role: string; content: string; created_at: string }>()
-    : await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role != 'user' ORDER BY created_at ASC LIMIT 50`)
+    : await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role NOT IN ('user','error') ORDER BY created_at ASC LIMIT 50`)
       .bind(workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>();
   const typing = await isAgentTyping(env.DB, workspaceId, sessionId);
   const aiActive = await isAiActive(env.DB, workspaceId, sessionId);
@@ -597,7 +603,8 @@ async function getHistory(request: Request, env: WidgetEnv): Promise<Response> {
   const sessionId = (url.searchParams.get("sessionId") || "").trim();
   if (!workspaceId || !sessionId) return widgetJson({ error: "Missing workspaceId or sessionId." }, 400);
   await ensureWidgetSchema(env.DB);
-  const result = await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC LIMIT 200`)
+  const result = await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages
+    WHERE workspace_id = ? AND session_id = ? AND role != 'error' ORDER BY created_at ASC LIMIT 200`)
     .bind(workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>();
   const aiActive = await isAiActive(env.DB, workspaceId, sessionId);
   return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), aiActive });

@@ -1260,3 +1260,6 @@ small{font-size:11.5px;line-height:1.45}
 .cx-visitor-head>b.live::before{content:"";width:6px;height:6px;border-radius:50%;background:#39a06a;
   animation:cx-pulse 2s ease-in-out infinite}
 @media(prefers-reduced-motion:reduce){.cx-visitor-head>b.live::before{animation:none}}
+/* An assistant failure, shown to the team only. Muted red rather than alarming: it explains a gap
+   in the conversation, it is not something the agent must act on right now. */
+.cx-system.error{background:#fdeeea;color:#a8564a;border:1px solid #f0cfc7;max-width:88%;text-align:center}
