@@ -145,6 +145,7 @@ async function ensureWidgetSchema(db: D1Database): Promise<void> {
   try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN needs_attention INTEGER NOT NULL DEFAULT 0`).run(); } catch { /* already exists */ }
   try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN attention_reason TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
   try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN handoff_summary TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
+  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN site_key TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
   widgetSchemaEnsured = true;
 }
 
@@ -255,6 +256,15 @@ function voiceInstruction(tone: string): string {
 }
 
 export interface PromptRoute { channel: BindChannel; bindKey?: string }
+
+
+/** The site a conversation started on. Read by every later prompt for that session so the assistant
+ *  never changes halfway through a conversation. */
+async function siteKeyFor(db: D1Database, workspaceId: string, sessionId: string): Promise<string> {
+  const row = await db.prepare(`SELECT site_key FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`)
+    .bind(workspaceId, sessionId).first<{ site_key: string }>().catch(() => null);
+  return row?.site_key || "";
+}
 
 export async function buildSystemPrompt(
   db: D1Database, workspaceId: string, question?: string, route?: PromptRoute,
@@ -452,7 +462,7 @@ async function answerIfUnanswered(env: WidgetEnv, workspaceId: string, sessionId
   // This path answers a message the customer left unanswered during human takeover, so the question
   // to search the site for is that last customer message, not a live one.
   const unanswered = [...history].reverse().find((m) => m.role === "user")?.content || "";
-  const systemPrompt = await buildSystemPrompt(env.DB, workspaceId, unanswered, { channel: "webchat", bindKey: sessionId });
+  const systemPrompt = await buildSystemPrompt(env.DB, workspaceId, unanswered, { channel: "webchat", bindKey: await siteKeyFor(env.DB, workspaceId, sessionId) });
   const storedActions = await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions");
   const actions = sanitizeActions(storedActions || []);
   const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
@@ -480,7 +490,7 @@ async function maybeSendHoldingMessage(env: WidgetEnv, workspaceId: string, sess
 
   const history = await getConversationHistory(env.DB, workspaceId, sessionId);
   if (!history.length) return;
-  const systemPrompt = (await buildSystemPrompt(env.DB, workspaceId, undefined, { channel: "webchat", bindKey: sessionId }))
+  const systemPrompt = (await buildSystemPrompt(env.DB, workspaceId, undefined, { channel: "webchat", bindKey: await siteKeyFor(env.DB, workspaceId, sessionId) }))
     + "\n\nThe human teammate handling this conversation hasn't replied in a few minutes. Send ONE brief, warm holding message acknowledging the wait and reassuring the customer someone will be with them shortly — reference what they asked about if relevant. Do not attempt to answer their question yourself.";
   const result = await callClaude(env.ANTHROPIC_API_KEY, systemPrompt, history);
   if (result.reply) {
@@ -494,11 +504,20 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   if (!env.ANTHROPIC_API_KEY) return widgetJson({ error: "This chat isn't configured yet." }, 503);
 
   const body = await request.json() as { workspaceId?: string; message?: string; history?: unknown; sessionId?: string;
+    siteKey?: string;
     context?: { pageUrl?: string; pageTitle?: string; referrer?: string; screen?: string; timezone?: string } };
+  // Set with data-site on the embed. It identifies the *site*, so two properties on one workspace
+  // can be answered by different assistants; the session id never could, being one per visitor.
+  const siteKey = (body.siteKey || "").trim().slice(0, 80);
   const workspaceId = (body.workspaceId || "").trim();
   const sessionId = (body.sessionId || "").trim().slice(0, 80);
   // Fire-and-forget: what the agent sees is worth nothing if capturing it delays the reply.
   await recordVisitorContext(env.DB, request, workspaceId, sessionId, body.context || {}).catch(() => null);
+  if (siteKey) {
+    await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, site_key) VALUES (?, ?, ?)
+      ON CONFLICT(workspace_id, session_id) DO UPDATE SET site_key = excluded.site_key`)
+      .bind(workspaceId, sessionId, siteKey).run().catch(() => null);
+  }
   if (!workspaceId) return widgetJson({ error: "Missing workspace id." }, 400);
 
   const workspace = await env.DB.prepare("SELECT id, status FROM workspaces WHERE id = ?").bind(workspaceId).first<{ id: string; status: string | null }>();
@@ -578,7 +597,7 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
     }
   }
 
-  const systemPrompt = await buildSystemPrompt(env.DB, workspaceId, message, { channel: "webchat", bindKey: sessionId });
+  const systemPrompt = await buildSystemPrompt(env.DB, workspaceId, message, { channel: "webchat", bindKey: siteKey });
   const storedActions = await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions");
   const actions = sanitizeActions(storedActions || []);
   const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);

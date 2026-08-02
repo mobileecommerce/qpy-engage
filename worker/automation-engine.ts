@@ -22,6 +22,7 @@ export interface RunCtx {
   channel: RunChannel;
   contactKey: string;            // widget session_id, or the customer's WhatsApp number
   phoneNumberId?: string;        // whatsapp only — persisted so a resumed wait can still deliver
+  siteKey?: string;              // web chat only — which site or page the widget was embedded on
   deliver: (text: string) => Promise<boolean>;
   persistConversationState: boolean; // web chat has an Inbox surface for tags/escalation; whatsapp doesn't (yet)
 }
@@ -257,7 +258,10 @@ async function executeNode(x: ExecCtx, node: AutomationNode): Promise<NodeOutcom
       // Search the crawled site against what the customer just asked, so an AI reply node inside an
       // automation grounds on the right page rather than the start of the site.
       const askedNow = [...x.history].reverse().find((m) => m.role === "user")?.content || "";
-      const systemPrompt = (await buildSystemPrompt(x.env.DB, x.workspaceId, askedNow, { channel: x.ctx.channel === "whatsapp" ? "whatsapp" : "webchat", bindKey: x.ctx.contactKey || "" })) + actionHint + buildCollectLinkInstructions(cfg);
+      const systemPrompt = (await buildSystemPrompt(x.env.DB, x.workspaceId, askedNow, { channel: x.ctx.channel === "whatsapp" ? "whatsapp" : "webchat",
+        // The business's own number, not the customer's. Routing answers "which of our numbers did
+        // this arrive on", and keying on the sender would instead pin one customer to one assistant.
+        bindKey: x.ctx.channel === "whatsapp" ? (x.ctx.phoneNumberId || "") : (x.ctx.siteKey || "") })) + actionHint + buildCollectLinkInstructions(cfg);
       const storedActions = node.kind === "aiAction"
         ? (await readWorkspaceState<unknown[]>(x.env.DB, x.workspaceId, "qpy-engage-assistant-actions")) || []
         : [];
