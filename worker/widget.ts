@@ -1,5 +1,5 @@
 import { callClaude, callClaudeWithActions, sanitizeChatMessages, sanitizeActions, json, corsPreflight, allowedOrigin, type ChatMessage } from "./shared";
-import { recordVisitorContext, readVisitorContext } from "./visitor";
+import { recordVisitorContext, readVisitorContext, touchPresence } from "./visitor";
 import { getStoredKnowledgeContent, getRelevantKnowledgePages } from "./knowledge";
 import { saveSubmission } from "./leads";
 import { requireSession, type AuthEnv } from "./auth";
@@ -572,6 +572,9 @@ async function pollMessages(request: Request, env: WidgetEnv): Promise<Response>
   const after = (url.searchParams.get("after") || "").trim();
   if (!workspaceId || !sessionId) return widgetJson({ error: "Missing workspaceId or sessionId." }, 400);
   await ensureWidgetSchema(env.DB);
+  // The poll the widget already runs doubles as the presence heartbeat, so nothing extra is asked
+  // of the visitor's browser and no new endpoint exists to keep alive.
+  await touchPresence(env.DB, workspaceId, sessionId);
   await maybeSendHoldingMessage(env, workspaceId, sessionId);
   const result = after
     ? await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role != 'user' AND created_at > ? ORDER BY created_at ASC LIMIT 50`)

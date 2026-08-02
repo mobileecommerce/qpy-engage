@@ -1,7 +1,7 @@
 import { callClaude, json, corsPreflight, allowedOrigin, type ChatMessage } from "./shared";
 import { requireSession, type AuthEnv } from "./auth";
 import { resolveIdentity, resolveTombstone, absorbProfile, type IdentityChannel, type ResolutionTier } from "./identity";
-import { readVisitorContext } from "./visitor";
+import { readVisitorContext, ONLINE_SQL } from "./visitor";
 
 export interface ConversationsEnv extends AuthEnv {
   DB: D1Database;
@@ -349,6 +349,7 @@ interface FeedRow {
   lead_id: string | null; stage: string | null; priority: string | null; segment: string | null;
   source: string | null; owner: string | null; next_followup: string | null;
   score: number | null; score_reasons: string | null;
+  is_online: number | null; visitor_last_seen: string | null;
 }
 
 function publicConversation(r: FeedRow) {
@@ -358,6 +359,7 @@ function publicConversation(r: FeedRow) {
     lastMessage: r.last_message, lastAt: r.last_at, lastRole: r.last_role,
     messageCount: r.message_count, unread: r.unread === 1, aiActive: r.ai_active === 1,
     needsAttention: r.needs_attention === 1, attentionReason: r.attention_reason, state: r.state,
+    online: r.is_online === 1, lastSeenAt: r.visitor_last_seen || "",
     person: r.person_id ? {
       id: r.person_id, name: r.full_name || "", phone: r.phone || "", email: r.email || "",
       instagramHandle: r.instagram_handle || "", company: r.company || "", avatarTone: r.avatar_tone || 0,
@@ -379,11 +381,16 @@ const FEED_SELECT = `SELECT c.id, c.channel, c.thread_key, c.person_id, c.displa
     c.last_role, c.message_count, c.unread, c.ai_active, c.needs_attention, c.attention_reason, c.state,
     p.full_name, p.phone, p.email, p.instagram_handle, p.company, p.avatar_tone,
     l.id AS lead_id, l.stage, l.priority, l.segment, l.source, l.owner, l.next_followup,
-    s.score, s.score_reasons
+    s.score, s.score_reasons,
+    -- Presence is decided in SQL rather than from a timestamp compared on the client, so every
+    -- agent's screen agrees on who is online regardless of clock skew on their machine.
+    CASE WHEN c.channel = 'webchat' AND ${ONLINE_SQL} THEN 1 ELSE 0 END AS is_online,
+    v.last_seen AS visitor_last_seen
   FROM crm_conversations c
   LEFT JOIN crm_people p ON p.id = c.person_id
   LEFT JOIN crm_leads l ON l.person_id = c.person_id AND l.workspace_id = c.workspace_id
-  LEFT JOIN crm_contacts s ON s.workspace_id = c.workspace_id AND s.session_id = c.thread_key`;
+  LEFT JOIN crm_contacts s ON s.workspace_id = c.workspace_id AND s.session_id = c.thread_key
+  LEFT JOIN widget_visitor_context v ON v.workspace_id = c.workspace_id AND v.session_id = c.thread_key`;
 
 async function listConversations(request: Request, env: ConversationsEnv): Promise<Response> {
   const session = await requireSession(request, env);

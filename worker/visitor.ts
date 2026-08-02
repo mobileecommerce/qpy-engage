@@ -16,6 +16,7 @@ export interface VisitorContext {
   isp: string; browser: string; os: string; deviceType: string; language: string;
   pageUrl: string; pageTitle: string; referrer: string; screen: string;
   firstSeen: string; lastSeen: string; visitCount: number;
+  online: boolean; secondsSinceSeen: number;
 }
 
 // Cloudflare attaches this to every request at the edge. Typed narrowly because only these fields
@@ -160,17 +161,53 @@ interface ContextRow {
   first_seen: string; last_seen: string;
 }
 
+
+/** A visitor is "here" if we heard from their browser this recently. The widget polls every 4
+ *  seconds, so this tolerates roughly four missed beats before it stops claiming they are online. */
+export const ONLINE_WINDOW_SECONDS = 20;
+
+/**
+ * Records that this visitor's browser is still open.
+ *
+ * Called from the widget poll, which fires every few seconds per open page. Writing on every one of
+ * those would be a needless write per visitor per poll, so the UPDATE is conditional: the row is
+ * only touched once the stored timestamp is actually stale. Presence stays accurate to within a few
+ * seconds while the write rate drops by roughly the polling frequency.
+ */
+export async function touchPresence(db: D1Database, workspaceId: string, sessionId: string): Promise<void> {
+  if (!workspaceId || !sessionId) return;
+  await db.prepare(`UPDATE widget_visitor_context SET last_seen = CURRENT_TIMESTAMP
+    WHERE workspace_id = ? AND session_id = ? AND last_seen < datetime('now', '-8 seconds')`)
+    .bind(workspaceId, sessionId).run().catch(() => { /* presence is never worth failing a poll */ });
+}
+
+/** SQL fragment giving 1 when a visitor row was seen inside the online window. */
+export const ONLINE_SQL = `(v.last_seen IS NOT NULL AND v.last_seen > datetime('now', '-${ONLINE_WINDOW_SECONDS} seconds'))`;
+
+
+/** D1 stores timestamps as "YYYY-MM-DD HH:MM:SS" in UTC with no zone marker; Date.parse needs both
+ *  the separator and the Z or it silently reads them as local time and reports the wrong age. */
+function secondsSince(stamp: string | null | undefined): number | null {
+  if (!stamp) return null;
+  const parsed = Date.parse(`${stamp.replace(" ", "T")}Z`);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.max(0, Math.round((Date.now() - parsed) / 1000));
+}
+
 export async function readVisitorContext(
   db: D1Database, workspaceId: string, sessionId: string,
 ): Promise<VisitorContext | null> {
   const row = await db.prepare(`SELECT * FROM widget_visitor_context WHERE workspace_id = ? AND session_id = ?`)
     .bind(workspaceId, sessionId).first<ContextRow>().catch(() => null);
   if (!row) return null;
+  const seconds = secondsSince(row.last_seen);
   return {
     country: row.country, countryCode: row.country_code, city: row.city, region: row.region,
     timezone: row.timezone, isp: row.isp, browser: row.browser, os: row.os,
     deviceType: row.device_type, language: row.language, pageUrl: row.page_url,
     pageTitle: row.page_title, referrer: row.referrer, screen: row.screen,
     firstSeen: row.first_seen, lastSeen: row.last_seen, visitCount: row.visit_count,
+    online: seconds !== null && seconds <= ONLINE_WINDOW_SECONDS,
+    secondsSinceSeen: seconds ?? -1,
   };
 }

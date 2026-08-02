@@ -3717,7 +3717,7 @@ function SearchModal({onClose,onNavigate}:{onClose:()=>void;onNavigate:(s:Sectio
 type CxChannel="whatsapp"|"instagram"|"webchat";
 type CxPerson={id:string;name:string;phone:string;email:string;instagramHandle:string;company:string;avatarTone:number};
 type CxLeadSummary={id:string;stage:string;priority:string;segment:string;source:string;owner:string;nextFollowup:string;score:number|null;scoreReasons:string[]};
-type CxConversation={id:string;channel:CxChannel;threadKey:string;name:string;lastMessage:string;lastAt:string;lastRole:string;messageCount:number;unread:boolean;aiActive:boolean;needsAttention:boolean;attentionReason:string;state:string;person:CxPerson|null;lead:CxLeadSummary|null};
+type CxConversation={id:string;channel:CxChannel;threadKey:string;name:string;online?:boolean;lastSeenAt?:string;lastMessage:string;lastAt:string;lastRole:string;messageCount:number;unread:boolean;aiActive:boolean;needsAttention:boolean;attentionReason:string;state:string;person:CxPerson|null;lead:CxLeadSummary|null};
 type CxLead={id:string;stage:string;priority:string;segment:string;source:string;owner:string;nextFollowup:string;boardOrder:number;createdAt:string;updatedAt:string;person:CxPerson;conversation:{id:string;channel:CxChannel;threadKey:string;lastMessage:string;lastAt:string;unread:boolean;messageCount:number;aiActive:boolean;needsAttention:boolean}|null;score:number|null;scoreReasons:string[]};
 type CxCounts={all:number;unread:number;needsYou:number;newLeads:number;followUp:number;closed:number};
 type CxMessage={role:string;content:string;createdAt:string};
@@ -4055,7 +4055,8 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
           </div>
         :p.conversations.map(c=>
           <button key={c.id} className={`cx-feed-row${p.selected?.id===c.id?" selected":""}${c.unread?" unread":""}`} onClick={()=>p.setSelectedId(c.id)}>
-            <span className={`cx-avatar tone-${c.person?.avatarTone??0}`}>{cxInitials(c.name)}</span>
+            <span className={`cx-avatar tone-${c.person?.avatarTone??0}${c.online?" live":""}`}
+              title={c.online?"On the site now":undefined}>{cxInitials(c.name)}</span>
             <div className="cx-feed-body">
               <div className="cx-feed-line">
                 <strong>{c.name}</strong>
@@ -4087,6 +4088,7 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
             <div className="cx-thread-sub">
               <span className={`cx-chan ${p.selected.channel}`}>{CX_CHANNEL_META[p.selected.channel].glyph} {CX_CHANNEL_META[p.selected.channel].label}</span>
               <span className={`cx-live${p.selected.aiActive?"":" paused"}`}>{p.selected.aiActive?"AI handling":"You're handling"}</span>
+              {p.selected.online&&<span className="cx-online-tag">On the site now</span>}
               <span>{p.selected.messageCount} messages</span>
             </div>
           </div>
@@ -4164,7 +4166,7 @@ function CxAccordion({title,count,children,defaultOpen}:{title:string;count?:num
 }
 
 
-type CxVisitor={country:string;countryCode:string;city:string;region:string;timezone:string;isp:string;
+type CxVisitor={online:boolean;secondsSinceSeen:number;country:string;countryCode:string;city:string;region:string;timezone:string;isp:string;
   browser:string;os:string;deviceType:string;language:string;pageUrl:string;pageTitle:string;
   referrer:string;screen:string;firstSeen:string;lastSeen:string;visitCount:number};
 
@@ -4179,6 +4181,15 @@ function cxLocalTime(timezone:string):string{
   try{ return new Intl.DateTimeFormat(undefined,{hour:"2-digit",minute:"2-digit",timeZone:timezone}).format(new Date()) }
   catch{ return "" }
 }
+
+/** Coarse on purpose: "4 minutes ago" is what an agent needs, not a precise duration. */
+function cxAgo(seconds:number):string{
+  if(seconds<60)return "moments ago";
+  const m=Math.round(seconds/60); if(m<60)return `${m} minute${m===1?"":"s"} ago`;
+  const h=Math.round(m/60); if(h<24)return `${h} hour${h===1?"":"s"} ago`;
+  const d=Math.round(h/24); return `${d} day${d===1?"":"s"} ago`;
+}
+
 const cxHost=(url:string)=>{ try{ return new URL(url).host }catch{ return "" } };
 const cxPath=(url:string)=>{ try{ const u=new URL(url); return (u.pathname+u.search)||"/" }catch{ return url } };
 
@@ -4274,7 +4285,11 @@ function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer,onFullLead,hand
         <span>{cxFlag(visitor.countryCode)||"◍"}</span>
         <div><strong>{[visitor.city,visitor.country].filter(Boolean).join(", ")||"Location unknown"}</strong>
           <small>{[visitor.deviceType,visitor.browser,visitor.os].filter(Boolean).join(" · ")||"Unknown device"}</small></div>
-        {cxLocalTime(visitor.timezone)&&<b title={`Their local time (${visitor.timezone})`}>{cxLocalTime(visitor.timezone)}</b>}
+        {visitor.online
+          ? <b className="live" title="Their browser checked in within the last 20 seconds">Online</b>
+          : cxLocalTime(visitor.timezone)
+            ? <b title={`Their local time (${visitor.timezone})`}>{cxLocalTime(visitor.timezone)}</b>
+            : null}
       </div>
       <div className="cx-visitor-rows">
         {visitor.pageUrl&&<div><i>◫</i><span title={visitor.pageUrl}>{visitor.pageTitle||cxPath(visitor.pageUrl)}</span></div>}
@@ -4282,6 +4297,7 @@ function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer,onFullLead,hand
         {visitor.isp&&<div><i>⌁</i><span>{visitor.isp}</span></div>}
         {visitor.language&&<div><i>⌘</i><span>{visitor.language}</span></div>}
         {visitor.visitCount>1&&<div><i>↻</i><span>{visitor.visitCount} messages this session</span></div>}
+        {!visitor.online&&visitor.secondsSinceSeen>=0&&<div><i>◷</i><span>Last seen {cxAgo(visitor.secondsSinceSeen)}</span></div>}
       </div>
     </div>}
 
