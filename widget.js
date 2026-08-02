@@ -3,6 +3,8 @@
   var API_ORIGIN = "https://qpy-engage-api.qpy-engage.workers.dev";
   var currentScript = document.currentScript;
   var workspaceId = currentScript ? currentScript.getAttribute("data-workspace") : null;
+  // Optional. Lets one workspace run different assistants on different sites or pages.
+  var siteKey = (currentScript && currentScript.getAttribute("data-site")) || "";
   // A visitor can hold several separate conversations, listed inside the widget. The list lives in
   // localStorage rather than sessionStorage: a history that disappears when the tab closes isn't a
   // history, and the whole point of the list is coming back to an earlier thread.
@@ -558,7 +560,7 @@
       fetch(API_ORIGIN + "/api/widget/respond", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ workspaceId: workspaceId, message: text, history: history, sessionId: sessionId, context: visitorContext() }),
+        body: JSON.stringify({ workspaceId: workspaceId, message: text, history: history, sessionId: sessionId, siteKey: siteKey, context: visitorContext() }),
       })
         .then(function (response) { return response.json().then(function (data) { return { ok: response.ok, data: data }; }); })
         .then(function (result) {
