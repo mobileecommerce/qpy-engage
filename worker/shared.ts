@@ -75,7 +75,7 @@ export function sanitizeChatMessages(raw: unknown): ChatMessage[] {
 // maxTokens is optional because chat replies want to stay short, but structured work (translating a
 // whole automation into several languages) returns far more than a chat turn and silently truncates
 // mid-JSON at the chat default.
-export async function callClaude(apiKey: string, systemPrompt: string, messages: ChatMessage[], maxTokens = 500): Promise<{ reply?: string; error?: string; status?: number }> {
+export async function callClaude(apiKey: string, systemPrompt: string, messages: ChatMessage[], maxTokens = 500): Promise<{ reply?: string; error?: string; status?: number; toolTrail?: string[] }> {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -239,7 +239,7 @@ export async function callClaudeWithActions(
   catalogItems?: CatalogItemRef[],
   onShowItems?: (itemIds: string[], linkParams?: Record<string, string>) => Promise<void>,
   onSetLinkParams?: (linkParams: Record<string, string>) => Promise<void>,
-): Promise<{ reply?: string; error?: string; status?: number }> {
+): Promise<{ reply?: string; error?: string; status?: number; toolTrail?: string[] }> {
   if (!actions.length && !onCustomerName && !onNeedsHuman && !catalogItems?.length) return callClaude(apiKey, systemPrompt, messages);
 
   const { tools, nameToAction } = buildTools(actions);
@@ -288,6 +288,9 @@ export async function callClaudeWithActions(
   }
   const conversation: AnthropicMessage[] = messages.map((m) => ({ role: m.role, content: m.content }));
 
+  // What the loop actually did. An exhausted run that only reports giving up is unactionable;
+  // the sequence of tools it called is what distinguishes a loop from a task that needed more room.
+  const trail: string[] = [];
   for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -323,6 +326,7 @@ export async function callClaudeWithActions(
     conversation.push({ role: "assistant", content: blocks });
     const results: AnthropicContentBlock[] = [];
     for (const toolUse of toolUses) {
+      trail.push(toolUse.name);
       if (toolUse.name === NAME_TOOL_NAME) {
         const name = typeof toolUse.input?.name === "string" ? toolUse.input.name : "";
         if (name && onCustomerName) { try { await onCustomerName(name); } catch { /* don't let a storage failure break the reply */ } }
@@ -357,7 +361,7 @@ export async function callClaudeWithActions(
         continue;
       }
       const action = nameToAction.get(toolUse.name);
-      if (!action) { results.push({ type: "tool_result", tool_use_id: toolUse.id, content: "That action is not available.", is_error: true }); continue; }
+      if (!action) { results.push({ type: "tool_result", tool_use_id: toolUse.id, content: "That action is not available.", is_error: true }); trail[trail.length - 1] += " (unknown)"; continue; }
       if (action.type === "submit" && recordSubmission) {
         try { await recordSubmission(action.name, toolUse.input || {}); } catch { /* don't let a storage failure break the reply */ }
       }
@@ -380,5 +384,12 @@ export async function callClaudeWithActions(
     conversation.push({ role: "user", content: results });
   }
 
-  return { error: "The assistant took too many steps to complete this request.", status: 502 };
+  // Named in order, so a repeated name shows a loop and a long distinct list shows a task that
+  // genuinely needed more room than the ceiling allows. Those need opposite fixes.
+  const attempted = trail.length ? ` It called: ${trail.join(" → ")}.` : "";
+  return {
+    error: `The assistant reached its ${MAX_TOOL_ITERATIONS}-step limit without finishing.${attempted}`,
+    status: 502,
+    toolTrail: trail,
+  };
 }

@@ -285,6 +285,19 @@ async function executeNode(x: ExecCtx, node: AutomationNode): Promise<NodeOutcom
         ? await callClaudeWithActions(x.env.ANTHROPIC_API_KEY, systemPrompt, x.history, actions, undefined, undefined, undefined, catalogItems, onShow, onSetParams)
         : await callClaude(x.env.ANTHROPIC_API_KEY, systemPrompt, x.history);
 
+      // Web chat records assistant failures as a visible row in the thread; WhatsApp had no
+      // equivalent, so a failed reply there left a customer waiting with nothing anywhere to say
+      // why. The automation run log is the surface WhatsApp actually has.
+      if (result.error) {
+        await x.env.DB.prepare(`INSERT INTO automation_runs
+          (workspace_id, automation_id, automation_name, contact, channel, branch_label, outcome, outcome_type)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'bad')`)
+          .bind(x.workspaceId, x.automation.id, x.automation.name, x.ctx.contactKey.slice(0, 14),
+            x.ctx.channel === "whatsapp" ? "WhatsApp" : "Web chat", "Assistant error",
+            String(result.error).slice(0, 400))
+          .run().catch(() => null);
+      }
+
       if (shownParams) Object.assign(x.vars, shownParams);
 
       // Same failure mode guarded before: the model can promise options in prose without actually
