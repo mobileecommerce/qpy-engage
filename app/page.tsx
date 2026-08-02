@@ -3923,6 +3923,8 @@ function ConversationsModule({notify}:{notify:(s:string)=>void}){
       <button className={tab==="conversations"?"active":""} onClick={()=>setTab("conversations")}>Conversations{counts.unread>0&&<b>{counts.unread}</b>}</button>
       <button className={tab==="leads"?"active":""} onClick={()=>setTab("leads")}>Leads{leads.length>0&&<b>{leads.length}</b>}</button>
       <button className={tab==="profiles"?"active":""} onClick={()=>setTab("profiles")}>Profiles</button>
+      <div className="cx-tabs-spacer"/>
+      <AutoEndControl notify={notify}/>
     </div>
 
     {tab==="profiles"
@@ -3947,6 +3949,59 @@ function ConversationsModule({notify}:{notify:(s:string)=>void}){
 
 /* ---- Tab 1: unified inbox -------------------------------------------------------------------- */
 
+
+/** Compact control for the inactivity timeout, kept beside the inbox rather than in Settings —
+ *  it is a property of how the team works the queue, not a configuration chore. */
+function AutoEndControl({notify}:{notify:(s:string)=>void}){
+  const token=useAuthToken();
+  const [settings,setSettings]=useState<{enabled:boolean;minutes:number}|null>(null);
+  const [open,setOpen]=useState(false);
+  const [saving,setSaving]=useState(false);
+
+  useEffect(()=>{
+    if(!token)return;
+    fetch(metaApi("/api/chat/auto-end"),{headers:authHeaders(token)})
+      .then(r=>r.json()).then((d:{settings?:{enabled:boolean;minutes:number}})=>setSettings(d.settings||{enabled:false,minutes:30}))
+      .catch(()=>setSettings({enabled:false,minutes:30}));
+  },[token]);
+
+  const save=async(next:{enabled:boolean;minutes:number})=>{
+    if(!token)return;
+    setSettings(next); setSaving(true);
+    try{
+      const response=await fetch(metaApi("/api/chat/auto-end"),{method:"POST",
+        headers:{"content-type":"application/json",...authHeaders(token)},body:JSON.stringify(next)});
+      const data=await response.json() as {ok?:boolean;settings?:{enabled:boolean;minutes:number};error?:string};
+      if(!response.ok||!data.ok)throw new Error(data.error||"Could not save");
+      if(data.settings)setSettings(data.settings);
+    }catch(error){ notify(error instanceof Error?error.message:"Could not save") }
+    finally{ setSaving(false) }
+  };
+
+  if(!settings)return null;
+  return <div className="cx-autoend">
+    <button className={`cx-autoend-btn${settings.enabled?" on":""}`} onClick={()=>setOpen(!open)}>
+      ⏱ Auto-end {settings.enabled?`${settings.minutes}m`:"off"}
+    </button>
+    {open&&<div className="cx-autoend-menu">
+      <label className="cx-autoend-toggle">
+        <input type="checkbox" checked={settings.enabled} disabled={saving}
+          onChange={e=>save({...settings,enabled:e.target.checked})}/>
+        End chats automatically
+      </label>
+      <p>Closes a chat when the visitor has not replied for this long. Only applies while the team
+        is waiting on them — a message nobody answered is never closed this way.</p>
+      <div className="cx-autoend-row">
+        <input type="number" min={2} max={1440} value={settings.minutes} disabled={!settings.enabled||saving}
+          onChange={e=>setSettings({...settings,minutes:Number(e.target.value)||30})}
+          onBlur={e=>settings.enabled&&save({...settings,minutes:Number(e.target.value)||30})}/>
+        <span>minutes</span>
+      </div>
+      <small>Checked every few minutes, and exactly enforced the moment a visitor tries to write.</small>
+    </div>}
+  </div>;
+}
+
 function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];total:number;counts:CxCounts;
   search:string;setSearch:(s:string)=>void;channelFilter:"all"|CxChannel;setChannelFilter:(c:"all"|CxChannel)=>void;
   pill:typeof CX_PILLS[number];setPill:(v:typeof CX_PILLS[number])=>void;selected:CxConversation|null;
@@ -3956,6 +4011,8 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
   const token=useAuthToken();
   const [messages,setMessages]=useState<CxMessage[]>([]);
   const [togglingAi,setTogglingAi]=useState(false);
+  const [ended,setEnded]=useState<{ended:boolean;reason:string}|null>(null);
+  const [endingChat,setEndingChat]=useState(false);
   const [loadingThread,setLoadingThread]=useState(false);
   const [reply,setReply]=useState("");
   const [asNote,setAsNote]=useState(false);
@@ -3978,7 +4035,7 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
     setLoadingThread(true);
     atBottomRef.current=true;
     fetch(metaApi(`/api/cx/messages?channel=${p.selected.channel}&threadKey=${encodeURIComponent(p.selected.threadKey)}`),{headers:authHeaders(token)})
-      .then(r=>r.json()).then((d:{messages?:CxMessage[];handoffSummary?:{summary:string;focusOn:string;customerNotes:string}|null;visitor?:CxVisitor|null})=>{setMessages(d.messages||[]);setHandoffSummary(d.handoffSummary||null);setVisitor(d.visitor||null)})
+      .then(r=>r.json()).then((d:{messages?:CxMessage[];handoffSummary?:{summary:string;focusOn:string;customerNotes:string}|null;visitor?:CxVisitor|null;ended?:{ended:boolean;reason:string}|null})=>{setMessages(d.messages||[]);setHandoffSummary(d.handoffSummary||null);setVisitor(d.visitor||null);setEnded(d.ended||null)})
       .catch(()=>{}).finally(()=>setLoadingThread(false));
   },[key,token]);
   // Follow the conversation only when the agent is already at the bottom. Yanking them back down
@@ -4000,7 +4057,7 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
       try{
         const response=await fetch(metaApi(`/api/cx/messages?channel=${channel}&threadKey=${encodeURIComponent(threadKey)}`),{headers:authHeaders(token)});
         if(!response.ok||stopped)return;
-        const data=await response.json() as {messages?:CxMessage[];handoffSummary?:{summary:string;focusOn:string;customerNotes:string}|null;visitor?:CxVisitor|null};
+        const data=await response.json() as {messages?:CxMessage[];handoffSummary?:{summary:string;focusOn:string;customerNotes:string}|null;visitor?:CxVisitor|null;ended?:{ended:boolean;reason:string}|null};
         if(stopped)return;
         // Replace only on a real change: an unconditional setState every few seconds would re-render
         // the thread constantly and fight the agent's scroll position for no reason.
@@ -4010,6 +4067,7 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
           return next;
         });
         setVisitor(data.visitor||null);
+        setEnded(data.ended||null);
         if(data.handoffSummary)setHandoffSummary(data.handoffSummary);
       }catch{ /* a dropped poll is retried on the next tick */ }
     };
@@ -4058,6 +4116,22 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
       if(webchat)setMessages(data.messages||[]);
     }catch{ p.notify("Could not change who is handling this conversation") }
     finally{ setTogglingAi(false) }
+  };
+
+  const toggleEnded=async()=>{
+    if(!p.selected||!token||endingChat)return;
+    const reopening=Boolean(ended?.ended);
+    setEndingChat(true);
+    try{
+      const response=await fetch(metaApi("/api/chat/end"),{method:"POST",
+        headers:{"content-type":"application/json",...authHeaders(token)},
+        body:JSON.stringify({sessionId:p.selected.threadKey,reopen:reopening})});
+      const data=await response.json() as {ok?:boolean;error?:string};
+      if(!response.ok||!data.ok)throw new Error(data.error||"Could not update this chat");
+      p.notify(reopening?"Chat reopened":"Chat ended — the visitor can no longer reply to this thread");
+      p.onReload();
+    }catch(error){ p.notify(error instanceof Error?error.message:"Could not update this chat") }
+    finally{ setEndingChat(false) }
   };
 
   const pillCount=(name:typeof CX_PILLS[number])=>
@@ -4127,7 +4201,9 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
               <span>{p.selected.messageCount} messages</span>
             </div>
           </div>
-          <button className="secondary-btn" disabled={togglingAi} onClick={toggleAi}>{togglingAi?"…":p.selected.aiActive?"Pause AI":"Hand to AI"}</button>
+          <button className="secondary-btn" disabled={togglingAi||Boolean(ended?.ended)} onClick={toggleAi}>{togglingAi?"…":p.selected.aiActive?"Pause AI":"Hand to AI"}</button>
+        {p.selected.channel==="webchat"&&<button className="secondary-btn" disabled={endingChat} onClick={toggleEnded}>
+          {endingChat?"…":ended?.ended?"Reopen":"End chat"}</button>}
           <button className="cx-panel-toggle" onClick={()=>p.setPanelOpen(!p.panelOpen)} title={p.panelOpen?"Collapse lead panel":"Expand lead panel"}>{p.panelOpen?"⟩":"⟨"}</button>
         </header>
         <div className="cx-messages" ref={threadRef}
@@ -4143,7 +4219,12 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
                 <small>{m.role==="user"?"Visitor":m.role==="agent"?"You":"✦ Assistant"} · {conversationTime(m.createdAt)}</small>
               </div>)}
         </div>
-        <div className={`cx-composer${asNote?" note-mode":""}`}>
+        {ended?.ended
+          ? <div className="cx-ended-note">
+              <strong>This chat has ended</strong>
+              <small>{ended.reason||"The visitor can no longer reply to this thread."} Reopen it to continue, or they can start a new chat.</small>
+            </div>
+          : <div className={`cx-composer${asNote?" note-mode":""}`}>
           <textarea value={reply} onChange={e=>setReply(e.target.value)} rows={2}
             onKeyDown={e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey))send()}}
             placeholder={asNote?"Write an internal note — the customer never sees this…":"Write a reply…  (⌘↵ to send)"}/>
@@ -4160,7 +4241,7 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
             </div>
             <button className="primary" disabled={sending||!reply.trim()} onClick={send}>{sending?"Sending…":asNote?"Save note":"Send"}</button>
           </div>
-        </div>
+        </div>}
       </>}
     </section>
 

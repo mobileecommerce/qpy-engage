@@ -15,6 +15,7 @@ import { handleIdentityRequest, type IdentityEnv } from "./identity";
 import { handleSegmentsRequest, type SegmentsEnv } from "./segments";
 import { handleWaFlowsRequest, type WaFlowsEnv } from "./waflows";
 import { handleTemplatesRequest, type TemplatesEnv } from "./templates";
+import { handleLifecycleRequest, sweepStaleChats, type LifecycleEnv } from "./chatlifecycle";
 import { handleAdminRequest, type AdminEnv } from "./admin";
 import { handleCreditsRequest, type CreditsEnv } from "./credits";
 import { handleContactsRequest, type ContactsEnv } from "./contacts";
@@ -26,7 +27,7 @@ import { handleAutomationsRequest, resumeDueAutomationWaits, type AutomationsEnv
 import { sendWhatsAppText, type ConnectionRow } from "./meta";
 import { json, corsPreflight, allowedOrigin } from "./shared";
 
-interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv, LeadsEnv, CrmEnv, IntegrationsEnv, FollowupsEnv, ConversationsEnv, IdentityEnv, SegmentsEnv, WaFlowsEnv, TemplatesEnv, AdminEnv, CreditsEnv, ContactsEnv, CampaignsEnv, OtpEnv, ItemsEnv, FlowsEnv, AutomationsEnv {
+interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv, LeadsEnv, CrmEnv, IntegrationsEnv, FollowupsEnv, ConversationsEnv, IdentityEnv, SegmentsEnv, WaFlowsEnv, TemplatesEnv, LifecycleEnv, AdminEnv, CreditsEnv, ContactsEnv, CampaignsEnv, OtpEnv, ItemsEnv, FlowsEnv, AutomationsEnv {
   ASSETS: Fetcher;
   DB: D1Database;
   ANTHROPIC_API_KEY?: string;
@@ -92,6 +93,9 @@ const worker = {
 
     const templatesResponse = await handleTemplatesRequest(request, env);
     if (templatesResponse) return templatesResponse;
+
+    const lifecycleResponse = await handleLifecycleRequest(request, env);
+    if (lifecycleResponse) return lifecycleResponse;
 
     const adminResponse = await handleAdminRequest(request, env);
     if (adminResponse) return adminResponse;
@@ -175,6 +179,9 @@ const worker = {
       }
       return async (text: string) => {
         const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+        // Closing abandoned chats is exactly the kind of thing nobody remembers to do by hand.
+        await sweepStaleChats(env.DB).catch(() => 0);
+
         await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`).bind(row.workspace_id, row.contact_key, text, now).run();
         return true;
       };

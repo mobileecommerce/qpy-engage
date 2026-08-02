@@ -2,6 +2,7 @@ import { callClaude, json, corsPreflight, allowedOrigin, type ChatMessage } from
 import { requireSession, type AuthEnv } from "./auth";
 import { resolveIdentity, resolveTombstone, absorbProfile, type IdentityChannel, type ResolutionTier } from "./identity";
 import { readVisitorContext, ONLINE_SQL } from "./visitor";
+import { readEndedState } from "./chatlifecycle";
 
 export interface ConversationsEnv extends AuthEnv {
   DB: D1Database;
@@ -445,7 +446,8 @@ async function getMessages(request: Request, env: ConversationsEnv): Promise<Res
     .bind(session.workspaceId, threadKey).first<{ handoff_summary: string }>().catch(() => null);
   // Only web chat carries this — a WhatsApp thread arrives through Meta, not the visitor's browser.
   const visitor = channel === "webchat" ? await readVisitorContext(env.DB, session.workspaceId, threadKey) : null;
-  return json(request, { messages, handoffSummary: parseHandoff(stateRow?.handoff_summary), visitor });
+  const ended = channel === "webchat" ? await readEndedState(env.DB, session.workspaceId, threadKey) : null;
+  return json(request, { messages, handoffSummary: parseHandoff(stateRow?.handoff_summary), visitor, ended });
 }
 
 /* ------------------------------------------------------------------ leads */

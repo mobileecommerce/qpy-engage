@@ -1263,3 +1263,26 @@ small{font-size:11.5px;line-height:1.45}
 /* An assistant failure, shown to the team only. Muted red rather than alarming: it explains a gap
    in the conversation, it is not something the agent must act on right now. */
 .cx-system.error{background:#fdeeea;color:#a8564a;border:1px solid #f0cfc7;max-width:88%;text-align:center}
+
+/* ---- Chat lifecycle -------------------------------------------------------------------------- */
+.cx-tabs-spacer{flex:1}
+.cx-autoend{position:relative;display:flex;align-items:center;padding-bottom:6px}
+.cx-autoend-btn{border:1px solid var(--line);background:#fff;color:#7d8493;border-radius:20px;
+  padding:5px 12px;font-size:11.5px;font-weight:600;cursor:pointer}
+.cx-autoend-btn:hover{border-color:#c3c8d2;color:#4a5160}
+.cx-autoend-btn.on{background:#eef0fb;border-color:#c3c7f5;color:#4340c0}
+.cx-autoend-menu{position:absolute;top:34px;right:0;z-index:30;width:290px;background:#fff;
+  border:1px solid var(--line);border-radius:10px;box-shadow:0 14px 40px #00000024;padding:13px}
+.cx-autoend-toggle{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;color:#20232b;cursor:pointer}
+.cx-autoend-toggle input{accent-color:#4c50ee}
+.cx-autoend-menu p{margin:8px 0 11px;font-size:11.5px;color:#8b93a1;line-height:1.5}
+.cx-autoend-row{display:flex;align-items:center;gap:8px}
+.cx-autoend-row input{width:74px;border:1px solid #dfe2e8;border-radius:7px;padding:6px 9px;font:inherit;font-size:12.5px}
+.cx-autoend-row input:disabled{background:#f4f5f8;color:#a9b0bd}
+.cx-autoend-row span{font-size:12px;color:#7d8493}
+.cx-autoend-menu>small{display:block;margin-top:9px;font-size:11px;color:#a9b0bd;line-height:1.45}
+
+/* Replaces the composer entirely — a disabled input still looks like somewhere to type. */
+.cx-ended-note{flex:none;border-top:1px solid var(--line);padding:16px;text-align:center;background:#fcfcfd}
+.cx-ended-note strong{display:block;font-size:13px;color:#4a5160}
+.cx-ended-note small{display:block;font-size:11.5px;color:#8b93a1;line-height:1.5;margin-top:4px;max-width:420px;margin-left:auto;margin-right:auto}

@@ -1,5 +1,6 @@
 import { callClaude, callClaudeWithActions, sanitizeChatMessages, sanitizeActions, json, corsPreflight, allowedOrigin, type ChatMessage } from "./shared";
 import { recordVisitorContext, readVisitorContext, touchPresence } from "./visitor";
+import { readEndedState, readAutoEndSettings, endChat } from "./chatlifecycle";
 import { getStoredKnowledgeContent, getRelevantKnowledgePages } from "./knowledge";
 import { saveSubmission } from "./leads";
 import { requireSession, type AuthEnv } from "./auth";
@@ -501,6 +502,29 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
 
   const message = (body.message || "").trim().slice(0, MAX_MESSAGE_LENGTH);
   if (!message) return widgetJson({ error: "No message to respond to." }, 400);
+
+  // Checked here rather than only in the cron: the sweep runs every few minutes, and a visitor who
+  // returns inside that gap would otherwise slip a message into a conversation the team has closed.
+  const endedState = await readEndedState(env.DB, workspaceId, sessionId);
+  if (endedState.ended) {
+    return widgetJson({ ended: true, reason: endedState.reason || "This chat has ended." }, 409);
+  }
+  // Enforce the inactivity rule at the moment it matters, so the window is exact regardless of when
+  // the sweep last ran.
+  const autoEnd = await readAutoEndSettings(env.DB, workspaceId);
+  if (autoEnd.enabled) {
+    const last = await env.DB.prepare(`SELECT role, created_at FROM widget_messages
+      WHERE workspace_id = ? AND session_id = ? AND role != 'error' ORDER BY created_at DESC LIMIT 1`)
+      .bind(workspaceId, sessionId).first<{ role: string; created_at: string }>().catch(() => null);
+    if (last && (last.role === "assistant" || last.role === "agent")) {
+      const ageMinutes = (Date.now() - Date.parse(`${last.created_at.replace(" ", "T")}Z`)) / 60000;
+      if (Number.isFinite(ageMinutes) && ageMinutes >= autoEnd.minutes) {
+        await endChat(env.DB, workspaceId, sessionId, "auto",
+          `Chat ended automatically after ${autoEnd.minutes} minutes without a reply.`);
+        return widgetJson({ ended: true, reason: "This chat has ended. Start a new one to keep talking." }, 409);
+      }
+    }
+  }
 
   const receivedAt = sqliteNow();
   if (sessionId) {
