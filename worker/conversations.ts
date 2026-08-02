@@ -1,6 +1,7 @@
 import { callClaude, json, corsPreflight, allowedOrigin, type ChatMessage } from "./shared";
 import { requireSession, type AuthEnv } from "./auth";
 import { resolveIdentity, resolveTombstone, absorbProfile, type IdentityChannel, type ResolutionTier } from "./identity";
+import { readVisitorContext } from "./visitor";
 
 export interface ConversationsEnv extends AuthEnv {
   DB: D1Database;
@@ -435,7 +436,9 @@ async function getMessages(request: Request, env: ConversationsEnv): Promise<Res
   await recordEvent(env.DB, session.workspaceId, "conversation", `${channel}:${threadKey}`);
   const stateRow = await env.DB.prepare(`SELECT handoff_summary FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`)
     .bind(session.workspaceId, threadKey).first<{ handoff_summary: string }>().catch(() => null);
-  return json(request, { messages, handoffSummary: parseHandoff(stateRow?.handoff_summary) });
+  // Only web chat carries this — a WhatsApp thread arrives through Meta, not the visitor's browser.
+  const visitor = channel === "webchat" ? await readVisitorContext(env.DB, session.workspaceId, threadKey) : null;
+  return json(request, { messages, handoffSummary: parseHandoff(stateRow?.handoff_summary), visitor });
 }
 
 /* ------------------------------------------------------------------ leads */

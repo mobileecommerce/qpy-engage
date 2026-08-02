@@ -3972,11 +3972,12 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
   const key=p.selected?`${p.selected.channel}:${p.selected.threadKey}`:"";
 
   const [handoffSummary,setHandoffSummary]=useState<{summary:string;focusOn:string;customerNotes:string}|null>(null);
+  const [visitor,setVisitor]=useState<CxVisitor|null>(null);
   useEffect(()=>{
-    if(!p.selected||!token){setMessages([]);setHandoffSummary(null);return}
+    if(!p.selected||!token){setMessages([]);setHandoffSummary(null);setVisitor(null);return}
     setLoadingThread(true);
     fetch(metaApi(`/api/cx/messages?channel=${p.selected.channel}&threadKey=${encodeURIComponent(p.selected.threadKey)}`),{headers:authHeaders(token)})
-      .then(r=>r.json()).then((d:{messages?:CxMessage[];handoffSummary?:{summary:string;focusOn:string;customerNotes:string}|null})=>{setMessages(d.messages||[]);setHandoffSummary(d.handoffSummary||null)})
+      .then(r=>r.json()).then((d:{messages?:CxMessage[];handoffSummary?:{summary:string;focusOn:string;customerNotes:string}|null;visitor?:CxVisitor|null})=>{setMessages(d.messages||[]);setHandoffSummary(d.handoffSummary||null);setVisitor(d.visitor||null)})
       .catch(()=>{}).finally(()=>setLoadingThread(false));
   },[key,token]);
   useEffect(()=>{ if(threadRef.current)threadRef.current.scrollTop=threadRef.current.scrollHeight },[messages]);
@@ -4123,7 +4124,7 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
     </section>
 
     {/* Column 3 — lead details */}
-    {p.panelOpen&&p.selected&&<CxLeadPanel conversation={p.selected} saveLead={p.saveLead} notify={p.notify} onFullLead={p.onFullLead} handoffSummary={handoffSummary}/>}
+    {p.panelOpen&&p.selected&&<CxLeadPanel conversation={p.selected} saveLead={p.saveLead} notify={p.notify} onFullLead={p.onFullLead} handoffSummary={handoffSummary} visitor={visitor}/>}
     {editingCanned&&<CxCannedEditor canned={canned} setCanned={setCanned} onClose={()=>setEditingCanned(false)}/>}
   </div>;
 }
@@ -4162,9 +4163,29 @@ function CxAccordion({title,count,children,defaultOpen}:{title:string;count?:num
   </div>;
 }
 
-function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer,onFullLead,handoffSummary}:{conversation:CxConversation|null;lead?:CxLead|null;
+
+type CxVisitor={country:string;countryCode:string;city:string;region:string;timezone:string;isp:string;
+  browser:string;os:string;deviceType:string;language:string;pageUrl:string;pageTitle:string;
+  referrer:string;screen:string;firstSeen:string;lastSeen:string;visitCount:number};
+
+// Flags are drawn from the country code rather than shipped as images: two regional-indicator
+// codepoints render natively on every platform the dashboard runs on.
+const cxFlag=(code:string)=>code&&/^[A-Z]{2}$/.test(code)
+  ? String.fromCodePoint(...[...code].map(c=>0x1f1e6+c.charCodeAt(0)-65)) : "";
+
+/** The visitor's wall-clock time, so an agent knows whether they are messaging someone at midnight. */
+function cxLocalTime(timezone:string):string{
+  if(!timezone)return "";
+  try{ return new Intl.DateTimeFormat(undefined,{hour:"2-digit",minute:"2-digit",timeZone:timezone}).format(new Date()) }
+  catch{ return "" }
+}
+const cxHost=(url:string)=>{ try{ return new URL(url).host }catch{ return "" } };
+const cxPath=(url:string)=>{ try{ const u=new URL(url); return (u.pathname+u.search)||"/" }catch{ return url } };
+
+function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer,onFullLead,handoffSummary,visitor}:{conversation:CxConversation|null;lead?:CxLead|null;
   saveLead:(id:string,patch:Record<string,unknown>)=>void;notify:(s:string)=>void;inDrawer?:boolean;
-  onFullLead?:(name:string)=>void;handoffSummary?:{summary:string;focusOn:string;customerNotes:string}|null}){
+  onFullLead?:(name:string)=>void;handoffSummary?:{summary:string;focusOn:string;customerNotes:string}|null;
+  visitor?:CxVisitor|null}){
   const token=useAuthToken();
   const person=lead?.person||conversation?.person||null;
   const summary=lead||conversation?.lead||null;
@@ -4247,6 +4268,22 @@ function CxLeadPanel({conversation,lead,saveLead,notify,inDrawer,onFullLead,hand
         {summary?.source&&<div><i>⌖</i>{summary.source}</div>}
       </div>
     </div>
+
+    {visitor&&<div className="cx-visitor">
+      <div className="cx-visitor-head">
+        <span>{cxFlag(visitor.countryCode)||"◍"}</span>
+        <div><strong>{[visitor.city,visitor.country].filter(Boolean).join(", ")||"Location unknown"}</strong>
+          <small>{[visitor.deviceType,visitor.browser,visitor.os].filter(Boolean).join(" · ")||"Unknown device"}</small></div>
+        {cxLocalTime(visitor.timezone)&&<b title={`Their local time (${visitor.timezone})`}>{cxLocalTime(visitor.timezone)}</b>}
+      </div>
+      <div className="cx-visitor-rows">
+        {visitor.pageUrl&&<div><i>◫</i><span title={visitor.pageUrl}>{visitor.pageTitle||cxPath(visitor.pageUrl)}</span></div>}
+        {visitor.referrer&&<div><i>↗</i><span title={visitor.referrer}>from {cxHost(visitor.referrer)||"a link"}</span></div>}
+        {visitor.isp&&<div><i>⌁</i><span>{visitor.isp}</span></div>}
+        {visitor.language&&<div><i>⌘</i><span>{visitor.language}</span></div>}
+        {visitor.visitCount>1&&<div><i>↻</i><span>{visitor.visitCount} messages this session</span></div>}
+      </div>
+    </div>}
 
     {!conversation?.aiActive&&handoffSummary&&<div className="handoff-summary">
       <h3>Handoff summary</h3>

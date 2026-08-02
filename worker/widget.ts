@@ -1,4 +1,5 @@
 import { callClaude, callClaudeWithActions, sanitizeChatMessages, sanitizeActions, json, corsPreflight, allowedOrigin, type ChatMessage } from "./shared";
+import { recordVisitorContext, readVisitorContext } from "./visitor";
 import { getStoredKnowledgeContent, getRelevantKnowledgePages } from "./knowledge";
 import { saveSubmission } from "./leads";
 import { requireSession, type AuthEnv } from "./auth";
@@ -483,9 +484,12 @@ async function respond(request: Request, env: WidgetEnv): Promise<Response> {
   if (!env.DB) return widgetJson({ error: "Workspace database is unavailable." }, 503);
   if (!env.ANTHROPIC_API_KEY) return widgetJson({ error: "This chat isn't configured yet." }, 503);
 
-  const body = await request.json() as { workspaceId?: string; message?: string; history?: unknown; sessionId?: string };
+  const body = await request.json() as { workspaceId?: string; message?: string; history?: unknown; sessionId?: string;
+    context?: { pageUrl?: string; pageTitle?: string; referrer?: string; screen?: string; timezone?: string } };
   const workspaceId = (body.workspaceId || "").trim();
   const sessionId = (body.sessionId || "").trim().slice(0, 80);
+  // Fire-and-forget: what the agent sees is worth nothing if capturing it delays the reply.
+  await recordVisitorContext(env.DB, request, workspaceId, sessionId, body.context || {}).catch(() => null);
   if (!workspaceId) return widgetJson({ error: "Missing workspace id." }, 400);
 
   const workspace = await env.DB.prepare("SELECT id, status FROM workspaces WHERE id = ?").bind(workspaceId).first<{ id: string; status: string | null }>();
@@ -669,7 +673,8 @@ async function getMessages(request: Request, env: WidgetEnv): Promise<Response> 
   ]);
   let handoffSummary = null;
   try { handoffSummary = stateRow?.handoff_summary ? JSON.parse(stateRow.handoff_summary) : null; } catch { /* leave null if malformed */ }
-  return json(request, { messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), aiActive, handoffSummary });
+  const visitor = await readVisitorContext(env.DB, session.workspaceId, sessionId);
+  return json(request, { messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), aiActive, handoffSummary, visitor });
 }
 
 // Acknowledges (clears) a conversation's "needs a human" flag — called when an agent takes

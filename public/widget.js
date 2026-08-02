@@ -29,6 +29,21 @@
     try { legacyId = window.sessionStorage.getItem(legacySessionKey); } catch (e) {}
     chats = legacyId ? [{ id: legacyId, title: "", preview: "", updatedAt: Date.now() }] : [];
   }
+
+  // What the page knows and the request headers do not: which page the visitor is on, where they
+  // arrived from, and their real local timezone. Each is wrapped because a sandboxed iframe or a
+  // strict privacy extension can throw on any of them, and a chat widget must never break the host
+  // page over analytics.
+  function visitorContext() {
+    var ctx = {};
+    try { ctx.pageUrl = String(location.href).slice(0, 300); } catch (e) {}
+    try { ctx.pageTitle = String(document.title || "").slice(0, 160); } catch (e) {}
+    try { ctx.referrer = String(document.referrer || "").slice(0, 300); } catch (e) {}
+    try { ctx.screen = window.screen.width + "x" + window.screen.height; } catch (e) {}
+    try { ctx.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) {}
+    return ctx;
+  }
+
   var sessionId = null;
   try { sessionId = window.localStorage.getItem(activeKey); } catch (e) {}
   var hasActive = false;
@@ -514,7 +529,7 @@
       fetch(API_ORIGIN + "/api/widget/respond", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ workspaceId: workspaceId, message: text, history: history, sessionId: sessionId }),
+        body: JSON.stringify({ workspaceId: workspaceId, message: text, history: history, sessionId: sessionId, context: visitorContext() }),
       })
         .then(function (response) { return response.json().then(function (data) { return { ok: response.ok, data: data }; }); })
         .then(function (result) {
