@@ -45,7 +45,18 @@ declare global {
 }
 
 const META_BACKEND_ORIGIN="https://qpy-engage-api.qpy-engage.workers.dev";
-const metaApi=(path:string)=>`${typeof location!=="undefined"&&location.hostname.endsWith("github.io")?META_BACKEND_ORIGIN:""}${path}`;
+// Whether to call the worker directly is a question about *this* deployment, not about which
+// hostname it happens to sit on. Keying it to github.io meant the first custom domain silently
+// pointed every request at a static host with no API — the requests never reached the worker at
+// all, which is why the failure looked like wrong credentials rather than a broken base URL.
+// Same-origin only where something actually serves /api: the local dev server and the Worker's own
+// domain. Every other origin is a static host and must call the worker absolutely.
+const metaApi=(path:string)=>{
+  if(typeof location==="undefined")return `${META_BACKEND_ORIGIN}${path}`;
+  const host=location.hostname;
+  const servesApi=host==="localhost"||host==="127.0.0.1"||host.endsWith(".workers.dev");
+  return `${servesApi?"":META_BACKEND_ORIGIN}${path}`;
+};
 
 function loadMetaSdk(config:MetaConfig):Promise<void>{
   if(window.FB){window.FB.init({appId:config.appId,cookie:true,xfbml:false,version:config.graphVersion});return Promise.resolve()}
