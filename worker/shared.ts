@@ -8,7 +8,12 @@ export function allowedOrigin(request: Request): string | null {
   const origin = request.headers.get("origin");
   if (!origin) return null;
   const host = new URL(origin).hostname;
-  if (origin === "https://mobileecommerce.github.io" || host.endsWith(".chatgpt.site") || host === "localhost" || host === "127.0.0.1") return origin;
+  // The dashboard's own origins. The GitHub Pages host stays alongside the custom domain rather
+  // than being swapped for it: DNS takes time to propagate, and cutting the old origin off at the
+  // same moment would break the app for anyone still resolving to it.
+  if (origin === "https://mobileecommerce.github.io") return origin;
+  if (host === "qpy.ai" || host.endsWith(".qpy.ai")) return origin;
+  if (host.endsWith(".chatgpt.site") || host === "localhost" || host === "127.0.0.1") return origin;
   return null;
 }
 
