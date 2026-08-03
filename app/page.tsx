@@ -863,7 +863,7 @@ function Channels({step,setStep,connected,setConnected,workspaceId,workspaceName
   const [metaLoading,setMetaLoading]=useState(false);
   const [metaError,setMetaError]=useState("");
   const token=useAuthToken();
-  const copyWidget=async()=>{const code=`<script src="https://mobileecommerce.github.io/qpy-engage/widget.js" data-workspace="${workspaceId}"></script>`;try{await navigator.clipboard.writeText(code);notify("Web chat installation code copied")}catch{const blob=new Blob([code],{type:"text/plain"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="qpy-engage-widget.txt";a.click();URL.revokeObjectURL(a.href);notify("Web chat installation file downloaded")}};
+  const copyWidget=async()=>{const code=`<script src="https://engage.qpy.ai/widget.js" data-workspace="${workspaceId}"></script>`;try{await navigator.clipboard.writeText(code);notify("Web chat installation code copied")}catch{const blob=new Blob([code],{type:"text/plain"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="qpy-engage-widget.txt";a.click();URL.revokeObjectURL(a.href);notify("Web chat installation file downloaded")}};
   const [widgetAppearance,setWidgetAppearance]=useStoredState<WidgetAppearance>("qpy-engage-widget-appearance",{iconType:"brand",customIconUrl:"",placement:"right",effect:"none",color:"#4c50ee",headerColor:"#171923",glossy:false});
   const [workingHours,setWorkingHours]=useStoredState<WorkingHours>("qpy-engage-working-hours",DEFAULT_WORKING_HOURS);
   const setDay=(day:WeekdayKey,patch:Partial<{open:boolean;start:string;end:string}>)=>setWorkingHours({...workingHours,days:{...workingHours.days,[day]:{...workingHours.days[day],...patch}}});
