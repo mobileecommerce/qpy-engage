@@ -462,7 +462,9 @@ function AssistantsScreen(props:{sources:Source[];workspaceName:string;onKnowled
   useEffect(()=>{load()},[token]);
 
   const create=async()=>{
-    if(!token||busy)return;
+    // A click that does nothing and says nothing is indistinguishable from a broken feature.
+    if(!token){props.notify("You appear to be signed out — reload and sign in again.");return}
+    if(busy)return;
     setBusy("create");
     try{
       // No config sent, so the server seeds this one from the default — a new assistant is almost
@@ -480,7 +482,9 @@ function AssistantsScreen(props:{sources:Source[];workspaceName:string;onKnowled
   };
 
   const duplicate=async(from:AsstRecord)=>{
-    if(!token||busy)return;
+    // A click that does nothing and says nothing is indistinguishable from a broken feature.
+    if(!token){props.notify("You appear to be signed out — reload and sign in again.");return}
+    if(busy)return;
     setBusy(from.id);
     try{
       const response=await fetch(metaApi("/api/assistants"),{method:"POST",
@@ -568,8 +572,8 @@ function AssistantRouting({assistant,others,notify,onClose,onSaved}:{assistant:A
       const response=await fetch(metaApi("/api/assistants/bindings"),{method:"POST",
         headers:{"content-type":"application/json",...authHeaders(token)},
         body:JSON.stringify({id:assistant.id,bindings})});
-      const data=await response.json() as {ok?:boolean;error?:string};
-      if(!response.ok||!data.ok)throw new Error(data.error||"Could not save routing");
+      const data=await response.json().catch(()=>({})) as {ok?:boolean;error?:string};
+      if(!response.ok||!data.ok)throw new Error(data.error||`Could not save routing (HTTP ${response.status})`);
       notify("Routing updated");
       onSaved();
     }catch(error){ notify(error instanceof Error?error.message:"Could not save routing") }
