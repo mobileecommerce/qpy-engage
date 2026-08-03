@@ -640,7 +640,11 @@ async function pollMessages(request: Request, env: WidgetEnv): Promise<Response>
       .bind(workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>();
   const typing = await isAgentTyping(env.DB, workspaceId, sessionId);
   const aiActive = await isAiActive(env.DB, workspaceId, sessionId);
-  return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), typing, aiActive });
+  // The visitor may not have sent anything since the team closed this — the poll is the only way
+  // they learn about it, so the ended state has to travel with it, not just with a reply.
+  const endedState = await readEndedState(env.DB, workspaceId, sessionId);
+  return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), typing, aiActive,
+    ended: endedState.ended, endedReason: endedState.reason });
 }
 
 // Lets a returning visitor's widget (same tab, after a page refresh) rebuild its transcript
@@ -658,7 +662,9 @@ async function getHistory(request: Request, env: WidgetEnv): Promise<Response> {
     WHERE workspace_id = ? AND session_id = ? AND role != 'error' ORDER BY created_at ASC LIMIT 200`)
     .bind(workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>();
   const aiActive = await isAiActive(env.DB, workspaceId, sessionId);
-  return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), aiActive });
+  const endedState = await readEndedState(env.DB, workspaceId, sessionId);
+  return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), aiActive,
+    ended: endedState.ended, endedReason: endedState.reason });
 }
 
 async function getConfig(request: Request, env: WidgetEnv): Promise<Response> {

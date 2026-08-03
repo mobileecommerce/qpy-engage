@@ -243,6 +243,8 @@
         .then(function (response) { return response.ok ? response.json() : { messages: [] }; })
         .then(function (data) {
           setHandlingLabel(data.aiActive);
+          if (data.ended && !chatEnded) markChatEnded(data.endedReason || "This chat has ended.");
+          else if (!data.ended && chatEnded) clearChatEnded();
           var stored = data.messages || [];
           if (!stored.length) {
             if (greetIfEmpty && !messages.children.length) appendMessage("qpy-ai", greeting);
@@ -282,12 +284,23 @@
 
     // Locks the composer and offers a fresh conversation. The visitor is never left unable to
     // reach the business — only unable to add to a thread that is closed.
+    function clearChatEnded() {
+      chatEnded = false;
+      var bar = document.getElementById("qpy-restart");
+      if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
+      var form = root.querySelector("form");
+      if (form) form.style.display = "";
+      input.disabled = false;
+      sendButton.disabled = false;
+    }
+
     function markChatEnded(reason) {
       chatEnded = true;
       appendMessage("qpy-system", reason);
-      input.disabled = true;
-      sendButton.disabled = true;
-      input.placeholder = reason;
+      // The composer is hidden rather than disabled. A greyed-out box still reads as somewhere to
+      // type, which is exactly how an ended chat looked before — the visitor kept trying.
+      var form = root.querySelector("form");
+      if (form) form.style.display = "none";
       if (document.getElementById("qpy-restart")) return;
       var bar = document.createElement("div");
       bar.className = "qpy-ended-bar";
@@ -296,15 +309,11 @@
       button.type = "button";
       button.textContent = "Start a new chat";
       button.onclick = function () {
-        bar.remove();
-        chatEnded = false;
-        input.disabled = false;
-        sendButton.disabled = false;
-        input.placeholder = "";
+        clearChatEnded();
         startNewChat();
       };
       bar.appendChild(button);
-      messages.parentNode.appendChild(bar);
+      root.querySelector("section").appendChild(bar);
     }
 
     function startNewChat() {
@@ -497,6 +506,8 @@
       fetch(url).then(function (response) { return response.ok ? response.json() : { messages: [], typing: false }; })
         .then(function (data) {
           setHandlingLabel(data.aiActive);
+          if (data.ended && !chatEnded) markChatEnded(data.endedReason || "This chat has ended.");
+          else if (!data.ended && chatEnded) clearChatEnded();
           // A reply is written to storage by the automation engine BEFORE the request that produced
           // it returns. If a poll resolves in that window it holds the same message the pending
           // request is about to render, and its cursor is too old to recognise that. Re-checking
