@@ -1331,3 +1331,133 @@ small{font-size:11.5px;line-height:1.45}
 .pw-form>button{align-self:flex-start;margin-top:3px}
 .pw-problem{margin:0;font-size:11.5px;color:#c0503f}
 .pw-done{margin:0;font-size:11.5px;color:#2f7d54}
+
+/* ================================================================================================
+   Gloss pass.
+
+   Layered on top of the existing system rather than replacing it, so the whole thing can be reverted
+   in one commit if it is not wanted. The restraint throughout: depth comes from light and layering,
+   not from decoration. Every hairline, pastel status colour and type scale below survives — a
+   support agent reading this screen for eight hours needs calm, and gloss that costs legibility is
+   just noise wearing a nicer coat.
+   ============================================================================================== */
+
+:root{
+  /* Two-stop shadows: a tight contact shadow for the edge, a wide soft one for the lift. A single
+     blur reads as a sticker; two read as an object sitting on a surface. */
+  --lift-1:0 1px 2px rgba(16,20,34,.05), 0 1px 3px rgba(16,20,34,.04);
+  --lift-2:0 2px 4px rgba(16,20,34,.05), 0 6px 16px rgba(16,20,34,.06);
+  --lift-3:0 4px 8px rgba(16,20,34,.06), 0 16px 36px rgba(16,20,34,.09);
+  --glass:saturate(180%) blur(14px);
+  --ease:cubic-bezier(.16,1,.3,1);
+}
+
+/* The canvas gets a faint cool tint from the top rather than a flat grey, so cards read as lit from
+   above and the eye has somewhere to rest. Fixed attachment keeps the light source still while
+   content scrolls under it. */
+main{
+  background:
+    radial-gradient(1200px 460px at 50% -12%, #eef1fb 0%, rgba(238,241,251,0) 62%),
+    linear-gradient(180deg, #f8f9fc 0%, #f5f6fa 100%);
+  /* Deliberately not background-attachment:fixed. main is itself a scrolling container, and a
+     viewport-fixed background there repaints the whole panel on every scroll — a cost paid
+     continuously for a glow most people will never consciously notice. */
+}
+
+/* Surfaces ------------------------------------------------------------------------------------- */
+.data-card{
+  border-radius:14px;
+  border-color:rgba(21,24,32,.07);
+  box-shadow:var(--lift-2);
+  /* A one-pixel top highlight is what separates "white rectangle" from "white surface". */
+  background:linear-gradient(180deg,#fff 0%,#fdfdff 100%);
+}
+.empty-state{border-radius:14px}
+
+/* Sidebar and topbar are the frame; they sit above content and say so with glass rather than a
+   heavier border. */
+.sidebar{
+  background:linear-gradient(180deg,rgba(255,255,255,.92) 0%,rgba(250,251,253,.92) 100%);
+  backdrop-filter:var(--glass);
+  -webkit-backdrop-filter:var(--glass);
+  border-right-color:rgba(21,24,32,.07);
+}
+.topbar{
+  background:rgba(255,255,255,.78);
+  backdrop-filter:var(--glass);
+  -webkit-backdrop-filter:var(--glass);
+  border-bottom-color:rgba(21,24,32,.07);
+  position:sticky; top:0; z-index:9;
+}
+
+/* Navigation ----------------------------------------------------------------------------------- */
+.side-nav button{transition:background .18s var(--ease), color .18s var(--ease)}
+.side-nav button.active{
+  background:linear-gradient(180deg,#eff1ff 0%,#e8ebff 100%);
+  box-shadow:inset 0 0 0 1px rgba(76,80,238,.10), var(--lift-1);
+}
+/* A left marker on the active item gives the eye an anchor that colour alone does not. */
+.side-nav button.active{position:relative}
+.side-nav button.active::before{
+  content:"";position:absolute;left:-16px;top:9px;bottom:9px;width:3px;
+  border-radius:0 3px 3px 0;background:var(--blue);
+}
+.brand-mark{
+  background:linear-gradient(160deg,#6a6dff 0%,#4c50ee 55%,#3f43d6 100%);
+  box-shadow:0 2px 8px rgba(76,80,238,.32), inset 0 1px 0 rgba(255,255,255,.38);
+}
+
+/* Controls ------------------------------------------------------------------------------------- */
+.primary{
+  border-radius:10px;
+  /* The brand stays near-black. Gloss here is a top-edge highlight plus a real shadow, which reads
+     as a physical key rather than a filled rectangle — no colour change, no new brand decision. */
+  background:linear-gradient(180deg,#232733 0%,#0d0f16 100%);
+  box-shadow:0 1px 0 rgba(255,255,255,.10) inset, 0 1px 2px rgba(8,10,16,.30), 0 6px 16px rgba(8,10,16,.18);
+  transition:transform .16s var(--ease), box-shadow .16s var(--ease), filter .16s var(--ease);
+}
+.primary:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 1px 0 rgba(255,255,255,.12) inset, 0 3px 6px rgba(8,10,16,.28), 0 12px 26px rgba(8,10,16,.22)}
+.primary:active:not(:disabled){transform:translateY(0);filter:brightness(.94)}
+.primary:disabled{opacity:.45;box-shadow:none}
+
+.secondary-btn{
+  border-radius:9px;
+  background:linear-gradient(180deg,#fff 0%,#fafbfc 100%);
+  border-color:rgba(21,24,32,.11);
+  box-shadow:var(--lift-1);
+  transition:border-color .16s var(--ease), box-shadow .16s var(--ease), transform .16s var(--ease);
+}
+.secondary-btn:hover:not(:disabled){border-color:rgba(21,24,32,.2);box-shadow:var(--lift-2);transform:translateY(-1px)}
+.secondary-btn:active:not(:disabled){transform:translateY(0)}
+
+/* One focus treatment everywhere, and it never removes the outline — keyboard users need to see
+   where they are, and a glossier surface makes a weak focus ring easier to lose. */
+input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible{
+  outline:2px solid rgba(76,80,238,.55);outline-offset:2px;
+}
+
+/* Typography ----------------------------------------------------------------------------------- */
+.page-header h1{letter-spacing:-.028em}
+h1,h2,h3{letter-spacing:-.018em}
+
+/* Overlays ------------------------------------------------------------------------------------- */
+.cx-drawer-scrim{background:rgba(16,20,34,.28);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+.cx-drawer,.tpl-modal,.asst-routing,.cx-canned-editor{border-radius:16px;box-shadow:var(--lift-3)}
+.cx-drawer{border-radius:16px 0 0 16px}
+
+/* Tables and rows ------------------------------------------------------------------------------ */
+.cx-table tbody tr,.asst-item,.seg-item,.tpl-item{transition:background .16s var(--ease), box-shadow .16s var(--ease)}
+.asst-item,.seg-item,.tpl-item,.cx-visitor,.cx-score,.handoff-summary{border-radius:12px}
+.asst-item:hover,.seg-item:hover,.tpl-item:hover{box-shadow:var(--lift-2);border-color:rgba(21,24,32,.11)}
+
+/* Conversations workspace ---------------------------------------------------------------------- */
+.cx-workspace,.cx-profiles{border-radius:14px;box-shadow:var(--lift-2);border-color:rgba(21,24,32,.07)}
+.cx-feed-row{transition:background .14s var(--ease)}
+.cx-bubble{box-shadow:0 1px 2px rgba(16,20,34,.05)}
+.cx-bubble.agent{box-shadow:0 2px 6px rgba(16,20,34,.18)}
+
+/* Respect a stated preference for less motion — the lift is decoration, not information. */
+@media(prefers-reduced-motion:reduce){
+  .primary,.secondary-btn,.side-nav button,.cx-table tbody tr,.asst-item,.seg-item,.tpl-item{transition:none}
+  .primary:hover:not(:disabled),.secondary-btn:hover:not(:disabled){transform:none}
+}
