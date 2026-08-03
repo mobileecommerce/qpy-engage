@@ -285,6 +285,47 @@ async function removeMember(request: Request, env: AuthEnv, email: string): Prom
   return json(request, { removed: true });
 }
 
+
+/**
+ * Changes the signed-in user's own password.
+ *
+ * The current password is required even though the caller already holds a valid session: a session
+ * can be a laptop someone walked away from, and a password change is exactly the action that should
+ * cost more than an unlocked screen.
+ *
+ * Every other session is signed out on success. A password is usually changed because it might be
+ * known to someone else, and leaving their existing logins alive would defeat the point — the
+ * device making the change keeps its session so the user is not locked out by their own action.
+ */
+async function changePassword(request: Request, env: AuthEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const body = await request.json() as { currentPassword?: string; newPassword?: string };
+  const currentPassword = String(body.currentPassword || "");
+  const newPassword = String(body.newPassword || "");
+
+  if (newPassword.length < 8) return json(request, { error: "New password must be at least 8 characters." }, 400);
+  if (newPassword === currentPassword) return json(request, { error: "The new password must be different from the current one." }, 400);
+
+  const user = await env.DB.prepare(`SELECT password_hash, password_salt FROM users WHERE id = ?`)
+    .bind(session.userId).first<{ password_hash: string; password_salt: string }>();
+  if (!user) return json(request, { error: "Account not found." }, 404);
+  if (!(await verifyPassword(currentPassword, user.password_hash, user.password_salt))) {
+    return json(request, { error: "That current password is not correct." }, 403);
+  }
+
+  const { hash, salt } = await hashPassword(newPassword);
+  const header = request.headers.get("authorization") || "";
+  const currentToken = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : "";
+  const keepHash = currentToken ? await tokenHash(currentToken) : "";
+
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?`).bind(hash, salt, session.userId),
+    env.DB.prepare(`DELETE FROM sessions WHERE user_id = ? AND token_hash != ?`).bind(session.userId, keepHash),
+  ]);
+  return json(request, { ok: true, otherSessionsSignedOut: true });
+}
+
 export async function handleAuthRequest(request: Request, env: AuthEnv): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/auth/") && !url.pathname.startsWith("/api/workspace/")) return null;
@@ -297,6 +338,7 @@ export async function handleAuthRequest(request: Request, env: AuthEnv): Promise
   if (url.pathname === "/api/auth/login" && request.method === "POST") return login(request, env);
   if (url.pathname === "/api/auth/logout" && request.method === "POST") return logout(request, env);
   if (url.pathname === "/api/auth/session" && request.method === "GET") return sessionInfo(request, env);
+  if (url.pathname === "/api/auth/password" && request.method === "POST") return changePassword(request, env);
   if (url.pathname === "/api/workspace/members" && request.method === "GET") return listMembers(request, env);
   if (url.pathname === "/api/workspace/members" && request.method === "POST") return inviteMember(request, env);
   const memberMatch = url.pathname.match(/^\/api\/workspace\/members\/([^/]+)$/);

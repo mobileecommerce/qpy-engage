@@ -1322,3 +1322,12 @@ small{font-size:11.5px;line-height:1.45}
 .asst-specific-row{display:flex;align-items:center;gap:7px;margin-bottom:7px}
 .asst-specific-row select{flex:0 0 128px;border:1px solid #dfe2e8;border-radius:7px;padding:7px 8px;font-size:12px;background:#fff}
 .asst-specific-row input{flex:1;border:1px solid #dfe2e8;border-radius:7px;padding:7px 9px;font:inherit;font-size:12.5px;min-width:0}
+
+/* ---- Change password ------------------------------------------------------------------------- */
+.pw-form{display:flex;flex-direction:column;gap:11px;max-width:360px;margin-bottom:26px}
+.pw-form label{display:flex;flex-direction:column;gap:5px;font-size:12px;font-weight:600;color:#4a5160}
+.pw-form input{border:1px solid #dfe2e8;border-radius:8px;padding:9px 11px;font:inherit;font-size:13px;background:#fff}
+.pw-form input:focus{outline:2px solid #c9cbfa;outline-offset:-1px;border-color:#8f93f0}
+.pw-form>button{align-self:flex-start;margin-top:3px}
+.pw-problem{margin:0;font-size:11.5px;color:#c0503f}
+.pw-done{margin:0;font-size:11.5px;color:#2f7d54}
