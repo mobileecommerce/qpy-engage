@@ -1,6 +1,7 @@
 import { callClaude, callClaudeWithActions, sanitizeChatMessages, sanitizeActions, json, corsPreflight, allowedOrigin, type ChatMessage } from "./shared";
 import { recordVisitorContext, readVisitorContext, touchPresence } from "./visitor";
 import { readEndedState, readAutoEndSettings, endChat } from "./chatlifecycle";
+import { notifyWorkspace } from "./push";
 import { loadAssistant, type BindChannel } from "./assistants";
 import { getStoredKnowledgeContent, getRelevantKnowledgePages } from "./knowledge";
 import { saveSubmission } from "./leads";
@@ -413,6 +414,13 @@ async function flagConversationForHuman(env: WidgetEnv, workspaceId: string, ses
   await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, needs_attention, attention_reason) VALUES (?, ?, 1, ?)
     ON CONFLICT(workspace_id, session_id) DO UPDATE SET needs_attention = 1, attention_reason = excluded.attention_reason`)
     .bind(workspaceId, sessionId, reason.trim().slice(0, 200)).run();
+  // The assistant has just handed this to a person. Nothing else in the product is more worth
+  // interrupting someone for.
+  await notifyWorkspace(env, workspaceId, {
+    title: "A customer needs you",
+    body: reason ? String(reason).slice(0, 140) : "The assistant escalated a web chat.",
+    conversationId: sessionId, channel: "webchat",
+  }).catch(() => null);
   await generateHandoffSummary(env, workspaceId, sessionId);
 }
 

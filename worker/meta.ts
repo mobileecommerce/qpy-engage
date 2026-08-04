@@ -7,6 +7,7 @@ import { toGraph } from "./automation-graph";
 import { saveDocument, validateAgainstSpec, receivedKeysAtNode, MAX_UPLOAD_BYTES } from "./documents";
 import { isAiPaused, qualifyConversation } from "./conversations";
 import { recordFlowReply } from "./waflows";
+import { notifyWorkspace } from "./push";
 
 const DEFAULT_GRAPH_VERSION = "v25.0";
 
@@ -466,6 +467,15 @@ async function receiveWebhook(request: Request, env: MetaEnv): Promise<Response>
       const wasNew = (res.meta?.changes || 0) > 0;
       if (wasNew && connection && item.from && text && String(item.type) === "text") {
         toAutomate.push({ connection, from: String(item.from), text });
+        // Only when a human is already handling it. While the assistant is answering there is
+        // nothing for anyone to do, and a phone that buzzes for every message it also answered is
+        // a phone people turn notifications off on.
+        if (await isAiPaused(env.DB, connection.workspace_id, String(item.from)).catch(() => false)) {
+          await notifyWorkspace(env, connection.workspace_id, {
+            title: String(item.from), body: text.slice(0, 140),
+            conversationId: String(item.from), channel: "whatsapp",
+          });
+        }
       }
       // Documents and photos are how a WhatsApp customer answers an upload step. Same
       // new-insert-only guard as text, so a Meta retry cannot store the file twice.
