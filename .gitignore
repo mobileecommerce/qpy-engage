@@ -30,6 +30,11 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
+
+# wrangler local secrets — real API keys live here during `vinext dev`
+.dev.vars
+.dev.vars.*
 
 # vercel
 .vercel
@@ -40,3 +45,4 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+*.tsbuildinfo

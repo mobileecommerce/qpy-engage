@@ -1,0 +1,978 @@
+import { callClaude, callClaudeWithActions, sanitizeChatMessages, sanitizeActions, json, corsPreflight, allowedOrigin, type ChatMessage } from "./shared";
+import { recordVisitorContext, readVisitorContext, touchPresence } from "./visitor";
+import { readEndedState, readAutoEndSettings, endChat } from "./chatlifecycle";
+import { notifyWorkspace } from "./push";
+import { loadAssistant, type BindChannel } from "./assistants";
+import { getStoredKnowledgeContent, getRelevantKnowledgePages } from "./knowledge";
+import { saveSubmission } from "./leads";
+import { requireSession, type AuthEnv } from "./auth";
+import { runFlowForWidgetMessage, type FlowOutMessage } from "./flows";
+import { runAutomationsForWidgetMessage, continueAfterUpload } from "./automations";
+import { loadSession } from "./automation-session";
+import { toGraph } from "./automation-graph";
+import { saveDocument, validateAgainstSpec, listDocumentsForContact, readDocument, receivedKeysAtNode, MAX_UPLOAD_BYTES } from "./documents";
+
+export interface WidgetEnv extends AuthEnv {
+  DB: D1Database;
+  ANTHROPIC_API_KEY?: string;
+}
+
+// The system prompt asks Claude not to use Markdown (this widget renders plain text), but that
+// instruction isn't always followed — this is the guaranteed backstop. Scoped to the widget only:
+// WhatsApp has its own real *bold*/_italic_ syntax that must be preserved, so this must never run
+// on that channel's replies.
+function sanitizeWidgetReply(text: string): string {
+  return text
+    .replace(/```[a-zA-Z]*\n?([\s\S]*?)```/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*\*([^*]+)\*\*\*/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/(^|\s)\*([^\s*][^*]*?)\*(?=$|\s|[.,!?])/g, "$1$2")
+    .replace(/(^|\s)_([^\s_][^_]*?)_(?=$|\s|[.,!?])/g, "$1$2")
+    .split("\n")
+    .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, "").replace(/^\s*#{1,6}\s+/, ""))
+    .join("\n")
+    .trim();
+}
+
+const RATE_LIMIT_PER_MINUTE = 20;             // per visitor — a human tapping buttons stays well under
+const WORKSPACE_RATE_LIMIT_PER_MINUTE = 600;  // whole-workspace backstop, ~30 concurrent conversations
+const MAX_MESSAGE_LENGTH = 4000;
+const MAX_KNOWLEDGE_LENGTH = 12000;
+
+function sqliteNow(): string {
+  // Matches SQLite's own CURRENT_TIMESTAMP format so an explicit value here sorts identically
+  // to values inserted via the column default elsewhere.
+  return new Date().toISOString().slice(0, 19).replace("T", " ");
+}
+
+// Flow turns can include interactive buttons/item carousels, but widget_messages.content is
+// plain text (used for history/poll reconstruction) — this collapses a structured flow message
+// into a readable plain-text fallback for that stored history.
+function flowMessageToStorageText(m: FlowOutMessage): string {
+  if (m.type === "text") return m.text;
+  if (m.type === "buttons") return `${m.text}\n${m.options.map((o) => `[${o.label}]`).join("  ")}`;
+  const heading = m.text ? `${m.text}\n` : "";
+  return heading + m.items.map((i) => `${i.title || i.name} — ${i.price ? `${i.currency} ${i.price}` : ""}`).join("\n");
+}
+
+function sqliteNowPlusSeconds(seconds: number): string {
+  return new Date(Date.now() + seconds * 1000).toISOString().slice(0, 19).replace("T", " ");
+}
+
+const TYPING_TTL_SECONDS = 6;
+const HOLDING_MESSAGE_DELAY_SECONDS = 300;
+
+function msSince(sqliteTimestamp: string): number {
+  return Date.now() - new Date(sqliteTimestamp.replace(" ", "T") + "Z").getTime();
+}
+
+function widgetJson(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "access-control-allow-origin": "*", "vary": "origin", "cache-control": "no-store" } });
+}
+
+function widgetCorsPreflight(): Response {
+  return new Response(null, { status: 204, headers: {
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET,POST,OPTIONS",
+    "access-control-allow-headers": "content-type",
+    "access-control-max-age": "86400",
+  } });
+}
+
+// The widget schema is global (not per-workspace), so once it's been created/migrated in this
+// Worker isolate there's no reason to re-run ~11 DDL round-trips (including 3 always-throwing
+// ALTERs) on every request. This flag amortizes that cost: the first call in an isolate does the
+// work, every later call (including the 4s dashboard polls) returns immediately. Isolates are
+// reused across many requests, so this removed the multi-second latency on /api/widget/conversations.
+let widgetSchemaEnsured = false;
+
+async function ensureWidgetSchema(db: D1Database): Promise<void> {
+  if (widgetSchemaEnsured) return;
+  await db.batch([
+    db.prepare(`CREATE TABLE IF NOT EXISTS widget_rate_limits (
+      workspace_id TEXT NOT NULL,
+      window_start INTEGER NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (workspace_id, window_start)
+    )`),
+    // Replaces widget_rate_limits above, which is no longer written to (its CREATE stays so an
+    // older Worker build can still roll back onto it). That table keyed on workspace alone, so it
+    // could not tell a busy business apart from one abusive visitor. A new table rather than an
+    // ALTER because SQLite cannot add a column to a primary key in place.
+    db.prepare(`CREATE TABLE IF NOT EXISTS widget_rate_buckets (
+      workspace_id TEXT NOT NULL,
+      bucket TEXT NOT NULL,
+      window_start INTEGER NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (workspace_id, bucket, window_start)
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS widget_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_widget_messages_workspace ON widget_messages (workspace_id, created_at)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS widget_conversation_state (
+      workspace_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      ai_active INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (workspace_id, session_id)
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS widget_typing_state (
+      workspace_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      typing_until TEXT NOT NULL,
+      PRIMARY KEY (workspace_id, session_id)
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS widget_notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      author_name TEXT NOT NULL,
+      note TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_widget_notes_session ON widget_notes (workspace_id, session_id, created_at)`),
+  ]);
+  // Idempotent migrations for a table created before these columns existed. SQLite disallows
+  // adding a column and reading it in the same statement batch, so these stay separate no-ops
+  // once applied. Only ever runs once per isolate thanks to the flag above.
+  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN customer_name TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
+  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN needs_attention INTEGER NOT NULL DEFAULT 0`).run(); } catch { /* already exists */ }
+  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN attention_reason TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
+  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN handoff_summary TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
+  try { await db.prepare(`ALTER TABLE widget_conversation_state ADD COLUMN site_key TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already exists */ }
+  widgetSchemaEnsured = true;
+}
+
+async function isAgentTyping(db: D1Database, workspaceId: string, sessionId: string): Promise<boolean> {
+  const row = await db.prepare(`SELECT typing_until FROM widget_typing_state WHERE workspace_id = ? AND session_id = ?`).bind(workspaceId, sessionId).first<{ typing_until: string }>();
+  return Boolean(row && row.typing_until > sqliteNow());
+}
+
+async function isAiActive(db: D1Database, workspaceId: string, sessionId: string): Promise<boolean> {
+  if (!sessionId) return true;
+  const row = await db.prepare(`SELECT ai_active FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`).bind(workspaceId, sessionId).first<{ ai_active: number }>();
+  return row ? row.ai_active === 1 : true;
+}
+
+async function bumpBucket(db: D1Database, workspaceId: string, bucket: string, windowStart: number): Promise<number> {
+  await db.prepare(`INSERT INTO widget_rate_buckets (workspace_id, bucket, window_start, count) VALUES (?, ?, ?, 1)
+    ON CONFLICT(workspace_id, bucket, window_start) DO UPDATE SET count = count + 1`).bind(workspaceId, bucket, windowStart).run();
+  const row = await db.prepare("SELECT count FROM widget_rate_buckets WHERE workspace_id = ? AND bucket = ? AND window_start = ?")
+    .bind(workspaceId, bucket, windowStart).first<{ count: number }>();
+  return row?.count || 0;
+}
+
+// Abuse protection has to distinguish "one visitor hammering us" from "we're busy". Counting only
+// per workspace conflated the two: a menu-tree automation spends ~5-8 messages walking one customer
+// through it, so three or four people chatting at once used up the entire allowance and everybody
+// started getting "too many messages" — the business was punished for having customers. The per
+// visitor cap is now the real guard, with a much higher workspace ceiling left as a runaway backstop.
+async function withinRateLimit(db: D1Database, workspaceId: string, sessionId: string): Promise<boolean> {
+  const windowStart = Math.floor(Date.now() / 60000);
+  if (sessionId) {
+    const perVisitor = await bumpBucket(db, workspaceId, `s:${sessionId}`, windowStart);
+    if (perVisitor > RATE_LIMIT_PER_MINUTE) return false;
+  }
+  const perWorkspace = await bumpBucket(db, workspaceId, "", windowStart);
+  return perWorkspace <= WORKSPACE_RATE_LIMIT_PER_MINUTE;
+}
+
+export async function readWorkspaceState<T>(db: D1Database, workspaceId: string, key: string): Promise<T | null> {
+  const row = await db.prepare("SELECT value FROM workspace_state WHERE key = ?").bind(`${workspaceId}::${key}`).first<{ value: string }>();
+  if (!row) return null;
+  try { return JSON.parse(row.value) as T; } catch { return null; }
+}
+
+const WEEKDAY_KEYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
+type WeekdayKey = (typeof WEEKDAY_KEYS)[number];
+type WorkingHours = {
+  enabled: boolean;
+  timezone: string;
+  days: Record<WeekdayKey, { open: boolean; start: string; end: string }>;
+};
+
+// Computes real open/closed status from the business's configured hours, in their own
+// timezone, at the actual current moment — not just a static label the business has to keep
+// updating by hand.
+function computeBusinessHoursStatus(hours: WorkingHours | null, now: Date): string | null {
+  if (!hours || !hours.enabled) return null;
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: hours.timezone, weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(now);
+    const weekday = (parts.find((p) => p.type === "weekday")?.value || "").toLowerCase().slice(0, 3) as WeekdayKey;
+    const hh = parts.find((p) => p.type === "hour")?.value || "00";
+    const mm = parts.find((p) => p.type === "minute")?.value || "00";
+    const nowHM = `${hh}:${mm}`;
+    const today = hours.days[weekday];
+    if (!today || !today.open) return `We are currently OUTSIDE business hours (closed today, ${hours.timezone} time). Let the customer know a team member will follow up once we reopen.`;
+    const isOpen = nowHM >= today.start && nowHM <= today.end;
+    return isOpen
+      ? `We are currently WITHIN business hours (today's hours: ${today.start}–${today.end} ${hours.timezone} time).`
+      : `We are currently OUTSIDE business hours (today's hours are ${today.start}–${today.end} ${hours.timezone} time, current time is ${nowHM}). Let the customer know a team member will follow up once we reopen.`;
+  } catch { return null; }
+}
+
+// `question` is the customer's current message. It is optional so every existing caller keeps
+// working, but passing it lets the crawled site be searched for the pages that actually answer it
+// instead of handing over whatever fits in the budget first.
+// A tone setting was previously dropped into the prompt as its bare label — "Tone: Luxury
+// concierge." — one line among two thousand tokens of hard rules. It read as decoration and the
+// model treated it that way, which is why switching presets changed almost nothing. A voice only
+// bites when it says what to do to the sentences themselves, so each preset is spelled out with
+// concrete mechanics and a worked example.
+const VOICE_PRESETS: Record<string, string> = {
+  "Warm & helpful":
+    "Write like a friendly colleague who is genuinely pleased to help. Use contractions. Open by acknowledging what they asked before answering it. "
+    + "Keep sentences short and plain — no corporate vocabulary (no 'kindly', 'please be advised', 'as per'). At most one exclamation mark in a reply, usually none. "
+    + "Example: \"Happy to help with that. Our kitchen closes at 11pm, so you've got plenty of time.\"",
+  "Professional & concise":
+    "Lead with the answer in the first sentence, then add only the detail that changes what the customer does next. "
+    + "No pleasantries, no filler openers ('Great question!', 'Absolutely!'), no exclamation marks, no emoji. Two or three sentences is usually the whole reply. Courteous but never chatty. "
+    + "Example: \"The kitchen closes at 11pm. Last orders are taken at 10:45.\"",
+  "Friendly & energetic":
+    "Upbeat and quick. Contractions throughout, short punchy sentences, and real enthusiasm for what the business offers — but earned, not performed. "
+    + "At most one exclamation mark per reply. Never use emoji unless the customer does first. Never let the energy delay the actual answer. "
+    + "Example: \"Good news — kitchen's open until 11pm, so you've got time.\"",
+  "Luxury concierge":
+    "Refined and unhurried. Full sentences, no contractions, no slang, no exclamation marks. Address the guest with quiet courtesy and anticipate the next thing they will need without being asked. "
+    + "Never sound like a salesperson and never rush them toward a decision. "
+    + "Example: \"The kitchen serves until 11pm this evening. I would be glad to arrange a table, should you wish.\"",
+};
+
+// Presets are a starting point, not a ceiling: anything the business types that isn't a known
+// preset is treated as the voice instruction itself, so a custom voice works without a code change.
+function voiceInstruction(tone: string): string {
+  const preset = VOICE_PRESETS[tone.trim()];
+  if (preset) return preset;
+  const custom = tone.trim();
+  return custom
+    ? `Write in this voice, and let it govern your word choice, sentence length and rhythm: ${custom}`
+    : VOICE_PRESETS["Warm & helpful"];
+}
+
+export interface PromptRoute { channel: BindChannel; bindKey?: string }
+
+
+/** The site a conversation started on. Read by every later prompt for that session so the assistant
+ *  never changes halfway through a conversation. */
+async function siteKeyFor(db: D1Database, workspaceId: string, sessionId: string): Promise<string> {
+  const row = await db.prepare(`SELECT site_key FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`)
+    .bind(workspaceId, sessionId).first<{ site_key: string }>().catch(() => null);
+  return row?.site_key || "";
+}
+
+export async function buildSystemPrompt(
+  db: D1Database, workspaceId: string, question?: string, route?: PromptRoute,
+): Promise<string> {
+  // Routed callers get the assistant bound to their channel; unrouted ones get the workspace
+  // default, which is what every caller had before assistants became plural.
+  const resolved = await loadAssistant(db, workspaceId, route?.channel || "webchat", route?.bindKey || "");
+  const config = resolved.config as { name?: string; purpose?: string; role?: string; tone?: string; language?: string; fallback?: string; signoff?: string };
+  const policies = resolved.policies as { restricted?: string };
+  const selectedSources = (resolved.sources as number[]) || [];
+  const sources = (await readWorkspaceState<Array<{ id: number; name: string }>>(db, workspaceId, "qpy-engage-sources")) || [];
+  const sourceNames = sources.filter((s) => selectedSources.includes(s.id)).map((s) => s.name).join(", ") || "no connected sources yet";
+  // Prefer per-page selection from a crawled site; fall back to the single stored blob for sources
+  // that predate crawling or were pasted in by hand (Document/FAQ).
+  const relevantPages = await getRelevantKnowledgePages(db, workspaceId, selectedSources, question || "", MAX_KNOWLEDGE_LENGTH);
+  const knowledgeContent = await getStoredKnowledgeContent(db, workspaceId, selectedSources);
+  const knowledgeText = relevantPages || Object.values(knowledgeContent).join("\n\n").slice(0, MAX_KNOWLEDGE_LENGTH);
+
+  const role = config?.role || "You are a helpful customer support assistant for this business.";
+  const tone = config?.tone || "Warm & helpful";
+  const language = config?.language || "English";
+  const fallback = config?.fallback || "If you are unsure or the request is sensitive, say so and offer to connect the customer with a human.";
+  // name, purpose and signoff were all editable in the dashboard but read by nobody, so changing
+  // them did nothing — the assistant did not even know what it was called.
+  const assistantName = (config?.name || "").trim();
+  const purpose = (config?.purpose || "").trim();
+  const signoff = (config?.signoff || "").trim();
+
+  let prompt = "FORMATTING RULE, applies to every reply you send: this chat widget renders your text exactly as-is, with no Markdown support. "
+    + "Absolutely no **bold**, *italics*, `code`, bullet characters (-, *, •), numbered lists (1., 2.), or # headings — those will show up as literal, ugly punctuation to the customer. "
+    + "Write only in plain conversational sentences and paragraphs. "
+    + `Wrong: "Here's what we offer:\\n- Fast setup\\n- 24/7 support\\n- **No contracts**" `
+    + `Right: "We offer fast setup, 24/7 support, and there's no contract required." `
+    + "If an answer has several distinct points, write each as its own short paragraph (blank line between them) — never a list.\n\n";
+  // Reply in whatever the customer wrote, rather than forcing one configured language on everyone.
+  // The model is already multilingual; the old fixed setting meant an Arabic-speaking guest got
+  // English back from a hotel sitting in the UAE.
+  prompt += role;
+  if (assistantName) prompt += `\n\nYour name is ${assistantName}. If a customer asks who or what you are, say you are ${assistantName}, the assistant for this business — never say you are Claude, an AI model, or made by Anthropic.`;
+  if (purpose) prompt += `\n\nWhat you are here to do: ${purpose}. When a conversation could go several ways, steer it toward this.`;
+  prompt += `\n\nVOICE — this governs how every reply is written, and outranks any habit of yours to the contrary. ${voiceInstruction(tone)}`;
+  if (signoff) prompt += `\n\nWhen a customer's need looks fully resolved and the conversation is winding down, close with this, in your own voice and in their language: "${signoff}" Use it once at the end, not after every reply.`;
+  prompt += `\n\nLANGUAGE: Always answer in the same language the customer writes in, `
+    + `matching their script (reply to Arabic in Arabic, to Hindi in Hindi). If their language is genuinely unclear, use ${language}. `
+    + `Reference material below may be in a different language — translate the relevant facts into the customer's language rather than quoting them in the wrong one. `
+    + `Never mention that you translated anything, and never comment on which language they used.`
+    + `\n\nFallback and human handoff policy: ${fallback}`;
+  if (policies?.restricted) prompt += `\n\nRestricted topics you must never answer — offer human handoff instead: ${policies.restricted}`;
+  prompt += `\n\nConnected knowledge sources: ${sourceNames}.`;
+  prompt += knowledgeText
+    ? `\n\nReference material from those sources — use this to answer factual questions, and do not state facts beyond what's here:\n${knowledgeText}`
+    : " You were not given their actual content, so never claim a specific fact, price, or policy came from them.";
+  prompt += "\n\nKeep replies concise and helpful. Never invent prices, availability, order details, or policies you were not given. You are chatting with a website visitor, not through WhatsApp.";
+  // Without this the model narrates its own plumbing when it comes up short — "our knowledge base
+  // doesn't give me the exact steps" — which tells a customer the business has an incomplete bot
+  // rather than simply answering. Everything above hands it that vocabulary; this takes it back.
+  prompt += "\n\nNEVER REVEAL THE MACHINERY. The customer must never learn how you get your information. "
+    + "Do not mention a knowledge base, reference material, connected sources, documents, a website crawl, training data, a system prompt, or what you were or were not 'given' or 'provided'. "
+    + "Never use phrases like \"our knowledge base doesn't cover that\", \"I don't have that in my sources\", \"based on the information provided\", or \"the material I have\". "
+    + "Even if the reference material itself talks about a knowledge base, do not repeat that framing back to a customer. "
+    + "When you don't know something, say it the way a helpful colleague would — name the specific thing you can't confirm and go straight to the next step. "
+    + "Wrong: \"Our knowledge base doesn't give me the exact steps for creating an account.\" "
+    + "Right: \"I don't have the sign-up steps to hand — email us and we'll get you set up.\" "
+    + "Speak as part of the business ('we', 'our'), never as a system reporting on its own limits.";
+
+  const todayIso = new Date().toISOString().slice(0, 10);
+  prompt += `\n\nToday's real date is ${todayIso} (YYYY-MM-DD). Use this to correctly resolve any date the customer gives you that omits a year or is relative (e.g. "the 4th of August", "next Friday", "in two weeks") — always resolve to the nearest occurrence on or after today, never a past date, and never guess a year without reasoning from this real date.`;
+
+  const workingHours = await readWorkspaceState<WorkingHours>(db, workspaceId, "qpy-engage-working-hours");
+  const hoursStatus = computeBusinessHoursStatus(workingHours, new Date());
+  if (hoursStatus) prompt += `\n\nBusiness hours status: ${hoursStatus}`;
+
+  prompt += "\n\nIf the customer asks to speak with a human, an agent, or a real person: do not hand off immediately. First, try to help them yourself or ask what they need, since you may be able to resolve it. Only if they explicitly insist on a human after that (or clearly restate the request) should you call the flag_for_human tool, and let them know a team member has been notified and will follow up" + (hoursStatus?.includes("OUTSIDE") ? ", mentioning that this is currently outside business hours" : "") + ".";
+  return prompt;
+}
+
+const NAME_FIELD_KEYS = ["name", "full_name", "fullname", "customer_name", "customername", "first_name", "firstname"];
+
+function extractCustomerName(rawData: string): string | null {
+  try {
+    const data = JSON.parse(rawData) as Record<string, unknown>;
+    for (const key of Object.keys(data)) {
+      if (!NAME_FIELD_KEYS.includes(key.toLowerCase())) continue;
+      const value = data[key];
+      if (typeof value === "string" && value.trim()) return value.trim().slice(0, 80);
+    }
+  } catch { /* not JSON we recognize */ }
+  return null;
+}
+
+// Widget visitors are anonymous until we learn their name — either passively, from Claude
+// noticing it in conversation (widget_conversation_state.customer_name), or from a business's
+// own AI Action explicitly capturing one (action_submissions). The explicit capture wins when
+// both exist, since it's a deliberate business-configured field rather than an overheard guess.
+async function getCustomerNames(db: D1Database, workspaceId: string, sessionIds: string[]): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  if (!sessionIds.length) return names;
+  const placeholders = sessionIds.map(() => "?").join(",");
+  // Both lookups are independent — run them in parallel rather than sequentially (D1 round-trips
+  // dominate latency here). The action_submissions capture (deliberate business field) is applied
+  // second so it wins over a passively-overheard name when both exist.
+  const [stateRes, submissionRes] = await Promise.all([
+    db.prepare(`SELECT session_id, customer_name FROM widget_conversation_state WHERE workspace_id = ? AND session_id IN (${placeholders}) AND customer_name != ''`)
+      .bind(workspaceId, ...sessionIds).all<{ session_id: string; customer_name: string }>().catch(() => null),
+    db.prepare(`SELECT session_id, data FROM action_submissions WHERE workspace_id = ? AND session_id IN (${placeholders})`)
+      .bind(workspaceId, ...sessionIds).all<{ session_id: string; data: string }>().catch(() => null),
+  ]);
+  for (const row of stateRes?.results || []) names.set(row.session_id, row.customer_name);
+  for (const row of submissionRes?.results || []) {
+    const name = extractCustomerName(row.data);
+    if (name) names.set(row.session_id, name);
+  }
+  return names;
+}
+
+// Surfaces the associated lead's status (New/Contacted/etc., see worker/leads.ts) per session,
+// so the conversation list can show the same "New" badge the Leads page does.
+async function getLeadStatuses(db: D1Database, workspaceId: string, sessionIds: string[]): Promise<Map<string, string>> {
+  const statuses = new Map<string, string>();
+  if (!sessionIds.length) return statuses;
+  try {
+    const placeholders = sessionIds.map(() => "?").join(",");
+    const result = await db.prepare(`SELECT session_id, status FROM action_submissions WHERE workspace_id = ? AND session_id IN (${placeholders}) ORDER BY updated_at DESC`)
+      .bind(workspaceId, ...sessionIds).all<{ session_id: string; status: string }>();
+    for (const row of result.results || []) {
+      if (!statuses.has(row.session_id)) statuses.set(row.session_id, row.status || "New");
+    }
+  } catch { /* action_submissions may not exist yet if no action has ever fired */ }
+  return statuses;
+}
+
+// Called when Claude's built-in name-capture tool fires — see NAME_TOOL_NAME in shared.ts.
+async function saveLearnedCustomerName(db: D1Database, workspaceId: string, sessionId: string, rawName: string): Promise<void> {
+  const name = rawName.trim().slice(0, 80);
+  if (!name || !sessionId) return;
+  await ensureWidgetSchema(db);
+  await db.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, customer_name) VALUES (?, ?, ?)
+    ON CONFLICT(workspace_id, session_id) DO UPDATE SET customer_name = excluded.customer_name`)
+    .bind(workspaceId, sessionId, name).run();
+}
+
+// Called when Claude's built-in flag_for_human tool fires — see NEEDS_HUMAN_TOOL_NAME in shared.ts.
+async function flagConversationForHuman(env: WidgetEnv, workspaceId: string, sessionId: string, reason: string): Promise<void> {
+  if (!sessionId) return;
+  await ensureWidgetSchema(env.DB);
+  await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, needs_attention, attention_reason) VALUES (?, ?, 1, ?)
+    ON CONFLICT(workspace_id, session_id) DO UPDATE SET needs_attention = 1, attention_reason = excluded.attention_reason`)
+    .bind(workspaceId, sessionId, reason.trim().slice(0, 200)).run();
+  // The assistant has just handed this to a person. Nothing else in the product is more worth
+  // interrupting someone for.
+  await notifyWorkspace(env, workspaceId, {
+    title: "A customer needs you",
+    body: reason ? String(reason).slice(0, 140) : "The assistant escalated a web chat.",
+    conversationId: sessionId, channel: "webchat",
+  }).catch(() => null);
+  await generateHandoffSummary(env, workspaceId, sessionId);
+}
+
+async function getConversationHistory(db: D1Database, workspaceId: string, sessionId: string): Promise<ChatMessage[]> {
+  const result = await db.prepare(`SELECT role, content FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC LIMIT 50`)
+    .bind(workspaceId, sessionId).all<{ role: string; content: string }>();
+  return (result.results || [])
+    .filter((r) => r.role === "user" || r.role === "assistant" || r.role === "agent")
+    .map((r) => ({ role: r.role === "user" ? "user" as const : "assistant" as const, content: r.content }));
+}
+
+// When a conversation hands off to a human (either the AI's own flag_for_human tool firing, or
+// a teammate manually taking over), this generates a short handoff brief — what's been discussed
+// so far, what the agent should focus on, and anything worth knowing about this customer — so the
+// person picking it up doesn't have to re-read the whole transcript cold. Best-effort: a failure
+// here should never block the actual handoff (the take-over itself already happened).
+async function generateHandoffSummary(env: WidgetEnv, workspaceId: string, sessionId: string): Promise<void> {
+  if (!sessionId || !env.ANTHROPIC_API_KEY) return;
+  try {
+    const history = await getConversationHistory(env.DB, workspaceId, sessionId);
+    if (!history.length) return;
+    const transcript = history.map((m) => `${m.role === "user" ? "Customer" : "Assistant"}: ${m.content}`).join("\n");
+    const prompt = `Here is a customer support conversation so far:\n\n${transcript}\n\nA human agent is now taking over this conversation. Write a brief handoff note for them. Respond with ONLY a JSON object, no markdown fences, in exactly this shape:\n{"summary": "1-2 sentences on what this conversation is about and where it left off", "focusOn": "1-2 sentences on what the agent should do or resolve next", "customerNotes": "1-2 sentences on anything worth knowing about this customer — tone, patience level, prior requests, anything already established (name, order, etc.) — or empty string if nothing notable"}`;
+    const result = await callClaude(env.ANTHROPIC_API_KEY, "You write extremely concise, practical handoff notes for customer support agents. Respond with strict JSON only.", [{ role: "user", content: prompt }]);
+    if (result.error || !result.reply) return;
+    const cleaned = result.reply.trim().replace(/^```(json)?/i, "").replace(/```$/, "").trim();
+    const parsed = JSON.parse(cleaned) as { summary?: string; focusOn?: string; customerNotes?: string };
+    const summary = { summary: (parsed.summary || "").slice(0, 400), focusOn: (parsed.focusOn || "").slice(0, 400), customerNotes: (parsed.customerNotes || "").slice(0, 400) };
+    await ensureWidgetSchema(env.DB);
+    await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, handoff_summary) VALUES (?, ?, ?)
+      ON CONFLICT(workspace_id, session_id) DO UPDATE SET handoff_summary = excluded.handoff_summary`)
+      .bind(workspaceId, sessionId, JSON.stringify(summary)).run();
+  } catch { /* handoff already happened — a missing summary just means the agent reads the transcript themselves */ }
+}
+
+// When a human hands a conversation back to the AI, the customer's most recent message may
+// still be sitting unanswered (they sent it while the human had it, but never replied). Rather
+// than leave the visitor waiting for their *next* message, have the AI answer it right away.
+async function answerIfUnanswered(env: WidgetEnv, workspaceId: string, sessionId: string): Promise<void> {
+  if (!sessionId || !env.ANTHROPIC_API_KEY) return;
+  const lastRow = await env.DB.prepare(`SELECT role FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role != 'system' ORDER BY created_at DESC LIMIT 1`)
+    .bind(workspaceId, sessionId).first<{ role: string }>();
+  if (!lastRow || lastRow.role !== "user") return;
+
+  const history = await getConversationHistory(env.DB, workspaceId, sessionId);
+  if (!history.length) return;
+  // This path answers a message the customer left unanswered during human takeover, so the question
+  // to search the site for is that last customer message, not a live one.
+  const unanswered = [...history].reverse().find((m) => m.role === "user")?.content || "";
+  const systemPrompt = await buildSystemPrompt(env.DB, workspaceId, unanswered, { channel: "webchat", bindKey: await siteKeyFor(env.DB, workspaceId, sessionId) });
+  const storedActions = await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions");
+  const actions = sanitizeActions(storedActions || []);
+  const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
+  const onCustomerName = (name: string) => saveLearnedCustomerName(env.DB, workspaceId, sessionId, name);
+  const onNeedsHuman = (reason: string) => flagConversationForHuman(env, workspaceId, sessionId, reason);
+  const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, history, actions, recordSubmission, onCustomerName, onNeedsHuman);
+  if (result.reply) {
+    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`)
+      .bind(workspaceId, sessionId, sanitizeWidgetReply(result.reply), sqliteNow()).run();
+  }
+}
+
+// If a human has taken over but hasn't replied in a while, send one brief, contextual holding
+// message so the visitor isn't left wondering if anyone saw their message. This does NOT hand
+// control back to the AI — it's just a reassurance, and only fires once per unanswered gap
+// (inserting this reply makes it the new "last message", so the check naturally goes quiet
+// until the customer writes again).
+async function maybeSendHoldingMessage(env: WidgetEnv, workspaceId: string, sessionId: string): Promise<void> {
+  if (!sessionId || !env.ANTHROPIC_API_KEY) return;
+  if (await isAiActive(env.DB, workspaceId, sessionId)) return;
+  const lastRow = await env.DB.prepare(`SELECT role, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role != 'system' ORDER BY created_at DESC LIMIT 1`)
+    .bind(workspaceId, sessionId).first<{ role: string; created_at: string }>();
+  if (!lastRow || lastRow.role !== "user") return;
+  if (msSince(lastRow.created_at) < HOLDING_MESSAGE_DELAY_SECONDS * 1000) return;
+
+  const history = await getConversationHistory(env.DB, workspaceId, sessionId);
+  if (!history.length) return;
+  const systemPrompt = (await buildSystemPrompt(env.DB, workspaceId, undefined, { channel: "webchat", bindKey: await siteKeyFor(env.DB, workspaceId, sessionId) }))
+    + "\n\nThe human teammate handling this conversation hasn't replied in a few minutes. Send ONE brief, warm holding message acknowledging the wait and reassuring the customer someone will be with them shortly — reference what they asked about if relevant. Do not attempt to answer their question yourself.";
+  const result = await callClaude(env.ANTHROPIC_API_KEY, systemPrompt, history);
+  if (result.reply) {
+    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`)
+      .bind(workspaceId, sessionId, sanitizeWidgetReply(result.reply), sqliteNow()).run();
+  }
+}
+
+async function respond(request: Request, env: WidgetEnv): Promise<Response> {
+  if (!env.DB) return widgetJson({ error: "Workspace database is unavailable." }, 503);
+  if (!env.ANTHROPIC_API_KEY) return widgetJson({ error: "This chat isn't configured yet." }, 503);
+
+  const body = await request.json() as { workspaceId?: string; message?: string; history?: unknown; sessionId?: string;
+    siteKey?: string;
+    context?: { pageUrl?: string; pageTitle?: string; referrer?: string; screen?: string; timezone?: string } };
+  // Set with data-site on the embed. It identifies the *site*, so two properties on one workspace
+  // can be answered by different assistants; the session id never could, being one per visitor.
+  const siteKey = (body.siteKey || "").trim().slice(0, 80);
+  const workspaceId = (body.workspaceId || "").trim();
+  const sessionId = (body.sessionId || "").trim().slice(0, 80);
+  // Fire-and-forget: what the agent sees is worth nothing if capturing it delays the reply.
+  await recordVisitorContext(env.DB, request, workspaceId, sessionId, body.context || {}).catch(() => null);
+  if (siteKey) {
+    await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, site_key) VALUES (?, ?, ?)
+      ON CONFLICT(workspace_id, session_id) DO UPDATE SET site_key = excluded.site_key`)
+      .bind(workspaceId, sessionId, siteKey).run().catch(() => null);
+  }
+  if (!workspaceId) return widgetJson({ error: "Missing workspace id." }, 400);
+
+  const workspace = await env.DB.prepare("SELECT id, status FROM workspaces WHERE id = ?").bind(workspaceId).first<{ id: string; status: string | null }>();
+  if (!workspace) return widgetJson({ error: "Unknown workspace." }, 404);
+  if (workspace.status === "disabled") return widgetJson({ error: "This chat is temporarily unavailable." }, 503);
+
+  await ensureWidgetSchema(env.DB);
+  if (!(await withinRateLimit(env.DB, workspaceId, sessionId))) return widgetJson({ error: "This chat is receiving too many messages right now. Please try again shortly." }, 429);
+
+  const message = (body.message || "").trim().slice(0, MAX_MESSAGE_LENGTH);
+  if (!message) return widgetJson({ error: "No message to respond to." }, 400);
+
+  // Checked here rather than only in the cron: the sweep runs every few minutes, and a visitor who
+  // returns inside that gap would otherwise slip a message into a conversation the team has closed.
+  const endedState = await readEndedState(env.DB, workspaceId, sessionId);
+  if (endedState.ended) {
+    return widgetJson({ ended: true, reason: endedState.reason || "This chat has ended." }, 409);
+  }
+  // Enforce the inactivity rule at the moment it matters, so the window is exact regardless of when
+  // the sweep last ran.
+  const autoEnd = await readAutoEndSettings(env.DB, workspaceId);
+  if (autoEnd.enabled) {
+    const last = await env.DB.prepare(`SELECT role, created_at FROM widget_messages
+      WHERE workspace_id = ? AND session_id = ? AND role != 'error' ORDER BY created_at DESC LIMIT 1`)
+      .bind(workspaceId, sessionId).first<{ role: string; created_at: string }>().catch(() => null);
+    if (last && (last.role === "assistant" || last.role === "agent")) {
+      const ageMinutes = (Date.now() - Date.parse(`${last.created_at.replace(" ", "T")}Z`)) / 60000;
+      if (Number.isFinite(ageMinutes) && ageMinutes >= autoEnd.minutes) {
+        await endChat(env.DB, workspaceId, sessionId, "auto",
+          `Chat ended automatically after ${autoEnd.minutes} minutes without a reply.`);
+        return widgetJson({ ended: true, reason: "This chat has ended. Start a new one to keep talking." }, 409);
+      }
+    }
+  }
+
+  const receivedAt = sqliteNow();
+  if (sessionId) {
+    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'user', ?, ?)`).bind(workspaceId, sessionId, message, receivedAt).run();
+  }
+
+  // A human agent can take over a conversation from the dashboard — once they do, the AI
+  // stops auto-replying so the visitor only hears from the person handling their chat.
+  if (!(await isAiActive(env.DB, workspaceId, sessionId))) {
+    return widgetJson({ reply: null, humanHandling: true, serverTime: receivedAt });
+  }
+
+  // A predefined Flow (see worker/flows.ts) takes priority over the AI assistant: if this
+  // visitor is mid-flow, or their message matches an active flow's trigger phrase, the flow
+  // engine drives the reply instead of Claude — this is the "without AI" step-by-step
+  // conversation type (fixed questions, button choices, an items carousel), as opposed to the
+  // AI assistant's free-form replies.
+  if (sessionId) {
+    const flowResult = await runFlowForWidgetMessage(env.DB, workspaceId, sessionId, message);
+    if (flowResult.handled) {
+      const repliedAt = sqliteNow();
+      for (const m of flowResult.messages) {
+        await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`)
+          .bind(workspaceId, sessionId, flowMessageToStorageText(m), repliedAt).run();
+      }
+      return widgetJson({ messages: flowResult.messages, serverTime: repliedAt });
+    }
+  }
+
+  const history = sanitizeChatMessages(body.history).slice(-6);
+  const messages = [...history, { role: "user" as const, content: message }];
+
+  // Automations (see worker/automations.ts) run next: event-reactive, tree-shaped rules that
+  // fire once per triggering message (Zapier/n8n-style), distinct from the interactive Flows
+  // engine above. First active automation whose trigger matches wins; falls through to the bare
+  // AI assistant reply below if none match.
+  if (sessionId) {
+    const automationResult = await runAutomationsForWidgetMessage(env, workspaceId, sessionId, message, messages);
+    if (automationResult.handled) {
+      const repliedAt = sqliteNow();
+      const langRow = await loadSession(env.DB, workspaceId, sessionId);
+    return widgetJson({ messages: automationResult.messages, serverTime: repliedAt, lang: langRow?.variables?.__lang || "" });
+    }
+  }
+
+  const systemPrompt = await buildSystemPrompt(env.DB, workspaceId, message, { channel: "webchat", bindKey: siteKey });
+  const storedActions = await readWorkspaceState<unknown[]>(env.DB, workspaceId, "qpy-engage-assistant-actions");
+  const actions = sanitizeActions(storedActions || []);
+  const recordSubmission = (actionName: string, data: Record<string, unknown>) => saveSubmission(env.DB, workspaceId, sessionId, actionName, "widget", data);
+  const onCustomerName = (name: string) => saveLearnedCustomerName(env.DB, workspaceId, sessionId, name);
+  const onNeedsHuman = (reason: string) => flagConversationForHuman(env, workspaceId, sessionId, reason);
+  const result = await callClaudeWithActions(env.ANTHROPIC_API_KEY, systemPrompt, messages, actions, recordSubmission, onCustomerName, onNeedsHuman);
+  if (result.error) {
+    // Without this the conversation is indistinguishable from one the business simply ignored:
+    // the visitor's message is already stored, no reply follows, and nothing anywhere says why.
+    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content) VALUES (?, ?, 'error', ?)`)
+      .bind(workspaceId, sessionId, `Assistant could not reply: ${result.error}`.slice(0, 400)).run().catch(() => null);
+    return widgetJson({ error: result.error }, result.status || 502);
+  }
+
+  const reply = result.reply ? sanitizeWidgetReply(result.reply) : result.reply;
+  const repliedAt = sqliteNow();
+  if (sessionId && reply) {
+    await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`).bind(workspaceId, sessionId, reply, repliedAt).run();
+  }
+
+  return widgetJson({ reply, serverTime: repliedAt });
+}
+
+async function pollMessages(request: Request, env: WidgetEnv): Promise<Response> {
+  if (!env.DB) return widgetJson({ error: "Workspace database is unavailable." }, 503);
+  const url = new URL(request.url);
+  const workspaceId = (url.searchParams.get("workspaceId") || "").trim();
+  const sessionId = (url.searchParams.get("sessionId") || "").trim();
+  const after = (url.searchParams.get("after") || "").trim();
+  if (!workspaceId || !sessionId) return widgetJson({ error: "Missing workspaceId or sessionId." }, 400);
+  await ensureWidgetSchema(env.DB);
+  // The poll the widget already runs doubles as the presence heartbeat, so nothing extra is asked
+  // of the visitor's browser and no new endpoint exists to keep alive.
+  await touchPresence(env.DB, workspaceId, sessionId);
+  await maybeSendHoldingMessage(env, workspaceId, sessionId);
+  const result = after
+    ? await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role NOT IN ('user','error') AND created_at > ? ORDER BY created_at ASC LIMIT 50`)
+      .bind(workspaceId, sessionId, after).all<{ role: string; content: string; created_at: string }>()
+    : await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? AND role NOT IN ('user','error') ORDER BY created_at ASC LIMIT 50`)
+      .bind(workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>();
+  const typing = await isAgentTyping(env.DB, workspaceId, sessionId);
+  const aiActive = await isAiActive(env.DB, workspaceId, sessionId);
+  // The visitor may not have sent anything since the team closed this — the poll is the only way
+  // they learn about it, so the ended state has to travel with it, not just with a reply.
+  const endedState = await readEndedState(env.DB, workspaceId, sessionId);
+  return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), typing, aiActive,
+    ended: endedState.ended, endedReason: endedState.reason });
+}
+
+// Lets a returning visitor's widget (same tab, after a page refresh) rebuild its transcript
+// instead of starting a blank conversation — unlike pollMessages, this returns every role
+// (including the visitor's own past messages and system notices) since it's rebuilding the
+// whole view, not just fetching what arrived since the last check.
+async function getHistory(request: Request, env: WidgetEnv): Promise<Response> {
+  if (!env.DB) return widgetJson({ error: "Workspace database is unavailable." }, 503);
+  const url = new URL(request.url);
+  const workspaceId = (url.searchParams.get("workspaceId") || "").trim();
+  const sessionId = (url.searchParams.get("sessionId") || "").trim();
+  if (!workspaceId || !sessionId) return widgetJson({ error: "Missing workspaceId or sessionId." }, 400);
+  await ensureWidgetSchema(env.DB);
+  const result = await env.DB.prepare(`SELECT role, content, created_at FROM widget_messages
+    WHERE workspace_id = ? AND session_id = ? AND role != 'error' ORDER BY created_at ASC LIMIT 200`)
+    .bind(workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>();
+  const aiActive = await isAiActive(env.DB, workspaceId, sessionId);
+  const endedState = await readEndedState(env.DB, workspaceId, sessionId);
+  return widgetJson({ messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), aiActive,
+    ended: endedState.ended, endedReason: endedState.reason });
+}
+
+async function getConfig(request: Request, env: WidgetEnv): Promise<Response> {
+  if (!env.DB) return widgetJson({ error: "Workspace database is unavailable." }, 503);
+  const url = new URL(request.url);
+  const workspaceId = (url.searchParams.get("workspaceId") || "").trim();
+  if (!workspaceId) return widgetJson({ error: "Missing workspace id." }, 400);
+  const workspace = await env.DB.prepare("SELECT id FROM workspaces WHERE id = ?").bind(workspaceId).first();
+  if (!workspace) return widgetJson({ error: "Unknown workspace." }, 404);
+  const appearance = await readWorkspaceState(env.DB, workspaceId, "qpy-engage-widget-appearance");
+  const config = await readWorkspaceState<{ name?: string; welcome?: string }>(env.DB, workspaceId, "qpy-engage-assistant-config-v2");
+  return widgetJson({ appearance: appearance || null, assistantName: config?.name || null, welcome: config?.welcome || null });
+}
+
+async function listConversations(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  await ensureWidgetSchema(env.DB);
+  const result = await env.DB.prepare(`SELECT session_id, role, content, created_at FROM widget_messages WHERE workspace_id = ? ORDER BY created_at ASC LIMIT 3000`)
+    .bind(session.workspaceId).all<{ session_id: string; role: string; content: string; created_at: string }>();
+
+  const bySession = new Map<string, { sessionId: string; messageCount: number; lastMessage: string; lastRole: string; firstAt: string; lastAt: string }>();
+  for (const row of result.results || []) {
+    const existing = bySession.get(row.session_id);
+    if (existing) {
+      existing.messageCount++;
+      existing.lastMessage = row.content;
+      existing.lastRole = row.role;
+      existing.lastAt = row.created_at;
+    } else {
+      bySession.set(row.session_id, { sessionId: row.session_id, messageCount: 1, lastMessage: row.content, lastRole: row.role, firstAt: row.created_at, lastAt: row.created_at });
+    }
+  }
+  // These three lookups only depend on the session list (already known), not on each other —
+  // run them concurrently so it's ~1 round-trip of latency instead of ~4 sequential ones.
+  const sessionKeys = [...bySession.keys()];
+  const [stateResult, names, leadStatuses] = await Promise.all([
+    env.DB.prepare(`SELECT session_id, ai_active, needs_attention, attention_reason FROM widget_conversation_state WHERE workspace_id = ?`)
+      .bind(session.workspaceId).all<{ session_id: string; ai_active: number; needs_attention: number; attention_reason: string }>(),
+    getCustomerNames(env.DB, session.workspaceId, sessionKeys),
+    getLeadStatuses(env.DB, session.workspaceId, sessionKeys),
+  ]);
+  const aiActiveBySession = new Map((stateResult.results || []).map((r) => [r.session_id, r.ai_active === 1]));
+  const needsAttentionBySession = new Map((stateResult.results || []).map((r) => [r.session_id, r.needs_attention === 1]));
+  const attentionReasonBySession = new Map((stateResult.results || []).map((r) => [r.session_id, r.attention_reason]));
+  const conversations = [...bySession.values()]
+    .map((c) => ({
+      ...c,
+      aiActive: aiActiveBySession.get(c.sessionId) ?? true,
+      customerName: names.get(c.sessionId) || null,
+      leadStatus: leadStatuses.get(c.sessionId) || null,
+      needsAttention: needsAttentionBySession.get(c.sessionId) ?? false,
+      attentionReason: attentionReasonBySession.get(c.sessionId) || null,
+    }))
+    .sort((a, b) => b.lastAt.localeCompare(a.lastAt));
+  return json(request, { conversations });
+}
+
+async function getMessages(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const url = new URL(request.url);
+  const sessionId = (url.searchParams.get("sessionId") || "").trim();
+  if (!sessionId) return json(request, { error: "Missing sessionId." }, 400);
+  await ensureWidgetSchema(env.DB);
+  await maybeSendHoldingMessage(env, session.workspaceId, sessionId);
+  const [result, aiActive, stateRow] = await Promise.all([
+    env.DB.prepare(`SELECT role, content, created_at FROM widget_messages WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC LIMIT 500`)
+      .bind(session.workspaceId, sessionId).all<{ role: string; content: string; created_at: string }>(),
+    isAiActive(env.DB, session.workspaceId, sessionId),
+    env.DB.prepare(`SELECT handoff_summary FROM widget_conversation_state WHERE workspace_id = ? AND session_id = ?`)
+      .bind(session.workspaceId, sessionId).first<{ handoff_summary: string }>(),
+  ]);
+  let handoffSummary = null;
+  try { handoffSummary = stateRow?.handoff_summary ? JSON.parse(stateRow.handoff_summary) : null; } catch { /* leave null if malformed */ }
+  const visitor = await readVisitorContext(env.DB, session.workspaceId, sessionId);
+  return json(request, { messages: (result.results || []).map((r) => ({ role: r.role, content: r.content, createdAt: r.created_at })), aiActive, handoffSummary, visitor });
+}
+
+// Acknowledges (clears) a conversation's "needs a human" flag — called when an agent takes
+// over, since taking over is itself the acknowledgment that the flag was seen.
+async function clearNeedsAttention(db: D1Database, workspaceId: string, sessionId: string): Promise<void> {
+  await db.prepare(`UPDATE widget_conversation_state SET needs_attention = 0 WHERE workspace_id = ? AND session_id = ?`)
+    .bind(workspaceId, sessionId).run();
+}
+
+async function setTakeover(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const body = await request.json() as { sessionId?: string; active?: boolean };
+  const sessionId = (body.sessionId || "").trim();
+  if (!sessionId) return json(request, { error: "Missing sessionId." }, 400);
+  await ensureWidgetSchema(env.DB);
+  await env.DB.prepare(`INSERT INTO widget_conversation_state (workspace_id, session_id, ai_active) VALUES (?, ?, ?)
+    ON CONFLICT(workspace_id, session_id) DO UPDATE SET ai_active = excluded.ai_active`)
+    .bind(session.workspaceId, sessionId, body.active ? 1 : 0).run();
+
+  const notice = body.active ? "You're now chatting with our AI assistant again." : "You've been connected with a team member.";
+  await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content) VALUES (?, ?, 'system', ?)`)
+    .bind(session.workspaceId, sessionId, notice).run();
+
+  if (body.active) await answerIfUnanswered(env, session.workspaceId, sessionId);
+  else {
+    await clearNeedsAttention(env.DB, session.workspaceId, sessionId);
+    // Taking over is exactly the moment the agent needs a handoff brief — generate (or
+    // regenerate, since more may have been said since any earlier AI-triggered flag) one now.
+    await generateHandoffSummary(env, session.workspaceId, sessionId);
+  }
+
+  return json(request, { ok: true, aiActive: Boolean(body.active) });
+}
+
+async function setAgentTyping(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const body = await request.json() as { sessionId?: string };
+  const sessionId = (body.sessionId || "").trim();
+  if (!sessionId) return json(request, { error: "Missing sessionId." }, 400);
+  await ensureWidgetSchema(env.DB);
+  await env.DB.prepare(`INSERT INTO widget_typing_state (workspace_id, session_id, typing_until) VALUES (?, ?, ?)
+    ON CONFLICT(workspace_id, session_id) DO UPDATE SET typing_until = excluded.typing_until`)
+    .bind(session.workspaceId, sessionId, sqliteNowPlusSeconds(TYPING_TTL_SECONDS)).run();
+  return json(request, { ok: true });
+}
+
+async function sendAgentReply(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const body = await request.json() as { sessionId?: string; message?: string };
+  const sessionId = (body.sessionId || "").trim();
+  const message = (body.message || "").trim().slice(0, MAX_MESSAGE_LENGTH);
+  if (!sessionId) return json(request, { error: "Missing sessionId." }, 400);
+  if (!message) return json(request, { error: "Write a reply before sending." }, 400);
+  await ensureWidgetSchema(env.DB);
+  await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content) VALUES (?, ?, 'agent', ?)`)
+    .bind(session.workspaceId, sessionId, message).run();
+  return json(request, { ok: true });
+}
+
+const MAX_NOTE_LENGTH = 2000;
+
+async function listNotes(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const url = new URL(request.url);
+  const sessionId = (url.searchParams.get("sessionId") || "").trim();
+  if (!sessionId) return json(request, { error: "Missing sessionId." }, 400);
+  await ensureWidgetSchema(env.DB);
+  const result = await env.DB.prepare(`SELECT author_name, note, created_at FROM widget_notes WHERE workspace_id = ? AND session_id = ? ORDER BY created_at ASC`)
+    .bind(session.workspaceId, sessionId).all<{ author_name: string; note: string; created_at: string }>();
+  return json(request, { notes: (result.results || []).map((r) => ({ authorName: r.author_name, note: r.note, createdAt: r.created_at })) });
+}
+
+async function addNote(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const body = await request.json() as { sessionId?: string; note?: string };
+  const sessionId = (body.sessionId || "").trim();
+  const note = (body.note || "").trim().slice(0, MAX_NOTE_LENGTH);
+  if (!sessionId) return json(request, { error: "Missing sessionId." }, 400);
+  if (!note) return json(request, { error: "Write a note before saving." }, 400);
+  await ensureWidgetSchema(env.DB);
+  const authorName = session.name || session.email;
+  await env.DB.prepare(`INSERT INTO widget_notes (workspace_id, session_id, author_name, note) VALUES (?, ?, ?, ?)`)
+    .bind(session.workspaceId, sessionId, authorName, note).run();
+  return json(request, { ok: true, authorName });
+}
+
+// Public document upload. The guard that matters is not the file itself but the context: a file is
+// only accepted when this visitor's conversation is genuinely parked at an upload node that is
+// asking for this exact document key. Without that check the endpoint would be an open write into
+// any workspace's database for anyone who knows a workspace id.
+async function uploadDocument(request: Request, env: WidgetEnv): Promise<Response> {
+  let form: FormData;
+  try { form = await request.formData(); }
+  catch { return widgetJson({ error: "Could not read the uploaded file." }, 400); }
+
+  const workspaceId = String(form.get("workspaceId") || "").trim();
+  const sessionId = String(form.get("sessionId") || "").trim().slice(0, 80);
+  const docKey = String(form.get("docKey") || "").trim().slice(0, 60);
+  const file = form.get("file");
+
+  if (!workspaceId || !sessionId || !docKey) return widgetJson({ error: "Missing upload details." }, 400);
+  if (!(file instanceof File)) return widgetJson({ error: "No file was attached." }, 400);
+  if (file.size > MAX_UPLOAD_BYTES) return widgetJson({ error: "That file is too large." }, 413);
+
+  const workspace = await env.DB.prepare("SELECT id, status FROM workspaces WHERE id = ?").bind(workspaceId).first<{ id: string; status: string | null }>();
+  if (!workspace) return widgetJson({ error: "Unknown workspace." }, 404);
+  if (workspace.status === "disabled") return widgetJson({ error: "This chat is temporarily unavailable." }, 503);
+
+  await ensureWidgetSchema(env.DB);
+  if (!(await withinRateLimit(env.DB, workspaceId, sessionId))) {
+    return widgetJson({ error: "Too many uploads right now. Please try again shortly." }, 429);
+  }
+
+  const session = await loadSession(env.DB, workspaceId, sessionId);
+  if (!session?.nodeId || !session.automationId) return widgetJson({ error: "This conversation is not expecting a document." }, 409);
+
+  const row = await env.DB.prepare(`SELECT flow_json FROM automations2 WHERE id = ? AND workspace_id = ?`)
+    .bind(session.automationId, workspaceId).first<{ flow_json: string }>();
+  if (!row) return widgetJson({ error: "This conversation is not expecting a document." }, 409);
+
+  const graph = toGraph(JSON.parse(row.flow_json));
+  const node = graph.nodes[session.nodeId];
+  if (!node || node.kind !== "upload") return widgetJson({ error: "This conversation is not expecting a document." }, 409);
+
+  const spec = (node.config?.documents || []).find((d) => d.key === docKey);
+  if (!spec) return widgetJson({ error: "That document is not being requested here." }, 409);
+
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const check = validateAgainstSpec(bytes, spec);
+  if (!check.ok) return widgetJson({ error: check.error }, 415);
+
+  await saveDocument(env.DB, {
+    workspaceId, contactKey: sessionId, automationId: session.automationId, nodeId: node.id,
+    docKey: spec.key, docLabel: spec.label, fileName: file.name || `${spec.key}.${check.ext}`,
+    mimeType: check.mime, channel: "webchat", bytes,
+  });
+
+  const received = await receivedKeysAtNode(env.DB, workspaceId, sessionId, node.id);
+  const outstanding = (node.config?.documents || []).filter((d) => d.required && !received.has(d.key));
+
+  // Record the upload in the transcript so the agent reviewing this conversation in Inbox can see
+  // what arrived and when, in order, rather than only a separate documents list.
+  await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'user', ?, ?)`)
+    .bind(workspaceId, sessionId, `📎 Uploaded ${spec.label}: ${file.name}`, sqliteNow()).run();
+
+  const followUp = outstanding.length === 0
+    ? await continueAfterUpload(env, workspaceId, "webchat", {
+        channel: "webchat", contactKey: sessionId, persistConversationState: true,
+        deliver: async (text: string) => {
+          await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`)
+            .bind(workspaceId, sessionId, text, sqliteNow()).run();
+          return true;
+        },
+      })
+    : null;
+
+  return widgetJson({
+    ok: true, docKey: spec.key, fileName: file.name, sizeBytes: bytes.length,
+    outstanding: outstanding.map((d) => ({ key: d.key, label: d.label })),
+    complete: outstanding.length === 0,
+    messages: followUp?.messages || [],
+  });
+}
+
+async function listConversationDocuments(request: Request, env: WidgetEnv): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const contactKey = new URL(request.url).searchParams.get("contactKey") || "";
+  if (!contactKey) return json(request, { error: "Missing contactKey" }, 400);
+  return json(request, { documents: await listDocumentsForContact(env.DB, session.workspaceId, contactKey) });
+}
+
+async function downloadDocument(request: Request, env: WidgetEnv, id: string): Promise<Response> {
+  const session = await requireSession(request, env);
+  if (session instanceof Response) return session;
+  const found = await readDocument(env.DB, session.workspaceId, id);
+  if (!found) return json(request, { error: "Not found" }, 404);
+  return new Response(found.bytes.buffer as ArrayBuffer, {
+    headers: {
+      "content-type": found.meta.mimeType || "application/octet-stream",
+      // attachment, never inline: a customer-supplied file must not be rendered in the dashboard's
+      // own origin where it could script against a logged-in agent's session.
+      "content-disposition": `attachment; filename="${found.meta.fileName.replace(/["\\]/g, "")}"`,
+      "content-security-policy": "default-src 'none'",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
+export async function handleWidgetRequest(request: Request, env: WidgetEnv): Promise<Response | null> {
+  const url = new URL(request.url);
+  if (!url.pathname.startsWith("/api/widget/")) return null;
+
+  // Public, unauthenticated widget endpoints — wildcard CORS, since any customer site embeds these.
+  if (url.pathname === "/api/widget/respond" || url.pathname === "/api/widget/config" || url.pathname === "/api/widget/poll" || url.pathname === "/api/widget/history" || url.pathname === "/api/widget/upload") {
+    if (request.method === "OPTIONS") return widgetCorsPreflight();
+    if (url.pathname === "/api/widget/respond" && request.method === "POST") return respond(request, env);
+    if (url.pathname === "/api/widget/upload" && request.method === "POST") return uploadDocument(request, env);
+    if (url.pathname === "/api/widget/config" && request.method === "GET") return getConfig(request, env);
+    if (url.pathname === "/api/widget/poll" && request.method === "GET") return pollMessages(request, env);
+    if (url.pathname === "/api/widget/history" && request.method === "GET") return getHistory(request, env);
+    return widgetJson({ error: "Not found" }, 404);
+  }
+
+  // Authenticated dashboard endpoints for reviewing and taking over widget conversations.
+  if (request.method === "OPTIONS") return corsPreflight(request);
+  if (request.headers.get("origin") && !allowedOrigin(request)) return json(request, { error: "Origin not allowed" }, 403);
+  if (!env.DB) return json(request, { error: "Workspace database is unavailable." }, 503);
+  if (url.pathname === "/api/widget/conversations" && request.method === "GET") return listConversations(request, env);
+  if (url.pathname === "/api/widget/messages" && request.method === "GET") return getMessages(request, env);
+  if (url.pathname === "/api/widget/takeover" && request.method === "POST") return setTakeover(request, env);
+  if (url.pathname === "/api/widget/reply" && request.method === "POST") return sendAgentReply(request, env);
+  if (url.pathname === "/api/widget/typing" && request.method === "POST") return setAgentTyping(request, env);
+  if (url.pathname === "/api/widget/notes" && request.method === "GET") return listNotes(request, env);
+  if (url.pathname === "/api/widget/notes" && request.method === "POST") return addNote(request, env);
+  if (url.pathname === "/api/widget/documents" && request.method === "GET") return listConversationDocuments(request, env);
+  if (url.pathname.startsWith("/api/widget/documents/") && request.method === "GET") {
+    return downloadDocument(request, env, url.pathname.slice("/api/widget/documents/".length));
+  }
+  return json(request, { error: "Not found" }, 404);
+}

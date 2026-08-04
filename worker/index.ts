@@ -1,10 +1,38 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import { handleMetaRequest, type MetaEnv } from "./meta";
+import { handleAuthRequest, requireSession, type AuthEnv } from "./auth";
+import { handleAssistantRequest, type AssistantEnv } from "./assistant";
+import { handleKnowledgeRequest, type KnowledgeEnv } from "./knowledge";
+import { handleWidgetRequest, type WidgetEnv } from "./widget";
+import { handleLeadsRequest, type LeadsEnv } from "./leads";
+import { handleCrmRequest, type CrmEnv } from "./crm";
+import { handleIntegrationsRequest, type IntegrationsEnv } from "./integrations";
+import { handleFollowupsRequest, type FollowupsEnv } from "./followups";
+import { handleConversationsRequest, type ConversationsEnv } from "./conversations";
+import { handleIdentityRequest, type IdentityEnv } from "./identity";
+import { handleSegmentsRequest, type SegmentsEnv } from "./segments";
+import { handleWaFlowsRequest, type WaFlowsEnv } from "./waflows";
+import { handleTemplatesRequest, type TemplatesEnv } from "./templates";
+import { handleLifecycleRequest, sweepStaleChats, type LifecycleEnv } from "./chatlifecycle";
+import { handleAssistantsRequest, type AssistantsEnv } from "./assistants";
+import { handlePushRequest, type PushEnv } from "./push";
+import { handleAdminRequest, type AdminEnv } from "./admin";
+import { handleCreditsRequest, type CreditsEnv } from "./credits";
+import { handleContactsRequest, type ContactsEnv } from "./contacts";
+import { handleCampaignsRequest, type CampaignsEnv } from "./campaigns";
+import { handleOtpRequest, type OtpEnv } from "./otp";
+import { handleItemsRequest, type ItemsEnv } from "./items";
+import { handleFlowsRequest, type FlowsEnv } from "./flows";
+import { handleAutomationsRequest, resumeDueAutomationWaits, type AutomationsEnv } from "./automations";
+import { sendWhatsAppText, type ConnectionRow } from "./meta";
+import { json, corsPreflight, allowedOrigin } from "./shared";
 
-interface Env {
+interface Env extends MetaEnv, AuthEnv, AssistantEnv, KnowledgeEnv, WidgetEnv, LeadsEnv, CrmEnv, IntegrationsEnv, FollowupsEnv, ConversationsEnv, IdentityEnv, SegmentsEnv, WaFlowsEnv, TemplatesEnv, LifecycleEnv, AssistantsEnv, PushEnv, AdminEnv, CreditsEnv, ContactsEnv, CampaignsEnv, OtpEnv, ItemsEnv, FlowsEnv, AutomationsEnv {
   ASSETS: Fetcher;
   DB: D1Database;
+  ANTHROPIC_API_KEY?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -29,6 +57,103 @@ const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
+    const authResponse = await handleAuthRequest(request, env);
+    if (authResponse) return authResponse;
+
+    const assistantResponse = await handleAssistantRequest(request, env);
+    if (assistantResponse) return assistantResponse;
+
+    const knowledgeResponse = await handleKnowledgeRequest(request, env);
+    if (knowledgeResponse) return knowledgeResponse;
+
+    const widgetResponse = await handleWidgetRequest(request, env);
+    if (widgetResponse) return widgetResponse;
+
+    const leadsResponse = await handleLeadsRequest(request, env);
+    if (leadsResponse) return leadsResponse;
+
+    const integrationsResponse = await handleIntegrationsRequest(request, env);
+    if (integrationsResponse) return integrationsResponse;
+
+    const crmResponse = await handleCrmRequest(request, env);
+    if (crmResponse) return crmResponse;
+
+    const followupsResponse = await handleFollowupsRequest(request, env);
+    if (followupsResponse) return followupsResponse;
+
+    const cxResponse = await handleConversationsRequest(request, env);
+    if (cxResponse) return cxResponse;
+
+    const identityResponse = await handleIdentityRequest(request, env);
+    if (identityResponse) return identityResponse;
+
+    const segmentsResponse = await handleSegmentsRequest(request, env);
+    if (segmentsResponse) return segmentsResponse;
+
+    const waFlowsResponse = await handleWaFlowsRequest(request, env);
+    if (waFlowsResponse) return waFlowsResponse;
+
+    const templatesResponse = await handleTemplatesRequest(request, env);
+    if (templatesResponse) return templatesResponse;
+
+    const lifecycleResponse = await handleLifecycleRequest(request, env);
+    if (lifecycleResponse) return lifecycleResponse;
+
+    const assistantsResponse = await handleAssistantsRequest(request, env);
+    if (assistantsResponse) return assistantsResponse;
+
+    const pushResponse = await handlePushRequest(request, env);
+    if (pushResponse) return pushResponse;
+
+    const adminResponse = await handleAdminRequest(request, env);
+    if (adminResponse) return adminResponse;
+
+    const creditsResponse = await handleCreditsRequest(request, env);
+    if (creditsResponse) return creditsResponse;
+
+    const contactsResponse = await handleContactsRequest(request, env);
+    if (contactsResponse) return contactsResponse;
+
+    const campaignsResponse = await handleCampaignsRequest(request, env);
+    if (campaignsResponse) return campaignsResponse;
+
+    const otpResponse = await handleOtpRequest(request, env);
+    if (otpResponse) return otpResponse;
+
+    const itemsResponse = await handleItemsRequest(request, env);
+    if (itemsResponse) return itemsResponse;
+
+    const flowsResponse = await handleFlowsRequest(request, env);
+    if (flowsResponse) return flowsResponse;
+
+    const automationsResponse = await handleAutomationsRequest(request, env);
+    if (automationsResponse) return automationsResponse;
+
+    const metaResponse = await handleMetaRequest(request, env);
+    if (metaResponse) return metaResponse;
+
+    if (url.pathname === "/api/state") {
+      if (request.method === "OPTIONS") return corsPreflight(request);
+      if (request.headers.get("origin") && !allowedOrigin(request)) return json(request, { error: "Origin not allowed" }, 403);
+      if (!env.DB) return json(request, { error: "Workspace database is unavailable" }, 503);
+      const session = await requireSession(request, env);
+      if (session instanceof Response) return session;
+      const scopedKey = (key: string) => `${session.workspaceId}::${key}`;
+      if (request.method === "GET") {
+        const key = url.searchParams.get("key");
+        if (!key || !/^[a-z0-9-]{1,80}$/i.test(key)) return json(request, { error: "A valid key is required" }, 400);
+        const record = await env.DB.prepare("SELECT value FROM workspace_state WHERE key = ?").bind(scopedKey(key)).first<{ value: string }>();
+        return json(request, { value: record ? JSON.parse(record.value) : null });
+      }
+      if (request.method === "PUT") {
+        const payload = await request.json() as { key?: string; value?: unknown };
+        if (!payload.key || !/^[a-z0-9-]{1,80}$/i.test(payload.key)) return json(request, { error: "A valid key is required" }, 400);
+        await env.DB.prepare("INSERT INTO workspace_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP").bind(scopedKey(payload.key), JSON.stringify(payload.value)).run();
+        return json(request, { saved: true });
+      }
+      return json(request, { error: "Method not allowed" }, 405);
+    }
+
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
       return handleImageOptimization(request, {
@@ -41,6 +166,35 @@ const worker = {
     }
 
     return handler.fetch(request, env, ctx);
+  },
+
+  // Cron Trigger (see wrangler.jsonc): resume any automation "wait" steps whose delay has elapsed.
+  // Delivery is rebuilt per pending wait from its stored channel — web chat records a widget
+  // message; WhatsApp re-sends through the Cloud API using the workspace's live connection.
+  async scheduled(_event: unknown, env: Env, ctx: ExecutionContext): Promise<void> {
+    const connByWorkspace = new Map<string, ConnectionRow | null>();
+    const makeDeliver = (row: { workspace_id: string; channel: string; contact_key: string; phone_number_id: string }): ((text: string) => Promise<boolean>) | null => {
+      if (row.channel === "whatsapp") {
+        return async (text: string) => {
+          let connection = connByWorkspace.get(row.workspace_id);
+          if (connection === undefined) {
+            connection = await env.DB.prepare("SELECT * FROM whatsapp_connections WHERE workspace_id = ?").bind(row.workspace_id).first<ConnectionRow>() || null;
+            connByWorkspace.set(row.workspace_id, connection);
+          }
+          if (!connection) return false;
+          return sendWhatsAppText(env, row.workspace_id, connection, row.contact_key, text);
+        };
+      }
+      return async (text: string) => {
+        const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+        // Closing abandoned chats is exactly the kind of thing nobody remembers to do by hand.
+        await sweepStaleChats(env.DB).catch(() => 0);
+
+        await env.DB.prepare(`INSERT INTO widget_messages (workspace_id, session_id, role, content, created_at) VALUES (?, ?, 'assistant', ?, ?)`).bind(row.workspace_id, row.contact_key, text, now).run();
+        return true;
+      };
+    };
+    ctx.waitUntil(resumeDueAutomationWaits(env, makeDeliver).then(() => undefined).catch(() => undefined));
   },
 };
 
