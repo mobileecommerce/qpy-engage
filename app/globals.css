@@ -1461,3 +1461,65 @@ h1,h2,h3{letter-spacing:-.018em}
   .primary,.secondary-btn,.side-nav button,.cx-table tbody tr,.asst-item,.seg-item,.tpl-item{transition:none}
   .primary:hover:not(:disabled),.secondary-btn:hover:not(:disabled){transform:none}
 }
+
+/* ================================================================================================
+   Phone inbox.
+
+   Below this width the three-column workspace stops being a layout problem and becomes a navigation
+   one. Stacking a short list above a short thread gives two cramped panes and no room to read
+   either; a phone wants one view at a time, with the list and the conversation as separate places
+   you move between. That is how every messaging app on the device already behaves, so it needs no
+   explaining.
+   ============================================================================================== */
+@media(max-width:760px){
+  .cx-workspace{
+    grid-template-columns:1fr;
+    /* Fill the screen minus the tab strip and the bottom nav, so the thread scrolls internally
+       rather than the page scrolling underneath a fixed composer. */
+    height:calc(100dvh - 168px);
+    min-height:0;
+    border-radius:12px;
+  }
+  /* Exactly one pane at a time. */
+  .cx-workspace .cx-feed{max-height:none;border-bottom:0}
+  .cx-workspace.has-selection .cx-feed{display:none}
+  .cx-workspace:not(.has-selection) .cx-thread{display:none}
+  .cx-workspace .cx-panel{display:none}
+
+  .cx-back{
+    display:grid;place-items:center;flex:none;
+    width:34px;height:34px;margin-left:-4px;
+    border:0;background:transparent;color:#4a5160;font-size:26px;line-height:1;border-radius:9px;
+  }
+  .cx-back:active{background:#eef0f4}
+
+  /* Touch targets. A 30px row is comfortable with a mouse and a coin-toss with a thumb. */
+  .cx-feed-row{padding:14px 13px;min-height:64px}
+  .cx-pills button{min-height:34px}
+  .cx-icon-btn,.cx-panel-toggle{width:38px;height:38px}
+  .cx-thread-head .secondary-btn{height:36px;padding:0 11px}
+
+  /* The composer sits above the home indicator, and gains room for the keyboard rather than being
+     covered by it — dvh tracks the visual viewport as the keyboard opens. */
+  .cx-composer{padding-bottom:calc(11px + env(safe-area-inset-bottom))}
+  .cx-composer textarea{font-size:16px}  /* iOS zooms any field below 16px on focus */
+  .cx-search,.cx-feed-top select,.cx-field input,.cx-field select{font-size:16px}
+
+  .cx-messages{padding:14px}
+  .cx-bubble{max-width:86%}
+  .cx-thread-sub{gap:4px 8px}
+
+  /* The panel toggle has nothing to toggle once the panel is hidden. */
+  .cx-panel-toggle{display:none}
+}
+
+/* The bottom nav is the app's primary navigation on a phone, so it must clear the home indicator
+   rather than sitting under it. */
+@media(max-width:800px){
+  .mobile-nav{padding-bottom:env(safe-area-inset-bottom)}
+}
+
+/* Standalone mode has no browser chrome, so the top of the app is flush with the status bar. */
+@media(display-mode:standalone){
+  .topbar{padding-top:env(safe-area-inset-top)}
+}

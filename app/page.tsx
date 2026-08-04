@@ -4448,7 +4448,7 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
     name==="All"?p.counts.all:name==="Unread"?p.counts.unread:name==="Needs You"?p.counts.needsYou
     :name==="New Leads"?p.counts.newLeads:name==="Follow-up"?p.counts.followUp:p.counts.closed;
 
-  return <div className={`cx-workspace${p.panelOpen?"":" panel-collapsed"}`}>
+  return <div className={`cx-workspace${p.panelOpen?"":" panel-collapsed"}${p.selected?" has-selection":""}`}>
     {/* Column 1 — feed */}
     <aside className="cx-feed">
       <div className="cx-feed-top">
@@ -4501,6 +4501,7 @@ function CxConversationsTab(p:{loading:boolean;conversations:CxConversation[];to
       {!p.selected?<div className="cx-thread-empty"><span>◌</span><h3>Select a conversation</h3><p>Pick anyone on the left to read the thread and work their lead without leaving this screen.</p></div>
       :<>
         <header className="cx-thread-head">
+          <button className="cx-back" onClick={()=>p.setSelectedId("")} aria-label="Back to conversations">‹</button>
           <span className={`cx-avatar tone-${p.selected.person?.avatarTone??0}`}>{cxInitials(p.selected.name)}</span>
           <div>
             <strong>{p.selected.name}</strong>
