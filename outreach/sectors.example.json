@@ -1,0 +1,33 @@
+[
+  {
+    "slug": "dental-hyderabad",
+    "name": "Dental clinics",
+    "searchQuery": "dental clinic in Hyderabad",
+    "city": "Hyderabad",
+    "regionCode": "IN",
+    "maxNewLeadsPerRun": 30,
+    "whatsappTemplate": "intro_local_business",
+    "emailSubject": "Quick question for {{business_name}}",
+    "emailBody": "Hi {{business_name}} team,\n\nI'm Praveen, founder of Wavely. We help {{sector}} in {{city}} answer WhatsApp enquiries automatically so no appointment request goes unanswered after hours.\n\nWould a 10-minute demo this week be useful? Just reply to this email and I'll send a couple of times.\n\nThanks,\nPraveen"
+  },
+  {
+    "slug": "salons-hyderabad",
+    "name": "Salons and spas",
+    "searchQuery": "beauty salon in Hyderabad",
+    "city": "Hyderabad",
+    "regionCode": "IN",
+    "maxNewLeadsPerRun": 30,
+    "emailSubject": "Bookings on WhatsApp for {{business_name}}",
+    "emailBody": "Hi {{business_name}} team,\n\nI'm Praveen from Wavely. We let {{sector}} in {{city}} take bookings and answer price questions on WhatsApp automatically.\n\nHappy to show you how it works in 10 minutes. Reply here if that sounds useful.\n\nThanks,\nPraveen"
+  },
+  {
+    "slug": "gyms-hyderabad",
+    "name": "Gyms and fitness studios",
+    "searchQuery": "gym in Hyderabad",
+    "city": "Hyderabad",
+    "regionCode": "IN",
+    "enabled": false,
+    "emailSubject": "Trial sign-ups on WhatsApp for {{business_name}}",
+    "emailBody": "Hi {{business_name}} team,\n\nI'm Praveen from Wavely. We help {{sector}} in {{city}} convert WhatsApp enquiries into trial visits automatically.\n\nWould a short demo be useful? Reply here and I'll send a link.\n\nThanks,\nPraveen"
+  }
+]

@@ -1,0 +1,44 @@
+# Runs the outreach pipeline on a schedule by calling the deployed app.
+# Use this when your host does not run Cloudflare Cron Triggers itself.
+#
+# Repository secrets required:
+#   OUTREACH_BASE_URL     e.g. https://wavely.example.com
+#   OUTREACH_ADMIN_TOKEN  same value as the OUTREACH_ADMIN_TOKEN env var on the server
+name: Daily outreach
+
+on:
+  schedule:
+    - cron: "0 22 * * *" # 03:30 IST: discover new leads and find emails
+    - cron: "30 3 * * *" # 09:00 IST: send the morning batch
+  workflow_dispatch:
+    inputs:
+      step:
+        description: "Pipeline step to run"
+        type: choice
+        default: all
+        options: [discover, send, all, stats]
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Pick step from schedule
+        id: step
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "step=${{ inputs.step }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "0 22 * * *" ]; then
+            echo "step=discover" >> "$GITHUB_OUTPUT"
+          else
+            echo "step=send" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run pipeline step
+        env:
+          OUTREACH_BASE_URL: ${{ secrets.OUTREACH_BASE_URL }}
+          OUTREACH_ADMIN_TOKEN: ${{ secrets.OUTREACH_ADMIN_TOKEN }}
+        run: node scripts/outreach-run.mjs "${{ steps.step.outputs.step }}"

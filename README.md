@@ -18,6 +18,19 @@ npm run build
 
 This starter does not use `wrangler.jsonc`.
 
+## Daily outreach pipeline
+
+The Worker also runs a scheduled lead-generation process: it discovers local
+businesses per sector through the Google Places API, finds a contact email on
+their website, and sends a capped morning batch of WhatsApp template messages
+or emails with follow-ups, opt-outs and reply tracking. Setup, schedule and
+the morning routine are described in [docs/outreach-process.md](docs/outreach-process.md).
+
+```bash
+npm run test:outreach                       # unit tests for the pipeline
+node scripts/outreach-run.mjs stats         # against a deployed app
+```
+
 ## Included Shape
 
 - edit site code under `app/`

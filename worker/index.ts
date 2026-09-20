@@ -1,8 +1,10 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import type { OutreachEnv } from "../lib/outreach/config";
+import { CRON_SCHEDULE, handleOutreachRequest, runStep } from "../lib/outreach/routes";
 
-interface Env {
+interface Env extends OutreachEnv {
   ASSETS: Fetcher;
   DB: D1Database;
   IMAGES: {
@@ -40,7 +42,24 @@ const worker = {
       }, allowedWidths);
     }
 
+    // Daily outreach pipeline: admin API, WhatsApp webhook, unsubscribe link.
+    const outreach = await handleOutreachRequest(request, env);
+    if (outreach) return outreach;
+
     return handler.fetch(request, env, ctx);
+  },
+
+  /**
+   * Cron Triggers. Each cron expression is mapped to a pipeline step in
+   * CRON_SCHEDULE; an unrecognised expression runs the whole pipeline.
+   */
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    const step = CRON_SCHEDULE[controller.cron] ?? "all";
+    ctx.waitUntil(
+      runStep(step, env)
+        .then((result) => console.log(`[outreach] ${step} finished`, JSON.stringify(result)))
+        .catch((err) => console.error(`[outreach] ${step} failed`, err)),
+    );
   },
 };
 
