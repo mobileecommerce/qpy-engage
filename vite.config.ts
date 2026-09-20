@@ -14,13 +14,6 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
-  // Daily outreach pipeline. Keep in sync with CRON_SCHEDULE in lib/outreach/routes.ts.
-  triggers: {
-    crons: [
-      "0 22 * * *", // discover + enrich leads (03:30 IST)
-      "30 3 * * *", // morning send (09:00 IST)
-    ],
-  },
   d1_databases: d1
     ? [
         {
